@@ -1,0 +1,72 @@
+import Foundation
+
+public struct AccountRanking: Equatable {
+    public var accountID: String
+    public var headroom: Double
+    public var bindingWindow: String?
+}
+
+/// Picks which account a session should run on.
+///
+/// A policy names the windows it cares about, which is what makes `cc-opus` and
+/// `cc-fable` different: an account whose Fable weekly window is exhausted is still a
+/// perfectly good Opus account, so the opus policy simply does not look at that
+/// window.
+public enum PolicyEngine {
+    /// Headroom on the tightest window the policy cares about, or nil when the
+    /// account is not eligible at all.
+    public static func headroom(for account: Account, usage: UsageSnapshot?,
+                                policy: Policy) -> AccountRanking? {
+        guard account.health != .needsRelogin else { return nil }
+
+        var tightest = 100.0
+        var binding: String?
+        for kind in policy.requiredWindows {
+            let windows = matching(kind: kind, model: policy.scopedModel, in: usage)
+            // No window of this kind means the account is not gated on it. A Max plan
+            // with no per-model weekly cap reports no scoped window at all, and that
+            // is unconstrained, not exhausted.
+            for window in windows where window.headroom < tightest {
+                tightest = window.headroom
+                binding = window.label
+            }
+        }
+        guard tightest >= policy.minHeadroom else { return nil }
+        return AccountRanking(accountID: account.id, headroom: tightest, bindingWindow: binding)
+    }
+
+    static func matching(kind: UsageWindow.Kind, model: String?,
+                         in usage: UsageSnapshot?) -> [UsageWindow] {
+        guard let usage else { return [] }
+        return usage.windows.filter { window in
+            guard window.kind == kind else { return false }
+            guard kind == .weeklyScoped, let model else { return true }
+            return window.modelName?.caseInsensitiveCompare(model) == .orderedSame
+        }
+    }
+
+    /// Best account for a policy, most headroom first, ties broken by priority.
+    public static func rank(accounts: [Account], usage: [String: UsageSnapshot],
+                            policy: Policy, excluding excluded: Set<String> = [])
+        -> [AccountRanking] {
+        accounts
+            .filter { !excluded.contains($0.id) }
+            .compactMap { account -> (AccountRanking, Int, String)? in
+                guard let ranking = headroom(for: account, usage: usage[account.id],
+                                             policy: policy) else { return nil }
+                return (ranking, account.priority, account.displayName)
+            }
+            .sorted { lhs, rhs in
+                if lhs.0.headroom != rhs.0.headroom { return lhs.0.headroom > rhs.0.headroom }
+                if lhs.1 != rhs.1 { return lhs.1 < rhs.1 }
+                return lhs.2.localizedCaseInsensitiveCompare(rhs.2) == .orderedAscending
+            }
+            .map(\.0)
+    }
+
+    public static func pick(accounts: [Account], usage: [String: UsageSnapshot],
+                            policy: Policy, excluding excluded: Set<String> = [])
+        -> AccountRanking? {
+        rank(accounts: accounts, usage: usage, policy: policy, excluding: excluded).first
+    }
+}

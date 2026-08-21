@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.vovean.ccmux</string>
+    <!-- Launch through `open`, not the binary directly: Launch Services registration is
+         what makes notification authorization possible. `open -g` leaves the window
+         closed and the Dock icon absent. KeepAlive is deliberately absent because
+         `open` exits immediately; if ccmux ever dies, the next cc-* command starts it. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/open</string>
+        <string>-g</string>
+        <string>/Applications/ccmux.app</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>
