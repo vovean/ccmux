@@ -100,7 +100,8 @@ public final class Engine: ObservableObject {
     private func startControlServer() {
         let handler = ControlHandler(store: store, sessions: sessionManager)
         handler.importGlobalLogin = { [weak self] in
-            await self?.importGlobalLogin() ?? "ccmux is shutting down"
+            guard let self else { return "ccmux is shutting down" }
+            return await self.importGlobalLogin()
         }
         controlHandler = handler
         let server = ControlServer { [weak handler] request in

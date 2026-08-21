@@ -52,35 +52,32 @@ public final class SessionManager {
     public init(store: Store, vault: TokenVault) {
         self.store = store
         self.vault = vault
-        vault.liveNamespaces = { [weak self] accountID in
-            self?.liveNamespaces(accountID: accountID) ?? []
-        }
-        vault.onAdopted = { [weak self] accountID, credential in
-            self?.reseedSiblings(accountID: accountID, credential: credential)
+        vault.onRefreshed = { [weak self] accountID, credential in
+            self?.reseedNamespaces(accountID: accountID, credential: credential)
         }
     }
 
-    /// Namespaces of every live session on this account, the declared lineage owner
-    /// first so it wins ties when adopting.
-    public func liveNamespaces(accountID: String) -> [URL] {
+    /// Namespaces of every live session on this account.
+    private func liveNamespaces(accountID: String) -> [URL] {
         store.sessions(forAccount: accountID)
             .filter { ClaudeSessions.isAlive($0.pid) }
-            .sorted { $0.ownsLineage && !$1.ownsLineage }
             .map(\.namespaceDir)
     }
 
-    /// After a rotation is adopted, every other live namespace on that account is still
-    /// holding the superseded refresh token, which is now dead. Re-seed them so their
-    /// Claude Code does not eventually refresh with it and get logged out.
-    private func reseedSiblings(accountID: String, credential: OAuthCredential) {
+    /// Keeps each live session's seeded credential current after a refresh.
+    ///
+    /// Not required for inference — the proxy substitutes the real token per request —
+    /// but Claude Code makes its own calls to the profile and usage endpoints straight
+    /// to Anthropic, and it re-reads the Keychain for those. Re-seeding is what keeps
+    /// the account name and `/usage` inside a long session from going stale.
+    private func reseedNamespaces(accountID: String, credential: OAuthCredential) {
+        let seeded = credential.neuteredForSession()
         for namespace in liveNamespaces(accountID: accountID) {
-            guard let existing = (try? ClaudeCredentialStore.read(namespace: namespace)) ?? nil,
-                  existing.accessToken != credential.accessToken else { continue }
             do {
-                try ClaudeCredentialStore.write(credential, namespace: namespace)
+                try ClaudeCredentialStore.write(seeded, namespace: namespace)
             } catch {
-                Log.warn("could not re-seed \(namespace.lastPathComponent) after adopting "
-                         + "a rotation for \(accountID): \(error)")
+                Log.warn("could not re-seed \(namespace.lastPathComponent) for "
+                         + "\(accountID): \(error)")
             }
         }
     }
@@ -123,11 +120,8 @@ public final class SessionManager {
                                                 withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
 
-        // Nobody owns this account's lineage yet, so this session's Claude Code is the
-        // one we adopt rotations from by preference.
-        let ownsLineage = liveNamespaces(accountID: accountID).isEmpty
         var record = SessionRecord(id: sessionID, pid: pid, port: 0, accountID: accountID,
-                                   policyName: policyName, cwd: cwd, ownsLineage: ownsLineage)
+                                   policyName: policyName, cwd: cwd)
 
         do {
             try seed(accountID: accountID, into: namespace)
@@ -148,7 +142,7 @@ public final class SessionManager {
         lock.lock(); proxies[sessionID] = proxy; lock.unlock()
         store.sessions.upsert(record)
         Log.info("session \(sessionID) pid=\(pid) account=\(account.displayName) "
-                 + "policy=\(policyName) port=\(record.port) ownsLineage=\(ownsLineage)")
+                 + "policy=\(policyName) port=\(record.port)")
 
         return ControlSessionInfo(sessionID: sessionID, namespaceDir: namespace.path,
                                   port: record.port, accountID: accountID,
@@ -172,15 +166,13 @@ public final class SessionManager {
             })
     }
 
-    /// Writes the account's credential where Claude Code will look for it, with a
-    /// non-expired access token so startup never has to refresh.
+    /// Writes the account's credential where Claude Code will look for it, in the form
+    /// it cannot refresh — see `OAuthCredential.neuteredForSession`.
     private func seed(accountID: String, into namespace: URL) throws {
         guard var credential = vault.credential(for: accountID) else {
             throw SessionError.noCredential(accountID)
         }
-        // Only refresh when no live session's Claude Code owns this lineage; racing it
-        // is exactly how one of the two copies gets invalidated.
-        if credential.isAccessTokenExpired, liveNamespaces(accountID: accountID).isEmpty {
+        if credential.isAccessTokenExpired {
             let semaphore = DispatchSemaphore(value: 0)
             var refreshed: OAuthCredential?
             Task { [vault] in
@@ -189,12 +181,8 @@ public final class SessionManager {
             }
             _ = semaphore.wait(timeout: .now() + 20)
             if let refreshed { credential = refreshed }
-        } else if credential.isAccessTokenExpired {
-            // A sibling session owns the lineage; take whatever it last rotated to.
-            _ = vault.adoptFromNamespaces(accountID)
-            credential = vault.credential(for: accountID) ?? credential
         }
-        try ClaudeCredentialStore.write(credential, namespace: namespace)
+        try ClaudeCredentialStore.write(credential.neuteredForSession(), namespace: namespace)
     }
 
     // MARK: - Reassignment
@@ -213,19 +201,7 @@ public final class SessionManager {
         }
         guard existing.accountID != accountID else { return }
 
-        // This namespace is about to be overwritten. If Claude Code rotated the old
-        // account's credential in it and we have not adopted that yet, adopting now is
-        // the last chance — otherwise the rotation is lost and the old account is left
-        // holding a dead refresh token.
-        if existing.ownsLineage {
-            vault.adoptFromNamespaces(existing.accountID)
-        }
-
-        let ownsLineage = liveNamespaces(accountID: accountID).isEmpty
-        store.sessions.mutate(sessionID) {
-            $0.accountID = accountID
-            $0.ownsLineage = ownsLineage
-        }
+        store.sessions.mutate(sessionID) { $0.accountID = accountID }
         // Re-seed so a restart of this session boots on the new account too. A failure
         // here is not fatal — the proxy already serves the new account — but it must
         // not be silent.
@@ -248,13 +224,19 @@ public final class SessionManager {
         guard globallyEnabled, record.autoSwitchEnabled(default: globallyEnabled) else {
             return .disabled
         }
-        let replacement: AccountRanking
-        do {
-            replacement = try chooseAccount(policyName: record.policyName,
-                                            excluding: [record.accountID])
-        } catch {
-            return .noneEligible
-        }
+
+        // Prefer an account with headroom on every window it reports, then fall back to
+        // the launch policy. The two differ when the session has switched models
+        // in-flight: `cc-opus` deliberately ignores the per-model weekly window, so the
+        // window that actually ran out may be one its own policy does not look at.
+        let accounts = store.accounts.all()
+        let usage = store.allUsage()
+        let excluded: Set<String> = [record.accountID]
+        let replacement = PolicyEngine.pick(accounts: accounts, usage: usage,
+                                            policy: PolicyEngine.everyWindow,
+                                            excluding: excluded)
+            ?? (try? chooseAccount(policyName: record.policyName, excluding: excluded))
+        guard let replacement else { return .noneEligible }
         do {
             try assign(sessionID: sessionID, accountID: replacement.accountID)
             return .switched(from: record.accountID, to: replacement.accountID)
@@ -272,15 +254,8 @@ public final class SessionManager {
         proxy?.stop()
 
         if let record = store.sessions.get(sessionID) {
-            // Claude Code may have rotated the credential here, whether or not this
-            // namespace was the declared owner, and the namespace is about to be
-            // deleted — so adopt unconditionally rather than losing the rotation.
-            if let rotated = (try? ClaudeCredentialStore.read(namespace: record.namespaceDir))
-                ?? nil,
-               !rotated.isAccessTokenExpired,
-               rotated.accessToken != vault.credential(for: record.accountID)?.accessToken {
-                vault.store(rotated, for: record.accountID)
-            }
+            // Nothing to salvage: the seeded credential carries no refresh token, so
+            // Claude Code cannot have rotated anything in here.
             try? ClaudeCredentialStore.clear(namespace: record.namespaceDir)
             try? FileManager.default.removeItem(at: record.namespaceDir)
         }

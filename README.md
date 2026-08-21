@@ -67,6 +67,15 @@ An alias names a *requirement*, not an account. `cc-fable` picks whichever accou
 the most Fable weekly headroom; `cc-opus` ignores that window entirely, so an account
 with Fable spent is still a perfectly good Opus account. Edit the policies in Settings.
 
+**An alias picks the subscription, not the model.** It does not pass `--model`, and
+`/model` inside the session keeps working exactly as it does normally — switch whenever
+you like. The alias only decides which subscription the session starts on, and you can
+change that yourself from the Sessions screen at any point.
+
+If you do switch to a model whose own weekly window is spent on that account, the request
+gets refused and auto-switch moves the session — and for that move it looks for an account
+with headroom on *every* window rather than only the ones the launch policy cared about.
+
     ccmux status                       # accounts, windows, live sessions
     ccmux assign <session-id> <acct>   # same as the Sessions screen picker
     ccmux run --policy opus --account <id>   # pin one launch to one account
@@ -99,19 +108,29 @@ keeps going on the exhausted account and moves as soon as Claude Code goes idle,
 cache is dropped between turns rather than inside one. **Immediately** switches on the very
 next request.
 
-## Credentials and the refresh race
+## Credentials, and why nothing races
 
 Anthropic rotates refresh tokens, so two independent refreshers on one credential lineage
-means whichever refreshes second is told `invalid_grant` and is logged out. ccmux
-therefore lets Claude Code refresh the credential in the session namespace that owns a
-lineage and *adopts* the rotated value; it only runs the refresh grant itself for accounts
-no live session owns. When a refresh fails permanently, that account is marked as needing
-re-login — red dot, notification, and a **Sign in again** button.
+means whichever refreshes second is told `invalid_grant` and is logged out. A session's
+Claude Code would otherwise be that second refresher, every eight hours.
+
+ccmux removes the race rather than coordinating it. Each session namespace is seeded with
+a live access token, an expiry a year out, and **no refresh token at all** — so Claude
+Code never schedules a refresh and could not perform one anyway. (Verified against Claude
+Code 2.1.238: it reports `loggedIn: true` for the right account with such a credential.)
+Inference is unaffected because the proxy substitutes the real token on every request, and
+ccmux re-seeds the namespace whenever it refreshes, so Claude Code's own profile and
+`/usage` calls keep working too.
+
+That makes ccmux the only holder of a refresh token, by construction. When its refresh
+fails permanently, that account is marked as needing re-login — red dot on the burger
+button and on the Accounts entry, a notification, and a **Sign in again** button that
+opens in that account's Chrome profile.
 
 One consequence worth knowing: if you also stay logged in globally with an account ccmux
-manages, Claude Code's global login and ccmux hold the same lineage, and eventually one of
-them will lose it. Either keep the global login on an account ccmux does not manage, or
-expect to re-login once and let ccmux own it from then on.
+manages, Claude Code's *global* login still holds its own refresh token for that same
+lineage, and eventually one of the two will lose it. Either keep the global login on an
+account ccmux does not manage, or sign in once more and let ccmux own it from then on.
 
 Keychain access shells out to `/usr/bin/security` rather than using Security.framework: an
 in-process call binds the item's ACL to the calling binary, which is re-signed on every

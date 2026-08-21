@@ -46,6 +46,14 @@ public enum PolicyEngine {
     /// Ranking value for an account with no usage data at all.
     public static let unknownHeadroom: Double = 50
 
+    /// Requires headroom on every window an account reports, including all per-model
+    /// ones (`scopedModel: nil` matches them all). Used when a session has to move off
+    /// an exhausted account and the window that ran out may not be one its launch policy
+    /// cares about.
+    public static let everyWindow = Policy(
+        name: "every-window",
+        requiredWindows: [.session, .weeklyAll, .weeklyScoped, .other])
+
     /// Best account for a policy, most headroom first, ties broken by priority.
     public static func rank(accounts: [Account], usage: [String: UsageSnapshot],
                             policy: Policy, excluding excluded: Set<String> = [])

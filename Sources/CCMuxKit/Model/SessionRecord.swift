@@ -15,13 +15,10 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
     /// permanently opt out every session started while auto-switch was off, which is
     /// indistinguishable from the feature being broken.
     public var autoSwitchOverride: Bool?
-    /// Set when this session's namespace owns the account's credential lineage,
-    /// i.e. Claude Code is allowed to refresh it and we adopt the result.
-    public var ownsLineage: Bool
 
     public init(id: String, pid: Int32, port: UInt16, accountID: String,
                 policyName: String, cwd: String, startedAt: Date = Date(),
-                autoSwitchOverride: Bool? = nil, ownsLineage: Bool = false) {
+                autoSwitchOverride: Bool? = nil) {
         self.id = id
         self.pid = pid
         self.port = port
@@ -30,7 +27,6 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
         self.cwd = cwd
         self.startedAt = startedAt
         self.autoSwitchOverride = autoSwitchOverride
-        self.ownsLineage = ownsLineage
     }
 
     public var namespaceDir: URL { Paths.namespace(id) }

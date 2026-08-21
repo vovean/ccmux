@@ -4,12 +4,12 @@ import Testing
 
 @Suite("Policy selection")
 struct PolicyEngineTests {
-    static func account(_ id: String, priority: Int = 0,
+    public static func account(_ id: String, priority: Int = 0,
                         health: AccountHealth = .ok) -> Account {
         Account(id: id, label: id, priority: priority, health: health)
     }
 
-    static func snapshot(session: Double, weekly: Double, fable: Double? = nil)
+    public static func snapshot(session: Double, weekly: Double, fable: Double? = nil)
         -> UsageSnapshot {
         var windows = [
             UsageWindow(kind: .session, label: "5-hour", percent: session),
@@ -22,8 +22,8 @@ struct PolicyEngineTests {
         return UsageSnapshot(windows: windows)
     }
 
-    static let opus = Policy(name: "opus", requiredWindows: [.session, .weeklyAll])
-    static let fable = Policy(name: "fable",
+    public static let opus = Policy(name: "opus", requiredWindows: [.session, .weeklyAll])
+    public static let fable = Policy(name: "fable",
                               requiredWindows: [.session, .weeklyAll, .weeklyScoped],
                               scopedModel: "Fable")
 
@@ -119,5 +119,42 @@ struct PolicyEngineTests {
         let accounts = [Self.account("a")]
         let usage = ["a": Self.snapshot(session: 80, weekly: 0)]
         #expect(PolicyEngine.pick(accounts: accounts, usage: usage, policy: policy) == nil)
+    }
+}
+
+@Suite("Exhaustion fallback")
+struct EveryWindowPolicyTests {
+    /// A session launched as `cc-opus` may switch to Fable in-flight, so the window that
+    /// actually ran out can be one its launch policy deliberately ignores. The
+    /// every-window policy is what the auto-switch tries first.
+    @Test func everyWindowRejectsAnyExhaustedWindow() {
+        let account = PolicyEngineTests.account("a")
+        let fableSpent = PolicyEngineTests.snapshot(session: 10, weekly: 10, fable: 100)
+        #expect(PolicyEngine.headroom(for: account, usage: fableSpent,
+                                      policy: PolicyEngine.everyWindow) == nil)
+        // The opus policy still accepts it, which is the whole point of the two policies.
+        #expect(PolicyEngine.headroom(for: account, usage: fableSpent,
+                                      policy: PolicyEngineTests.opus) != nil)
+    }
+
+    @Test func everyWindowPrefersAFullyHealthyAccount() throws {
+        let accounts = [PolicyEngineTests.account("fable-spent"),
+                        PolicyEngineTests.account("healthy")]
+        let usage = ["fable-spent": PolicyEngineTests.snapshot(session: 5, weekly: 5,
+                                                              fable: 100),
+                     "healthy": PolicyEngineTests.snapshot(session: 40, weekly: 40,
+                                                           fable: 40)]
+        let pick = try #require(PolicyEngine.pick(accounts: accounts, usage: usage,
+                                                  policy: PolicyEngine.everyWindow))
+        #expect(pick.accountID == "healthy")
+    }
+
+    /// With no per-model cap at all there is nothing extra to satisfy, so the strict
+    /// policy must not reject a perfectly good account.
+    @Test func everyWindowAcceptsAPlanWithNoPerModelCap() {
+        #expect(PolicyEngine.headroom(for: PolicyEngineTests.account("a"),
+                                      usage: PolicyEngineTests.snapshot(session: 20,
+                                                                        weekly: 20),
+                                      policy: PolicyEngine.everyWindow) != nil)
     }
 }

@@ -78,3 +78,53 @@ struct CredentialTests {
         #expect(Keychain.quote("a\"b\\c") == "\"a\\\"b\\\\c\"")
     }
 }
+
+@Suite("Seeded session credentials")
+struct SeededCredentialTests {
+    /// The load-bearing property: a session's Claude Code must not be able to rotate the
+    /// lineage, because whichever refresher lost that race would be logged out for good.
+    @Test func seededCredentialCannotBeRefreshed() {
+        let live = OAuthCredential(accessToken: "sk-ant-oat01-live",
+                                   refreshToken: "sk-ant-ort01-secret",
+                                   expiresAt: Date().addingTimeInterval(3600),
+                                   refreshTokenExpiresAt: Date().addingTimeInterval(86400),
+                                   scopes: ["user:inference"], subscriptionType: "max")
+        let seeded = live.neuteredForSession()
+
+        #expect(seeded.refreshToken == nil)
+        #expect(seeded.refreshTokenExpiresAt == nil)
+        #expect(seeded.accessToken == live.accessToken)
+        // Everything else is carried through so Claude Code reads the same account.
+        #expect(seeded.scopes == live.scopes)
+        #expect(seeded.subscriptionType == "max")
+    }
+
+    /// And it must not look like it needs refreshing either, or Claude Code would try
+    /// and hard-fail with no refresh token to try it with.
+    @Test func seededCredentialLooksFreshForAYear() throws {
+        let seeded = OAuthCredential(accessToken: "t", refreshToken: "r",
+                                     expiresAt: Date().addingTimeInterval(60))
+            .neuteredForSession()
+        #expect(!seeded.isAccessTokenExpired)
+        let expiry = try #require(seeded.expiresAt)
+        #expect(expiry.timeIntervalSinceNow > 300 * 86400)
+    }
+
+    /// The refresh token has to survive in ccmux's own copy — only the seeded one is
+    /// stripped.
+    @Test func neuteringDoesNotMutateTheOriginal() {
+        let live = OAuthCredential(accessToken: "t", refreshToken: "r",
+                                   expiresAt: Date().addingTimeInterval(60))
+        _ = live.neuteredForSession()
+        #expect(live.refreshToken == "r")
+    }
+
+    @Test func seededCredentialSurvivesAKeychainRoundTrip() throws {
+        let seeded = OAuthCredential(accessToken: "sk-ant-oat01-x", refreshToken: "r",
+                                     expiresAt: Date(), scopes: ["user:inference"])
+            .neuteredForSession()
+        let reparsed = try #require(OAuthCredential(json: seeded.jsonString()))
+        #expect(reparsed.refreshToken == nil)
+        #expect(!reparsed.isAccessTokenExpired)
+    }
+}

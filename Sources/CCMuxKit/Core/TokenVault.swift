@@ -2,46 +2,38 @@ import Foundation
 
 /// Owns every account's credential and hands the proxy a usable bearer token.
 ///
-/// Refresh ownership is the delicate part. Anthropic rotates refresh tokens, so two
-/// independent refreshers on one lineage means whichever refreshes second is told
-/// `invalid_grant` and is logged out. Claude Code refreshes the credential in its own
-/// session namespace and we deliberately let it, so the rule is:
+/// ccmux is the *only* refresher, by construction rather than by convention. Anthropic
+/// rotates refresh tokens, so two independent refreshers on one lineage means whichever
+/// refreshes second is told `invalid_grant` and is logged out — and a session's Claude
+/// Code would otherwise be the second refresher.
 ///
-/// - while *any* live session holds a namespace for an account, ccmux never runs the
-///   refresh grant for it — it adopts whatever Claude Code rotated to instead;
-/// - ccmux only runs the grant for an account no live session holds;
-/// - adoption looks at every live namespace, not just the one flagged as lineage
-///   owner: `ownsLineage` is ccmux-side bookkeeping and cannot stop a second Claude
-///   Code from refreshing a credential it was seeded with, so a rotation by a
-///   non-owner must still be picked up or it would be deleted with its namespace;
-/// - a failed refresh with a permanent cause marks the account as needing re-login
-///   rather than being retried into the ground.
+/// The way out is `neuteredForSession`: a session namespace is seeded with a live access
+/// token, an expiry far enough out that Claude Code never schedules a refresh, and no
+/// refresh token at all, so it cannot rotate the lineage even if it tried. Verified
+/// against Claude Code 2.1.238: it reports `loggedIn: true` for the right account with
+/// such a credential. Inference is unaffected because the proxy substitutes the real
+/// token per request, and the seeded token is refreshed in place so Claude Code's own
+/// direct calls keep working too.
 public final class TokenVault {
     /// Called when a refresh fails. Permanent failures are the re-login signal.
     public var onRefreshFailure: ((String, OAuthError) -> Void)?
-    /// Called when a rotated credential could not be written to the Keychain. That is
-    /// a real credential-loss risk: the rotation is live on Anthropic's side but only
-    /// in memory here, so a restart would come back holding a dead refresh token.
+    /// Called when a rotated credential could not be written to the Keychain. That is a
+    /// real credential-loss risk: the rotation is live on Anthropic's side but only in
+    /// memory here, so a restart would come back holding a dead refresh token.
     public var onPersistFailure: ((String, Error) -> Void)?
     /// Called when a credential changes, so the UI can reflect a healthy account.
     public var onCredentialChanged: ((String, OAuthCredential) -> Void)?
-    /// Namespaces of every live session using this account, owner first.
-    public var liveNamespaces: ((String) -> [URL])?
-    /// Called after adopting a rotation so sibling namespaces can be re-seeded; their
-    /// Claude Code is otherwise left holding a refresh token that is now dead.
-    public var onAdopted: ((String, OAuthCredential) -> Void)?
+    /// Called after a refresh so live session namespaces can be re-seeded with the new
+    /// access token, keeping Claude Code's own profile and usage calls working.
+    public var onRefreshed: ((String, OAuthCredential) -> Void)?
 
     private let lock = NSLock()
     private var credentials: [String: OAuthCredential] = [:]
-    private var namespaceReadAt: [URL: Date] = [:]
     private var inFlight: [String: Task<OAuthCredential?, Never>] = [:]
     private let client: OAuthClient
 
     /// Refresh this far ahead of expiry so a request rarely has to wait on one.
     private static let refreshLead: TimeInterval = 10 * 60
-    /// Namespace items only change when Claude Code refreshes, roughly every eight
-    /// hours, so re-reading them on every request would be pure subprocess cost.
-    private static let namespaceCacheTTL: TimeInterval = 15
     private static let blockingRefreshTimeout: TimeInterval = 20
 
     public init(client: OAuthClient = OAuthClient()) {
@@ -90,19 +82,8 @@ public final class TokenVault {
 
     /// The token to put on the wire right now. Called off the main thread by the proxy.
     public func bearerToken(for accountID: String) -> String? {
-        if let adopted = adoptFromNamespaces(accountID) { return adopted }
-
         guard let credential = credential(for: accountID) else { return nil }
         if !credential.isAccessTokenExpired { return credential.accessToken }
-
-        // A live session's Claude Code owns this lineage and refreshes it on its own
-        // schedule. Running the grant here would rotate the token underneath it and
-        // log that session out mid-flight, so serve the stale token instead: the 401
-        // it earns is exactly what makes Claude Code refresh, and the next request
-        // adopts the result.
-        if !(liveNamespaces?(accountID) ?? []).isEmpty {
-            return credential.accessToken
-        }
 
         let semaphore = DispatchSemaphore(value: 0)
         var refreshed: String?
@@ -111,19 +92,14 @@ public final class TokenVault {
             semaphore.signal()
         }
         _ = semaphore.wait(timeout: .now() + Self.blockingRefreshTimeout)
+        // Falling back to the expired token beats failing the request outright: the
+        // server may still honour it inside its own grace period.
         return refreshed ?? credential.accessToken
     }
 
-    /// Refreshes ahead of expiry for the accounts that matter, so `bearerToken` almost
-    /// never has to block.
+    /// Refreshes ahead of expiry so `bearerToken` almost never has to block.
     public func refreshExpiring(accountIDs: [String]) async {
         for id in accountIDs {
-            // Ownership decides the whole strategy, so branch on it first rather than
-            // computing expiry arithmetic that an owned account will never use.
-            if !(liveNamespaces?(id) ?? []).isEmpty {
-                _ = adoptFromNamespaces(id)
-                continue
-            }
             guard let credential = credential(for: id), let expiresAt = credential.expiresAt,
                   Date().addingTimeInterval(Self.refreshLead) >= expiresAt else { continue }
             _ = await refresh(id)
@@ -141,6 +117,7 @@ public final class TokenVault {
             do {
                 let rotated = try await self.client.refresh(existing)
                 self.store(rotated, for: accountID)
+                self.onRefreshed?(accountID, rotated)
                 Log.info("refreshed credential for account \(accountID)")
                 return rotated
             } catch let error as OAuthError {
@@ -163,58 +140,25 @@ public final class TokenVault {
         lock.lock(); defer { lock.unlock() }
         return inFlight[accountID]
     }
+}
 
-    /// Picks up a credential Claude Code rotated in any of this account's live session
-    /// namespaces, newest expiry wins.
+extension OAuthCredential {
+    /// How far out a seeded credential's expiry is pushed. Long enough that Claude Code
+    /// never schedules a refresh over any realistic session.
+    static let seededLifetime: TimeInterval = 365 * 86400
+
+    /// The form written into a session's Keychain namespace: a live access token that
+    /// Claude Code cannot refresh and does not think needs refreshing.
     ///
-    /// Every live namespace is read, not just the one flagged `ownsLineage`: that flag
-    /// is ccmux bookkeeping and cannot stop a second Claude Code from refreshing a
-    /// credential it was seeded with, so a rotation by a non-owner has to be picked up
-    /// here or it would be deleted along with its namespace.
-    @discardableResult
-    public func adoptFromNamespaces(_ accountID: String) -> String? {
-        let namespaces = liveNamespaces?(accountID) ?? []
-        guard !namespaces.isEmpty else { return nil }
-        let mine = credential(for: accountID)
-
-        var freshest: OAuthCredential?
-        var readAny = false
-        for namespace in namespaces {
-            // Cached per namespace, so a reassignment changes the key and stale
-            // entries become unreachable rather than needing explicit invalidation.
-            if let readAt = lastRead(namespace),
-               Date().timeIntervalSince(readAt) < Self.namespaceCacheTTL { continue }
-            readAny = true
-            markRead(namespace)
-            guard let candidate = (try? ClaudeCredentialStore.read(namespace: namespace)) ?? nil,
-                  !candidate.isAccessTokenExpired else { continue }
-            if let best = freshest,
-               (best.expiresAt ?? .distantPast) >= (candidate.expiresAt ?? .distantPast) {
-                continue
-            }
-            freshest = candidate
-        }
-
-        guard readAny else {
-            guard let mine, !mine.isAccessTokenExpired else { return nil }
-            return mine.accessToken
-        }
-        guard let freshest else { return nil }
-        guard freshest.accessToken != mine?.accessToken else { return freshest.accessToken }
-
-        Log.info("adopted Claude Code's rotated credential for account \(accountID)")
-        store(freshest, for: accountID)
-        onAdopted?(accountID, freshest)
-        return freshest.accessToken
+    /// Dropping the refresh token is the load-bearing part. Leaving it would let a
+    /// session's Claude Code rotate the lineage on its own schedule, and whichever
+    /// refresher lost that race — ccmux, or another session on the same account — would
+    /// be permanently logged out.
+    public func neuteredForSession(now: Date = Date()) -> OAuthCredential {
+        var copy = self
+        copy.refreshToken = nil
+        copy.refreshTokenExpiresAt = nil
+        copy.expiresAt = now.addingTimeInterval(Self.seededLifetime)
+        return copy
     }
-
-    private func lastRead(_ namespace: URL) -> Date? {
-        lock.lock(); defer { lock.unlock() }
-        return namespaceReadAt[namespace]
-    }
-
-    private func markRead(_ namespace: URL) {
-        lock.lock(); namespaceReadAt[namespace] = Date(); lock.unlock()
-    }
-
 }
