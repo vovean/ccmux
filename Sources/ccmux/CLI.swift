@@ -160,7 +160,8 @@ enum CLI {
         if !status.sessions.isEmpty {
             print("\nSessions:")
             for session in status.sessions {
-                print("    \(session.sessionID.prefix(8))  pid \(session.pid)  "
+                // Printed in full: `ccmux assign` and `ccmux end` take the whole id.
+                print("    \(session.sessionID)  pid \(session.pid)  "
                       + "\(session.accountLabel)  policy \(session.policyName)")
             }
         }

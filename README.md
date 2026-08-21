@@ -12,9 +12,17 @@ Two mechanisms, both verified against the Claude Code binary rather than guessed
 **Per-session credential namespace.** `CLAUDE_SECURESTORAGE_CONFIG_DIR=<dir>` makes
 Claude Code read its OAuth credential from Keychain service
 `"Claude Code-credentials-" + sha256(NFC(dir))[0..8]` instead of the global
-`"Claude Code-credentials"`. ccmux seeds that item, so Claude Code genuinely *is* the
-assigned account — right email, right `/usage`, right limit banners. Config, history and
-`~/.claude/projects` stay shared, unlike `CLAUDE_CONFIG_DIR`.
+`"Claude Code-credentials"`. ccmux seeds that item, so the credential Claude Code
+authenticates with really is the assigned account's — an unseeded namespace reports "Not
+logged in", which is how that was confirmed. Config, history and `~/.claude/projects` stay
+shared, unlike `CLAUDE_CONFIG_DIR`.
+
+One honest caveat: only *credentials* are namespaced. The account **name** Claude Code
+prints comes from `oauthAccount` in the shared `~/.claude.json`, which is whichever
+account logged in last anywhere on the Mac — so `claude auth status` inside a session can
+show a different email than the account actually serving it. Billing, limits and
+`/usage` follow the credential and are correct; the displayed name can lie. ccmux's own
+Accounts and Sessions screens are the reliable answer.
 
 **Per-session loopback proxy.** `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>` with
 `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1` keeps full OAuth subscription mode, and the
@@ -131,6 +139,7 @@ One consequence worth knowing: if you also stay logged in globally with an accou
 manages, Claude Code's *global* login still holds its own refresh token for that same
 lineage, and eventually one of the two will lose it. Either keep the global login on an
 account ccmux does not manage, or sign in once more and let ccmux own it from then on.
+Logging in globally as a *different* account is fine and does not disturb ccmux's copies.
 
 Keychain access shells out to `/usr/bin/security` rather than using Security.framework: an
 in-process call binds the item's ACL to the calling binary, which is re-signed on every

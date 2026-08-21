@@ -10,10 +10,11 @@ import Foundation
 /// The way out is `neuteredForSession`: a session namespace is seeded with a live access
 /// token, an expiry far enough out that Claude Code never schedules a refresh, and no
 /// refresh token at all, so it cannot rotate the lineage even if it tried. Verified
-/// against Claude Code 2.1.238: it reports `loggedIn: true` for the right account with
-/// such a credential. Inference is unaffected because the proxy substitutes the real
-/// token per request, and the seeded token is refreshed in place so Claude Code's own
-/// direct calls keep working too.
+/// against Claude Code 2.1.238: `claude auth status` in such a namespace reports
+/// `loggedIn: true`, and an unseeded namespace reports not logged in, so the credential
+/// really is the one being used. Inference is unaffected because the proxy substitutes
+/// the real token per request, and the seeded token is refreshed in place so Claude
+/// Code's own calls to the profile and usage endpoints keep working.
 public final class TokenVault {
     /// Called when a refresh fails. Permanent failures are the re-login signal.
     public var onRefreshFailure: ((String, OAuthError) -> Void)?
@@ -29,7 +30,8 @@ public final class TokenVault {
 
     private let lock = NSLock()
     private var credentials: [String: OAuthCredential] = [:]
-    private var inFlight: [String: Task<OAuthCredential?, Never>] = [:]
+    private var inFlight: [String: (id: UInt64, task: Task<OAuthCredential?, Never>)] = [:]
+    private var nextRefreshID: UInt64 = 0
     private let client: OAuthClient
 
     /// Refresh this far ahead of expiry so a request rarely has to wait on one.
@@ -75,7 +77,7 @@ public final class TokenVault {
     public func forget(_ accountID: String) {
         lock.lock()
         credentials.removeValue(forKey: accountID)
-        inFlight.removeValue(forKey: accountID)?.cancel()
+        inFlight.removeValue(forKey: accountID)?.task.cancel()
         lock.unlock()
         try? AccountCredentialStore.delete(accountID)
     }
@@ -110,8 +112,26 @@ public final class TokenVault {
     /// loser gets the same rotated credential rather than nothing.
     @discardableResult
     public func refresh(_ accountID: String) async -> OAuthCredential? {
-        if let running = existingRefresh(accountID) { return await running.value }
+        let claim = claimRefresh(accountID)
+        let result = await claim.task.value
+        release(accountID, id: claim.id)
+        return result
+    }
 
+    /// Look-up and insert must be one critical section. Two callers that each saw an
+    /// empty slot would both POST the same refresh token, and because Anthropic rotates
+    /// them the loser gets `invalid_grant` — which marks a perfectly healthy account as
+    /// needing re-login. The 20-second timer's own ticks can overlap (a usage fetch
+    /// alone allows 15s), and `SessionManager.seed` refreshes from a control-socket
+    /// thread, so this is reachable without anything unusual happening.
+    private func claimRefresh(_ accountID: String)
+        -> (id: UInt64, task: Task<OAuthCredential?, Never>) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let running = inFlight[accountID] { return running }
+
+        nextRefreshID += 1
+        let id = nextRefreshID
         let task = Task<OAuthCredential?, Never> { [weak self] in
             guard let self, let existing = self.credential(for: accountID) else { return nil }
             do {
@@ -130,15 +150,16 @@ public final class TokenVault {
                 return nil
             }
         }
-        lock.lock(); inFlight[accountID] = task; lock.unlock()
-        let result = await task.value
-        lock.lock(); inFlight.removeValue(forKey: accountID); lock.unlock()
-        return result
+        inFlight[accountID] = (id, task)
+        return (id, task)
     }
 
-    private func existingRefresh(_ accountID: String) -> Task<OAuthCredential?, Never>? {
-        lock.lock(); defer { lock.unlock() }
-        return inFlight[accountID]
+    /// Only the caller that created the entry may clear it, or a finishing refresh could
+    /// delete a newer one's slot and reopen the race it just closed.
+    private func release(_ accountID: String, id: UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        if inFlight[accountID]?.id == id { inFlight.removeValue(forKey: accountID) }
     }
 }
 

@@ -41,8 +41,12 @@ public final class Engine: ObservableObject {
     private var timers: [Timer] = []
     private var chromeStateStamp: Date?
     private var lastForcedPoll = Date.distantPast
-    /// Sessions waiting for a turn boundary before their account changes.
-    private var pendingSwitch: [String: String] = [:]
+    /// Sessions waiting for a turn boundary before their account changes, and when the
+    /// wait began.
+    private var pendingSwitch: [String: (accountID: String, since: Date)] = [:]
+    /// A session retrying against a refusal can report `busy` indefinitely, so the wait
+    /// for a turn boundary is capped rather than unbounded.
+    private static let turnBoundaryGrace: TimeInterval = 120
 
     public var accountsNeedingAttention: [Account] {
         accounts.filter { $0.health == .needsRelogin }
@@ -74,20 +78,22 @@ public final class Engine: ObservableObject {
             Task { @MainActor in self?.reload() }
         }
 
-        let accountIDs = store.accounts.all().map(\.id)
-        // Each credential read spawns `security`; doing them inline would block the
-        // first window behind one subprocess per account.
-        Task.detached { [vault] in
-            vault.load(accountIDs: accountIDs)
-        }
+        // Loaded before the control socket accepts anything: a shim arriving during a
+        // cold launch would otherwise be told the account has no stored credential.
+        // Each read spawns `security` (~11ms), so a handful of accounts is not worth
+        // deferring.
+        vault.load(accountIDs: store.accounts.all().map(\.id))
 
         sessionManager.recoverAfterLaunch()
-        reload()
+        reload(rescanClaudeSessions: true)
         refreshChromeProfiles()
         Task { await checkNotificationAuthorization() }
         startControlServer()
         scheduleTimers()
-        Task { await pollDueAccounts(force: true) }
+        Task {
+            await refreshExpiringTokens()
+            await pollDueAccounts(force: true)
+        }
     }
 
     public func stop() {
@@ -121,14 +127,16 @@ public final class Engine: ObservableObject {
         timers.append(Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.sessionManager.reap()
-                self?.reload()
+                self?.reload(rescanClaudeSessions: true)
                 self?.applyPendingSwitches()
             }
         })
         timers.append(Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                await self?.pollDueAccounts()
+                // Tokens first: polling with one that is about to expire spends a request
+                // from the endpoint's hourly budget on a guaranteed 401.
                 await self?.refreshExpiringTokens()
+                await self?.pollDueAccounts()
             }
         })
         timers.append(Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
@@ -139,7 +147,7 @@ public final class Engine: ObservableObject {
     /// Republishes only what changed: `@Published` fires on every assignment, so
     /// assigning unconditionally on a 5-second timer would re-render the whole window
     /// forever.
-    private func reload() {
+    private func reload(rescanClaudeSessions: Bool = false) {
         let freshAccounts = store.accounts.all().sorted {
             if $0.priority != $1.priority { return $0.priority < $1.priority }
             return $0.displayName.localizedCaseInsensitiveCompare($1.displayName)
@@ -153,8 +161,12 @@ public final class Engine: ObservableObject {
         let freshSessions = store.sessions.all().sorted { $0.startedAt > $1.startedAt }
         if sessions != freshSessions { sessions = freshSessions }
 
-        let freshClaudeSessions = ClaudeSessions.list()
-        if claudeSessions != freshClaudeSessions { claudeSessions = freshClaudeSessions }
+        // Only on the timer: this scans ~/.claude/sessions and reads a file per live
+        // session, and store changes fire once per proxied response.
+        if rescanClaudeSessions {
+            let fresh = ClaudeSessions.list()
+            if claudeSessions != fresh { claudeSessions = fresh }
+        }
 
         let freshSettings = store.currentSettings()
         if settings != freshSettings { settings = freshSettings }
@@ -215,6 +227,17 @@ public final class Engine: ObservableObject {
         for (accountID, result) in fetched { record(result, for: accountID) }
     }
 
+    /// Fetches one account's usage now, bypassing the manual-refresh floor. Used when an
+    /// account has just been added and has nothing to show yet.
+    private func poll(_ accountID: String) async {
+        guard let token = vault.credential(for: accountID)?.accessToken else { return }
+        do {
+            record(.success(try await client.usage(accessToken: token)), for: accountID)
+        } catch {
+            record(.failure(error), for: accountID)
+        }
+    }
+
     private func record(_ result: Result<[UsageWindow], Error>, for accountID: String) {
         let previous = store.usage(for: accountID)
         var snapshot: UsageSnapshot
@@ -269,10 +292,17 @@ public final class Engine: ObservableObject {
             evaluateThresholds(for: observation.accountID, snapshot: snapshot)
         }
 
-        if UsageParser.isRateLimited(headers: observation.headers,
-                                     statusCode: observation.statusCode) {
-            handleExhaustion(sessionID: sessionID, accountID: observation.accountID)
+        guard UsageParser.isRateLimited(headers: observation.headers,
+                                        statusCode: observation.statusCode) else { return }
+        // The response may belong to a request that was already on the wire when the
+        // account changed. Its usage still counts against the account that served it,
+        // but moving the session on it would undo a choice just made.
+        guard store.sessions.get(sessionID)?.accountID == observation.accountID else {
+            Log.info("ignoring a rate-limit response for \(observation.accountID); "
+                     + "session \(sessionID) has already moved on")
+            return
         }
+        handleExhaustion(sessionID: sessionID, accountID: observation.accountID)
     }
 
     // MARK: - Thresholds and exhaustion
@@ -303,7 +333,7 @@ public final class Engine: ObservableObject {
         // prompt cache is dropped between turns rather than mid-answer.
         if settings.autoSwitch == .atTurnBoundary, isBusy(pid: record.pid) {
             if pendingSwitch[sessionID] == nil {
-                pendingSwitch[sessionID] = accountID
+                pendingSwitch[sessionID] = (accountID, Date())
                 Log.info("session \(sessionID) will move off \(accountID) at its next "
                          + "turn boundary")
             }
@@ -323,12 +353,12 @@ public final class Engine: ObservableObject {
                                   + "\(sessionID.prefix(8)) moved on its next request.")
             }
         case .disabled:
-            notifier.postOnce(key: "exhausted/\(sessionID)/\(accountID)",
+            notifier.postOnce(key: "exhausted/\(sessionID)/\(accountID)/\(periodStamp(accountID))",
                               title: "\(accountName) is out of headroom",
                               body: "Session \(sessionID.prefix(8)) is blocked. "
                                   + "Pick another account in ccmux.")
         case .noneEligible:
-            notifier.postOnce(key: "noheadroom/\(sessionID)/\(accountID)",
+            notifier.postOnce(key: "noheadroom/\(sessionID)/\(accountID)/\(periodStamp(accountID))",
                               title: "No account left with headroom",
                               body: "\(accountName) hit its limit and nothing else "
                                   + "satisfies its policy.")
@@ -339,17 +369,25 @@ public final class Engine: ObservableObject {
         }
     }
 
+    /// Identifies the current window period, so a blocked session is announced again
+    /// after the limit resets rather than once for the session's whole life.
+    private func periodStamp(_ accountID: String) -> String {
+        let resets = store.usage(for: accountID)?.windows.compactMap(\.resetsAt).min()
+        return resets.map { String(Int($0.timeIntervalSince1970)) } ?? "none"
+    }
+
     private func applyPendingSwitches() {
         guard !pendingSwitch.isEmpty else { return }
-        for (sessionID, accountID) in pendingSwitch {
+        for (sessionID, pending) in pendingSwitch {
             guard let record = store.sessions.get(sessionID) else {
                 pendingSwitch.removeValue(forKey: sessionID)
                 continue
             }
-            guard !isBusy(pid: record.pid) else { continue }
+            let waited = Date().timeIntervalSince(pending.since) >= Self.turnBoundaryGrace
+            guard !isBusy(pid: record.pid) || waited else { continue }
             pendingSwitch.removeValue(forKey: sessionID)
-            performSwitch(sessionID: sessionID, from: accountID,
-                          accountName: displayName(accountID))
+            performSwitch(sessionID: sessionID, from: pending.accountID,
+                          accountName: displayName(pending.accountID))
         }
     }
 
@@ -515,7 +553,7 @@ public final class Engine: ObservableObject {
         }
         store.accounts.upsert(account)
         vault.store(credential, for: account.id)
-        await pollDueAccounts(force: true)
+        await poll(account.id)
         return account
     }
 

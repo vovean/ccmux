@@ -68,8 +68,11 @@ public final class Table<Element: Codable & Identifiable> where Element.ID == St
         lock.lock()
         body(&items)
         let snapshot = items
-        lock.unlock()
+        // Persisted under the same lock: releasing it first lets two writers save out of
+        // order, so an older session assignment can land on disk after a newer one and
+        // the next launch restores the stale account.
         JSONStore.save(snapshot, to: url)
+        lock.unlock()
         onChange?()
     }
 }

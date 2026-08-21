@@ -161,3 +161,123 @@ struct NamespaceTests {
         #expect(composed == decomposed)
     }
 }
+
+/// Serialized: the stub protocol installs a process-wide responder, so two of these
+/// running at once would each see the other's.
+@Suite("Refresh coalescing", .serialized)
+struct RefreshCoalescingTests {
+    /// Look-up and insert used to be separate critical sections, so two callers could
+    /// each see an empty slot and both POST the same refresh token *at the same time*.
+    /// Anthropic rotates them, so the loser got `invalid_grant` and a healthy account was
+    /// marked as needing re-login.
+    ///
+    /// Overlap is the property that matters, not the total count: grants that run one
+    /// after another each rotate from the current token and are harmless.
+    @Test func grantsNeverOverlapForOneAccount() async throws {
+        let grants = ConcurrencyProbe()
+        let vault = TokenVault(client: OAuthClient(session: StubURLProtocol.session {
+            grants.enter()
+            Thread.sleep(forTimeInterval: 0.2)
+            grants.leave()
+            return #"{"access_token":"rotated","expires_in":28800,"refresh_token":"r2"}"#
+        }))
+        let id = "acct-overlap"
+        vault.store(OAuthCredential(accessToken: "old", refreshToken: "r1",
+                                    expiresAt: Date().addingTimeInterval(-60)), for: id)
+        defer { vault.forget(id) }
+
+        await withTaskGroup(of: String?.self) { group in
+            for _ in 0..<8 {
+                group.addTask { await vault.refresh(id)?.accessToken }
+            }
+            for await result in group {
+                // Every caller gets the rotated credential rather than nil.
+                #expect(result == "rotated")
+            }
+        }
+        #expect(grants.peak == 1)
+        #expect(grants.total >= 1)
+        #expect(vault.credential(for: id)?.refreshToken == "r2")
+    }
+
+    /// And the slot must be released, so a later refresh is still possible.
+    @Test func aLaterRefreshIsNotBlockedByTheFinishedOne() async throws {
+        let grants = ConcurrencyProbe()
+        let vault = TokenVault(client: OAuthClient(session: StubURLProtocol.session {
+            grants.enter()
+            grants.leave()
+            return #"{"access_token":"rotated","expires_in":28800}"#
+        }))
+        let id = "acct-sequential"
+        vault.store(OAuthCredential(accessToken: "old", refreshToken: "r1",
+                                    expiresAt: Date().addingTimeInterval(-60)), for: id)
+        defer { vault.forget(id) }
+
+        _ = await vault.refresh(id)
+        _ = await vault.refresh(id)
+        #expect(grants.total == 2)
+        #expect(grants.peak == 1)
+    }
+}
+
+/// Records how many grants were ever in flight at once.
+final class ConcurrencyProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current = 0
+    private var highWater = 0
+    private var count = 0
+
+    func enter() {
+        lock.lock()
+        current += 1
+        count += 1
+        highWater = max(highWater, current)
+        lock.unlock()
+    }
+
+    func leave() {
+        lock.lock(); current -= 1; lock.unlock()
+    }
+
+    var peak: Int {
+        lock.lock(); defer { lock.unlock() }
+        return highWater
+    }
+
+    var total: Int {
+        lock.lock(); defer { lock.unlock() }
+        return count
+    }
+}
+
+/// Serves a canned body for every request, so token-endpoint behaviour can be driven
+/// without a network.
+final class StubURLProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) private static var responder: (() -> String)?
+    private static let lock = NSLock()
+
+    static func session(_ responder: @escaping () -> String) -> URLSession {
+        lock.lock(); Self.responder = responder; lock.unlock()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [StubURLProtocol.self]
+        return URLSession(configuration: config)
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.lock.lock()
+        let responder = Self.responder
+        Self.lock.unlock()
+        let body = responder?() ?? "{}"
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200,
+                                       httpVersion: "HTTP/1.1",
+                                       headerFields: ["Content-Type": "application/json"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(body.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}

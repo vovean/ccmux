@@ -22,7 +22,7 @@ public enum PollPolicy {
     public static let escalationMarginPercent: Double = 15
     /// Minimum spacing between manual refreshes, so the Refresh button cannot be
     /// mashed into the endpoint's hourly budget.
-    public static let forcedPollFloor: TimeInterval = 30
+    public static let forcedPollFloor: TimeInterval = 60
 
     public struct Plan: Equatable {
         public var interval: TimeInterval

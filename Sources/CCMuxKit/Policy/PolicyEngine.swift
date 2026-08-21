@@ -23,6 +23,7 @@ public enum PolicyEngine {
         // for being unknown, so it starts from a neutral value: a healthy account with
         // real headroom wins, and an unknown one still beats a nearly-spent account.
         guard let usage, !usage.windows.isEmpty else {
+            guard unknownHeadroom >= policy.minHeadroom else { return nil }
             return AccountRanking(accountID: account.id, headroom: unknownHeadroom,
                                   bindingWindow: nil)
         }

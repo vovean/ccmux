@@ -221,9 +221,7 @@ public final class SessionManager {
         guard let record = store.sessions.get(sessionID) else {
             return .failed(SessionError.unknownSession(sessionID).localizedDescription)
         }
-        guard globallyEnabled, record.autoSwitchEnabled(default: globallyEnabled) else {
-            return .disabled
-        }
+        guard record.autoSwitchEnabled(default: globallyEnabled) else { return .disabled }
 
         // Prefer an account with headroom on every window it reports, then fall back to
         // the launch policy. The two differ when the session has switched models

@@ -55,7 +55,9 @@ public final class ControlHandler {
                 failure = await importGlobalLogin()
                 semaphore.signal()
             }
-            guard semaphore.wait(timeout: .now() + 30) == .success else {
+            // Must exceed what the import actually awaits: a profile fetch plus a usage
+            // fetch, each with a 15s timeout, on a slow network.
+            guard semaphore.wait(timeout: .now() + 60) == .success else {
                 return .failure("sign-in did not complete in time")
             }
             return failure.map { ControlResponse.failure($0) } ?? .ok

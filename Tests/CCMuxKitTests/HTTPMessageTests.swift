@@ -225,3 +225,34 @@ struct ChunkedFramingTests {
         #expect(throws: HTTPRequestParser.ParseError.self) { try parser.next() }
     }
 }
+
+@Suite("Malformed framing is refused, not fatal")
+struct MalformedFramingTests {
+    /// A negative Content-Length reached `Data.prefix`, which traps — so one malformed
+    /// request to a session's loopback port killed the app and every other session's
+    /// proxy with it.
+    @Test func negativeContentLengthIsRejected() {
+        var parser = HTTPRequestParser()
+        parser.append(Data("POST /v1/messages HTTP/1.1\r\nContent-Length: -1\r\n\r\n".utf8))
+        #expect(throws: HTTPRequestParser.ParseError.self) { try parser.next() }
+    }
+
+    @Test func nonNumericContentLengthIsRejected() {
+        var parser = HTTPRequestParser()
+        parser.append(Data("POST /x HTTP/1.1\r\nContent-Length: eight\r\n\r\n".utf8))
+        #expect(throws: HTTPRequestParser.ParseError.self) { try parser.next() }
+    }
+
+    @Test func anAbsurdContentLengthIsRefusedRatherThanBuffered() {
+        var parser = HTTPRequestParser()
+        parser.append(Data("POST /x HTTP/1.1\r\nContent-Length: 999999999999\r\n\r\n".utf8))
+        #expect(throws: HTTPRequestParser.ParseError.tooLarge) { try parser.next() }
+    }
+
+    @Test func negativeChunkSizeIsRejected() {
+        var parser = HTTPRequestParser()
+        parser.append(Data(("POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+            + "-4\r\nabcd\r\n").utf8))
+        #expect(throws: HTTPRequestParser.ParseError.self) { try parser.next() }
+    }
+}

@@ -18,9 +18,8 @@ public enum ControlClient {
 
         UnixSocket.suppressSIGPIPE(fd)
         // Must exceed the slowest server-side handler (importGlobalLogin waits up to
-        // 30s for a profile fetch), or the client gives up first and the server writes
-        // into a closed socket.
-        var timeout = timeval(tv_sec: 45, tv_usec: 0)
+        // 60s), or the client gives up first and the server writes into a closed socket.
+        var timeout = timeval(tv_sec: 90, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout,
                    socklen_t(MemoryLayout<timeval>.size))
 

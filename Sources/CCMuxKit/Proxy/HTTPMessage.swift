@@ -64,7 +64,10 @@ struct HTTPRequestParser {
                     state = .awaitingChunks(head: head, decoded: Data())
                     continue
                 }
-                let length = Int(head.header("content-length") ?? "0") ?? 0
+                let field = head.header("content-length") ?? "0"
+                guard let length = Int(field), length >= 0 else {
+                    throw ParseError.malformed("bad content-length: \(field)")
+                }
                 guard length <= Self.maxBodyBytes else { throw ParseError.tooLarge }
                 if length == 0 {
                     state = .awaitingHead
