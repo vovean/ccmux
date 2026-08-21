@@ -11,14 +11,17 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
     public var policyName: String
     public var cwd: String
     public var startedAt: Date
-    public var autoSwitch: Bool
+    /// nil follows the global setting. Snapshotting the setting at birth instead would
+    /// permanently opt out every session started while auto-switch was off, which is
+    /// indistinguishable from the feature being broken.
+    public var autoSwitchOverride: Bool?
     /// Set when this session's namespace owns the account's credential lineage,
     /// i.e. Claude Code is allowed to refresh it and we adopt the result.
     public var ownsLineage: Bool
 
     public init(id: String, pid: Int32, port: UInt16, accountID: String,
                 policyName: String, cwd: String, startedAt: Date = Date(),
-                autoSwitch: Bool = true, ownsLineage: Bool = false) {
+                autoSwitchOverride: Bool? = nil, ownsLineage: Bool = false) {
         self.id = id
         self.pid = pid
         self.port = port
@@ -26,11 +29,15 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
         self.policyName = policyName
         self.cwd = cwd
         self.startedAt = startedAt
-        self.autoSwitch = autoSwitch
+        self.autoSwitchOverride = autoSwitchOverride
         self.ownsLineage = ownsLineage
     }
 
     public var namespaceDir: URL { Paths.namespace(id) }
+
+    public func autoSwitchEnabled(default globalDefault: Bool) -> Bool {
+        autoSwitchOverride ?? globalDefault
+    }
 }
 
 /// A live Claude Code session as Claude Code itself records it.

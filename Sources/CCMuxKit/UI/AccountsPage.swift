@@ -65,7 +65,8 @@ struct AccountsPage: View {
     }
 
     private func accountCard(_ account: Account) -> some View {
-        Card {
+        let sessionCount = engine.sessionCount(forAccount: account.id)
+        return Card {
             VStack(alignment: .leading, spacing: 9) {
                 HStack(spacing: 8) {
                     if account.health == .needsRelogin { RedDot() }
@@ -73,9 +74,9 @@ struct AccountsPage: View {
                     if let plan = account.subscriptionType {
                         StatusPill(text: plan, tint: .secondary)
                     }
-                    if sessionCount(account) > 0 {
-                        StatusPill(text: "\(sessionCount(account)) session"
-                                   + (sessionCount(account) == 1 ? "" : "s"), tint: .accentColor)
+                    if sessionCount > 0 {
+                        StatusPill(text: "\(sessionCount) session"
+                                   + (sessionCount == 1 ? "" : "s"), tint: .accentColor)
                     }
                     Spacer()
                     accountMenu(account)
@@ -91,13 +92,7 @@ struct AccountsPage: View {
                             .font(.caption)
                             .foregroundStyle(.red)
                         Spacer()
-                        Button("Sign in again") {
-                            Task {
-                                await engine.beginLogin(
-                                    chromeProfileDirectory: account.chromeProfileDirectory,
-                                    label: account.label, loginHint: account.email)
-                            }
-                        }
+                        Button("Sign in again") { engine.relogin(accountID: account.id) }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
                         .disabled(engine.loginInProgress)
@@ -144,13 +139,7 @@ struct AccountsPage: View {
                 renameText = account.label
                 renaming = account
             }
-            Button("Sign in again…") {
-                Task {
-                    await engine.beginLogin(
-                        chromeProfileDirectory: account.chromeProfileDirectory,
-                        label: account.label, loginHint: account.email)
-                }
-            }
+            Button("Sign in again…") { engine.relogin(accountID: account.id) }
             Divider()
             Button("Move up") { engine.movePriority(account.id, by: -1) }
             Button("Move down") { engine.movePriority(account.id, by: 1) }
@@ -182,19 +171,4 @@ struct AccountsPage: View {
         .padding(16)
     }
 
-    private func sessionCount(_ account: Account) -> Int {
-        engine.sessions.filter { $0.accountID == account.id }.count
-    }
-}
-
-extension View {
-    /// `sheet(item:)` for a plain Identifiable binding, which SwiftUI only offers as
-    /// `sheet(item:content:)` on Optional bindings of Identifiable.
-    func sheet<Item: Identifiable, Content: View>(
-        item: Binding<Item?>, @ViewBuilder content: @escaping (Item) -> Content) -> some View {
-        sheet(isPresented: Binding(get: { item.wrappedValue != nil },
-                                   set: { if !$0 { item.wrappedValue = nil } })) {
-            if let value = item.wrappedValue { content(value) }
-        }
-    }
 }

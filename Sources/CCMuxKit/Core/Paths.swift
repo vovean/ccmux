@@ -3,10 +3,11 @@ import Foundation
 public enum Paths {
     public static let bundleID = "io.vovean.ccmux"
 
-    public static var support: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    public static let support: URL = {
+        let base = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return base.appendingPathComponent("ccmux", isDirectory: true)
-    }
+    }()
 
     public static var accountsFile: URL { support.appendingPathComponent("accounts.json") }
     public static var usageFile: URL { support.appendingPathComponent("usage.json") }

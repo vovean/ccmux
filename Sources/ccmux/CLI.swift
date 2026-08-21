@@ -3,41 +3,47 @@ import Darwin
 import Foundation
 
 enum CLI {
-    static let subcommands: Set<String> = ["run", "status", "assign", "end", "import",
-                                          "shell-init", "help", "--help", "-h", "--version"]
+    /// One table, so a command cannot exist in the dispatch switch but be missing from
+    /// the recognised set — which would silently open the GUI instead of running it.
+    struct Command {
+        let name: String
+        let usage: String
+        let run: ([String]) -> Never
+    }
+
+    static let commands: [Command] = [
+        Command(name: "run",
+                usage: "run --policy <name> [--account <id>] [-- <claude args>…]",
+                run: run),
+        Command(name: "status", usage: "status", run: { _ in status() }),
+        Command(name: "assign", usage: "assign <session-id> <account-id>", run: assign),
+        Command(name: "end", usage: "end <session-id>", run: end),
+        Command(name: "import", usage: "import", run: { _ in importLogin() }),
+        Command(name: "shell-init", usage: "shell-init", run: { _ in shellInit() }),
+    ]
 
     static func isCLIInvocation(_ arguments: [String]) -> Bool {
         guard arguments.count > 1 else { return false }
-        return subcommands.contains(arguments[1])
+        let first = arguments[1]
+        return commands.contains { $0.name == first }
+            || ["help", "--help", "-h", "--version"].contains(first)
     }
 
     static func main(_ arguments: [String]) -> Never {
-        switch arguments[1] {
-        case "run": run(Array(arguments.dropFirst(2)))
-        case "status": status()
-        case "assign": assign(Array(arguments.dropFirst(2)))
-        case "end": end(Array(arguments.dropFirst(2)))
-        case "import": importLogin()
-        case "shell-init": shellInit()
-        case "--version": print("ccmux 1.0"); exit(0)
-        default: usage(); exit(0)
+        let name = arguments[1]
+        if name == "--version" { print("ccmux 1.0"); exit(0) }
+        guard let command = commands.first(where: { $0.name == name }) else {
+            usage()
+            exit(name == "help" || name == "--help" || name == "-h" ? 0 : 1)
         }
+        command.run(Array(arguments.dropFirst(2)))
     }
 
     static func usage() {
-        print("""
-        ccmux — run Claude Code sessions on separate subscriptions
-
-        Usage:
-          ccmux run --policy <name> [--account <id>] [-- <claude args>…]
-          ccmux status
-          ccmux assign <session-id> <account-id>
-          ccmux import
-          ccmux end <session-id>
-          ccmux shell-init
-
-        With no subcommand, ccmux opens its window.
-        """)
+        print("ccmux — run Claude Code sessions on separate subscriptions\n")
+        print("Usage:")
+        for command in commands { print("  ccmux \(command.usage)") }
+        print("\nWith no subcommand, ccmux opens its window.")
     }
 
     // MARK: - run
@@ -60,7 +66,7 @@ enum CLI {
                 guard index < arguments.count else { fail("--account needs a value") }
                 accountID = arguments[index]
             case "--":
-                claudeArgs = Array(arguments[(index + 1)...])
+                claudeArgs += arguments[(index + 1)...]
                 index = arguments.count
                 continue
             default:
@@ -70,9 +76,6 @@ enum CLI {
             }
             index += 1
         }
-        if accountID != nil {
-            fail("--account is not implemented for run yet; assign after launch instead")
-        }
 
         do {
             try ControlClient.ensureRunning()
@@ -80,15 +83,14 @@ enum CLI {
             fail(error.localizedDescription)
         }
 
-        let cwd = FileManager.default.currentDirectoryPath
         let response: ControlResponse
         do {
-            response = try ControlClient.send(
-                .newSession(policy: policy, cwd: cwd, pid: getpid()))
+            response = try ControlClient.send(.newSession(
+                policy: policy, cwd: FileManager.default.currentDirectoryPath,
+                pid: getpid(), accountID: accountID))
         } catch {
             fail(error.localizedDescription)
         }
-
         guard case .session(let info) = response else {
             if case .failure(let message) = response { fail(message) }
             fail("unexpected response from ccmux")
@@ -108,8 +110,7 @@ enum CLI {
         }
         // exec, not spawn: the pid ccmux was told about has to end up being claude's,
         // because that is the key it matches against ~/.claude/sessions/<pid>.json.
-        let argv = [binary] + claudeArgs
-        var cArgs: [UnsafeMutablePointer<CChar>?] = argv.map { strdup($0) }
+        var cArgs: [UnsafeMutablePointer<CChar>?] = ([binary] + claudeArgs).map { strdup($0) }
         cArgs.append(nil)
         execv(binary, &cArgs)
         fail("exec \(binary) failed (errno \(errno))")
@@ -127,32 +128,28 @@ enum CLI {
         let path = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"
         for directory in path.split(separator: ":") {
             let candidate = "\(directory)/claude"
-            guard FileManager.default.isExecutableFile(atPath: candidate) else { continue }
-            let resolved = URL(fileURLWithPath: candidate).resolvingSymlinksInPath().path
-            if resolved == mine { continue }
+            guard FileManager.default.isExecutableFile(atPath: candidate),
+                  URL(fileURLWithPath: candidate).resolvingSymlinksInPath().path != mine
+            else { continue }
             return candidate
         }
         return nil
     }
 
-    // MARK: - status
+    // MARK: - Other commands
 
     static func status() -> Never {
         guard let response = try? ControlClient.send(.status),
               case .status(let status) = response else {
             fail("ccmux is not running")
         }
-
         if status.accounts.isEmpty {
             print("No accounts. Open ccmux and add one.")
         }
         for account in status.accounts {
             let flag = account.health == "needsRelogin" ? " [needs re-login]" : ""
-            var line = "\(account.label)\(flag)"
-            if let age = account.usageAge, age < 86400 {
-                line += "  (\(Int(age))s ago)"
-            }
-            print(line)
+            let age = account.usageAge.map { "  (\(Int($0))s ago)" } ?? ""
+            print("\(account.label)\(flag)\(age)")
             for window in account.windows {
                 let reset = window.resetsAt.map { " resets in \(Format.countdown(to: $0))" } ?? ""
                 let name = window.label.padding(toLength: max(22, window.label.count),
@@ -160,7 +157,6 @@ enum CLI {
                 print("    \(name) " + String(format: "%5.0f%% used", window.percent) + reset)
             }
         }
-
         if !status.sessions.isEmpty {
             print("\nSessions:")
             for session in status.sessions {
@@ -173,20 +169,12 @@ enum CLI {
 
     static func assign(_ arguments: [String]) -> Never {
         guard arguments.count == 2 else { fail("usage: ccmux assign <session-id> <account-id>") }
-        guard let response = try? ControlClient.send(
-            .assign(sessionID: arguments[0], accountID: arguments[1])) else {
-            fail("ccmux is not running")
-        }
-        if case .failure(let message) = response { fail(message) }
-        print("assigned")
-        exit(0)
+        send(.assign(sessionID: arguments[0], accountID: arguments[1]), success: "assigned")
     }
 
     static func end(_ arguments: [String]) -> Never {
         guard arguments.count == 1 else { fail("usage: ccmux end <session-id>") }
-        _ = try? ControlClient.send(.endSession(sessionID: arguments[0]))
-        print("ended")
-        exit(0)
+        send(.endSession(sessionID: arguments[0]), success: "ended")
     }
 
     static func importLogin() -> Never {
@@ -195,11 +183,15 @@ enum CLI {
         } catch {
             fail(error.localizedDescription)
         }
-        guard let response = try? ControlClient.send(.importGlobalLogin) else {
+        send(.importGlobalLogin, success: "imported the current Claude Code login")
+    }
+
+    static func send(_ request: ControlRequest, success: String) -> Never {
+        guard let response = try? ControlClient.send(request) else {
             fail("ccmux is not running")
         }
         if case .failure(let message) = response { fail(message) }
-        print("imported the current Claude Code login")
+        print(success)
         exit(0)
     }
 

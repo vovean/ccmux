@@ -6,6 +6,10 @@ import Foundation
 /// the system's problem, and a delegate (not `data(for:)`) so SSE frames reach the
 /// client as they arrive instead of at completion.
 final class UpstreamRelay: NSObject, URLSessionDataDelegate {
+    /// Shared across every session proxy: a per-proxy session would give each one its
+    /// own connection pool and a cold TLS handshake per new session.
+    static let shared = UpstreamRelay()
+
     struct Handlers {
         let onHead: (HTTPURLResponse) -> Void
         let onBody: (Data) -> Void
@@ -33,8 +37,13 @@ final class UpstreamRelay: NSObject, URLSessionDataDelegate {
         return task
     }
 
-    func invalidate() {
-        session.invalidateAndCancel()
+    /// Cancels one in-flight request. The shared session outlives any single proxy, so
+    /// teardown cancels tasks rather than the session.
+    func cancel(_ task: URLSessionDataTask) {
+        lock.lock()
+        handlers.removeValue(forKey: task.taskIdentifier)
+        lock.unlock()
+        task.cancel()
     }
 
     private func handlers(for task: URLSessionTask) -> Handlers? {

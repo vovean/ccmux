@@ -20,7 +20,9 @@ struct UsageBar: View {
 
     private var tint: Color {
         if window.headroom <= threshold { return .red }
-        if window.headroom <= 20 { return .orange }
+        // The amber band sits above the red one by construction; a fixed 20% would go
+        // behind red as soon as the threshold was raised past it.
+        if window.headroom <= threshold + PollPolicy.escalationMarginPercent { return .orange }
         return .accentColor
     }
 

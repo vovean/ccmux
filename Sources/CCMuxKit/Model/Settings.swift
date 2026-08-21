@@ -68,6 +68,13 @@ public struct Settings: Codable, Equatable {
         self.mutedAccountIDs = mutedAccountIDs
     }
 
+    /// Adds or removes a watched window without letting duplicates into persisted
+    /// state, which a containment-check in the UI was the only thing preventing.
+    public mutating func setWatched(_ kind: UsageWindow.Kind, on: Bool) {
+        watchedWindows.removeAll { $0 == kind }
+        if on { watchedWindows.append(kind) }
+    }
+
     public func policy(named name: String) -> Policy? {
         policies.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }
     }

@@ -7,6 +7,7 @@ struct SessionProxyTests {
     /// Issues one request against the proxy and returns the raw HTTP response bytes.
     static func request(port: UInt16, method: String = "POST", target: String = "/v1/messages",
                         body: String = "{}", authorization: String = "Bearer client-token",
+                        extraHeaders: [String: String] = [:],
                         timeout: TimeInterval = 10) throws -> String {
         let client = socket(AF_INET, SOCK_STREAM, 0)
         defer { close(client) }
@@ -25,9 +26,10 @@ struct SessionProxyTests {
         var tv = timeval(tv_sec: Int(timeout), tv_usec: 0)
         setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 
-        let head = "\(method) \(target) HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+        var head = "\(method) \(target) HTTP/1.1\r\nHost: 127.0.0.1\r\n"
             + "Authorization: \(authorization)\r\n"
-            + "Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
+        for (name, value) in extraHeaders { head += "\(name): \(value)\r\n" }
+        head += "Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
         _ = Array(head.utf8).withUnsafeBytes { send(client, $0.baseAddress, $0.count, 0) }
 
         var response = ""
@@ -79,6 +81,24 @@ struct SessionProxyTests {
         _ = try Self.request(port: port, authorization: "Bearer sk-ant-oat01-CLAUDES-OWN")
         let seen = try #require(stub.requests().first)
         #expect(seen.authorization == "Bearer token-a")
+    }
+
+    /// If ANTHROPIC_API_KEY is exported in the shell, Claude Code sends x-api-key
+    /// alongside its bearer token — and that key could bill an account other than the
+    /// one ccmux assigned.
+    @Test func apiKeyHeaderIsNotForwarded() throws {
+        let stub = try StubUpstream()
+        defer { stub.stop() }
+        let tokens = TokenSequence(["a": "t"])
+        let proxy = SessionProxy(sessionID: "test", upstream: stub.url,
+                                 tokenProvider: { tokens.current() }, observer: { _ in })
+        let port = try proxy.start()
+        defer { proxy.stop() }
+
+        _ = try Self.request(port: port, extraHeaders: ["x-api-key": "sk-ant-api03-LEAK"])
+        let seen = try #require(stub.requests().first)
+        #expect(seen.authorization == "Bearer t")
+        #expect(seen.apiKey == nil)
     }
 
     @Test func requestMethodPathAndBodyPassThroughUnchanged() throws {
@@ -143,6 +163,9 @@ struct SessionProxyTests {
         let seen = try #require(observations.all().first)
         #expect(seen.statusCode == 200)
         #expect(seen.accountID == "account-a")
+        // Folded once here, so the parsers can index directly.
+        #expect(seen.headers["anthropic-ratelimit-unified-5h-utilization"] == "0.42")
+        #expect(seen.headers["content-type"] == nil)
         let windows = UsageParser.windowsFromResponseHeaders(seen.headers)
         #expect(windows.first?.percent == 42)
     }

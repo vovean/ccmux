@@ -101,14 +101,21 @@ struct UsageParserTests {
         #expect(abs(weekly.percent - 70) < 0.001)
     }
 
-    @Test func headerParsingIsCaseInsensitiveAndTolerantOfAbsence() {
+    /// Names arrive pre-folded from `SessionProxy`, which lower-cases once while walking
+    /// the response instead of every reader rebuilding a folded copy.
+    @Test func headerParsingExpectsFoldedNamesAndToleratesAbsence() throws {
         #expect(UsageParser.windowsFromResponseHeaders([:]).isEmpty)
         let windows = UsageParser.windowsFromResponseHeaders([
-            "Anthropic-RateLimit-Unified-5h-Utilization": "0.5",
+            "anthropic-ratelimit-unified-5h-utilization": "0.5",
         ])
+        let window = try #require(windows.first)
         #expect(windows.count == 1)
-        #expect(windows[0].percent == 50)
-        #expect(windows[0].resetsAt == nil)
+        #expect(window.percent == 50)
+        #expect(window.resetsAt == nil)
+
+        #expect(UsageParser.windowsFromResponseHeaders([
+            "Anthropic-RateLimit-Unified-5h-Utilization": "0.5",
+        ]).isEmpty)
     }
 
     @Test func detectsRateLimitRejection() {

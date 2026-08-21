@@ -8,6 +8,7 @@ final class StubUpstream: @unchecked Sendable {
         var method: String
         var target: String
         var authorization: String?
+        var apiKey: String?
         var body: String
     }
 
@@ -98,6 +99,7 @@ final class StubUpstream: @unchecked Sendable {
         let startLine = lines.removeFirst().split(separator: " ").map(String.init)
 
         var authorization: String?
+        var apiKey: String?
         var contentLength = 0
         for line in lines {
             guard let colon = line.firstIndex(of: ":") else { continue }
@@ -105,6 +107,7 @@ final class StubUpstream: @unchecked Sendable {
             let value = String(line[line.index(after: colon)...])
                 .trimmingCharacters(in: .whitespaces)
             if name == "authorization" { authorization = value }
+            if name == "x-api-key" { apiKey = value }
             if name == "content-length" { contentLength = Int(value) ?? 0 }
         }
 
@@ -117,7 +120,8 @@ final class StubUpstream: @unchecked Sendable {
 
         lock.lock()
         received.append(Received(method: startLine.first ?? "", target: startLine.count > 1
-                                 ? startLine[1] : "", authorization: authorization, body: body))
+                                 ? startLine[1] : "", authorization: authorization,
+                                 apiKey: apiKey, body: body))
         let chunks = responseChunks
         let headers = responseHeaders
         let status = statusLine

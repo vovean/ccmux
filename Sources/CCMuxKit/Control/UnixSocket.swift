@@ -16,6 +16,15 @@ enum UnixSocket {
     /// silently truncated into a socket nobody can find.
     static let maxPathLength = 103
 
+    /// Writing to a socket whose peer has gone raises SIGPIPE, whose default action is
+    /// to terminate the process — which here would take down every live session's
+    /// proxy because one CLI invocation timed out. Darwin has no MSG_NOSIGNAL, so the
+    /// per-socket option is the only way to get EPIPE instead.
+    static func suppressSIGPIPE(_ fd: Int32) {
+        var on: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+    }
+
     static func address(for path: String) throws -> sockaddr_un {
         let bytes = Array(path.utf8)
         guard bytes.count <= maxPathLength else {
@@ -41,12 +50,15 @@ enum UnixSocket {
 
     static func readLine(fd: Int32, limit: Int = 1 << 20) -> String? {
         var data = Data()
-        var byte: UInt8 = 0
+        var chunk = [UInt8](repeating: 0, count: 4096)
         while data.count < limit {
-            let n = recv(fd, &byte, 1, 0)
+            let n = recv(fd, &chunk, chunk.count, 0)
             if n <= 0 { break }
-            if byte == UInt8(ascii: "\n") { break }
-            data.append(byte)
+            if let newline = chunk[0..<n].firstIndex(of: UInt8(ascii: "\n")) {
+                data.append(contentsOf: chunk[0..<newline])
+                break
+            }
+            data.append(contentsOf: chunk[0..<n])
         }
         guard !data.isEmpty else { return nil }
         return String(data: data, encoding: .utf8)

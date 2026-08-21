@@ -60,8 +60,21 @@ public final class LoopbackListener: @unchecked Sendable {
         port = UInt16(bigEndian: local.sin_port)
     }
 
-    /// Blocks until the browser hits `/callback`, then returns its query items.
-    public func waitForCallback(timeout: TimeInterval) throws -> [String: String] {
+    /// Waits for the browser to hit `/callback` and returns its query items.
+    public func awaitCallback(timeout: TimeInterval) async throws -> [String: String] {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async { [self] in
+                do {
+                    continuation.resume(returning: try waitForCallback(timeout: timeout))
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    /// Blocks until the browser hits `/callback`. Prefer `awaitCallback`.
+    func waitForCallback(timeout: TimeInterval) throws -> [String: String] {
         let deadline = Date().addingTimeInterval(timeout)
         while true {
             lock.lock(); let done = stopped; lock.unlock()
@@ -69,16 +82,21 @@ public final class LoopbackListener: @unchecked Sendable {
             let remaining = deadline.timeIntervalSinceNow
             if remaining <= 0 { throw LoopbackError.timedOut }
 
-            var readSet = fd_set()
-            fdZero(&readSet)
-            fdSet(sock, &readSet)
-            var tv = timeval(tv_sec: 1, tv_usec: 0)
-            let ready = select(sock + 1, &readSet, nil, nil, &tv)
-            if ready <= 0 { continue }
+            var descriptor = pollfd(fd: sock, events: Int16(POLLIN), revents: 0)
+            let ready = poll(&descriptor, 1, 500)
+            if ready < 0 {
+                if errno == EINTR { continue }
+                throw LoopbackError.socketFailed("poll() failed (errno \(errno))")
+            }
+            if ready == 0 { continue }
 
             let client = accept(sock, nil, nil)
-            guard client >= 0 else { continue }
+            if client < 0 {
+                if errno == EINTR || errno == ECONNABORTED { continue }
+                throw LoopbackError.socketFailed("accept() failed (errno \(errno))")
+            }
             defer { close(client) }
+            UnixSocket.suppressSIGPIPE(client)
 
             var request = ""
             var buffer = [UInt8](repeating: 0, count: 4096)
@@ -131,19 +149,4 @@ public final class LoopbackListener: @unchecked Sendable {
     <body style="font:15px -apple-system,system-ui;padding:3rem;text-align:center">
     <h2>Signed in</h2><p>You can close this tab and go back to ccmux.</p>
     """
-}
-
-private func fdZero(_ set: inout fd_set) {
-    _ = withUnsafeMutableBytes(of: &set) { $0.initializeMemory(as: UInt8.self, repeating: 0) }
-}
-
-private func fdSet(_ fd: Int32, _ set: inout fd_set) {
-    let intSize = Int32(MemoryLayout<Int32>.size * 8)
-    let index = Int(fd / intSize)
-    let bit = Int32(1) << Int32(fd % intSize)
-    withUnsafeMutablePointer(to: &set.fds_bits) { pointer in
-        pointer.withMemoryRebound(to: Int32.self, capacity: Int(__DARWIN_FD_SETSIZE) / 32) {
-            $0[index] |= bit
-        }
-    }
 }

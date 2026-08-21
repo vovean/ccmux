@@ -13,8 +13,7 @@ public enum ClaudeCredentialStore {
 
     public static func service(forNamespace dir: URL) -> String {
         let path = dir.path.precomposedStringWithCanonicalMapping
-        let digest = SHA256.hash(data: Data(path.utf8))
-        let hex = digest.map { String(format: "%02x", $0) }.joined()
+        let hex = Data(SHA256.hash(data: Data(path.utf8))).hexEncoded()
         return "\(globalService)-\(hex.prefix(8))"
     }
 

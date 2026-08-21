@@ -20,6 +20,9 @@ public enum PollPolicy {
     public static let jitterFraction: Double = 0.1
     public static let rateLimitedBackoff: TimeInterval = 300
     public static let escalationMarginPercent: Double = 15
+    /// Minimum spacing between manual refreshes, so the Refresh button cannot be
+    /// mashed into the endpoint's hourly budget.
+    public static let forcedPollFloor: TimeInterval = 30
 
     public struct Plan: Equatable {
         public var interval: TimeInterval
@@ -46,9 +49,6 @@ public enum PollPolicy {
         } else {
             interval = moved ? activeMaxInterval : idleMaxInterval
         }
-        interval = max(minInterval == urgentInterval ? interval : interval,
-                       interval == urgentInterval ? urgentInterval : minInterval)
-
         // A window resetting soon is worth one prompt poll just after it turns over.
         if let soonest = current.windows.compactMap(\.resetsAt).filter({ $0 > now }).min() {
             let untilReset = soonest.timeIntervalSince(now) + 60

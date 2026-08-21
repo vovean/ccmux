@@ -32,7 +32,7 @@ struct SessionsPage: View {
                                         .font(.caption2.monospacedDigit())
                                         .foregroundStyle(.tertiary)
                                 }
-                                Text(shortPath(info.cwd))
+                                Text(Format.shortenHome(info.cwd))
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                 Text("Started outside ccmux, so it uses whichever account "
@@ -53,7 +53,7 @@ struct SessionsPage: View {
         return Card {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
-                    Text(info?.name ?? shortPath(session.cwd)).font(.headline)
+                    Text(info?.name ?? Format.shortenHome(session.cwd)).font(.headline)
                     if let status = info?.status {
                         StatusPill(text: status, tint: statusTint(status))
                     }
@@ -61,7 +61,10 @@ struct SessionsPage: View {
                     Spacer()
                     Menu {
                         Toggle("Auto-switch when exhausted", isOn: Binding(
-                            get: { session.autoSwitch },
+                            get: {
+                                session.autoSwitchEnabled(
+                                    default: engine.settings.autoSwitch != .off)
+                            },
                             set: { engine.setAutoSwitch($0, for: session.id) }))
                         Divider()
                         Button("Forget this session") { engine.endSession(session.id) }
@@ -72,7 +75,7 @@ struct SessionsPage: View {
                     .fixedSize()
                 }
 
-                Text(shortPath(session.cwd)).font(.caption).foregroundStyle(.secondary)
+                Text(Format.shortenHome(session.cwd)).font(.caption).foregroundStyle(.secondary)
 
                 HStack(spacing: 8) {
                     Text("Account").font(.caption).foregroundStyle(.secondary)
@@ -107,7 +110,4 @@ struct SessionsPage: View {
         }
     }
 
-    private func shortPath(_ path: String) -> String {
-        path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
-    }
 }

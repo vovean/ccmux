@@ -75,16 +75,6 @@ public struct OAuthCredential: Equatable {
         return Date().addingTimeInterval(Self.expiryBuffer) >= expiresAt
     }
 
-    public var isRefreshTokenExpired: Bool {
-        guard let refreshTokenExpiresAt else { return false }
-        return Date() >= refreshTokenExpiresAt
-    }
-
-    /// Stable identity for a credential lineage: the refresh token survives access
-    /// token rotation, so two generations of one lineage compare equal.
-    public var lineageFingerprint: String {
-        refreshToken ?? accessToken
-    }
 }
 
 /// Minimal JSON value so unknown credential keys survive a round-trip.

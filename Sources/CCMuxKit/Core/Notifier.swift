@@ -7,13 +7,12 @@ import UserNotifications
 /// bundle identifier whose first authorization request comes from a bare binary run
 /// outside a bundle is denied permanently, and no amount of re-asking recovers it.
 public final class Notifier {
-    private let center = UNUserNotificationCenter.current()
-    private var fired: Set<String>
-    private let lock = NSLock()
+    /// Lazy: `UNUserNotificationCenter.current()` traps when there is no app bundle, so
+    /// touching it must wait until something actually posts.
+    private lazy var center = UNUserNotificationCenter.current()
+    private let crossings = CrossingLog()
 
-    public init() {
-        fired = Set(JSONStore.load([String].self, from: Paths.notifiedFile) ?? [])
-    }
+    public init() {}
 
     public enum Authorization: Equatable {
         case granted
@@ -64,32 +63,10 @@ public final class Notifier {
         }
     }
 
-    /// Posts only the first time this key crosses. The key should include the window's
-    /// reset time so the same window re-arms after it turns over.
+    /// Posts only the first time this key crosses. The key includes the window's reset
+    /// time, so the same window re-arms by itself once it turns over.
     public func postOnce(key: String, title: String, body: String) {
-        lock.lock()
-        let alreadyFired = fired.contains(key)
-        if !alreadyFired {
-            fired.insert(key)
-            // Bounded so a long-lived install does not accumulate keys forever; the
-            // oldest crossings are the least interesting.
-            if fired.count > 500 { fired = Set(fired.suffix(250)) }
-        }
-        let snapshot = Array(fired)
-        lock.unlock()
-        guard !alreadyFired else { return }
-        JSONStore.save(snapshot, to: Paths.notifiedFile)
+        guard crossings.claim(key) else { return }
         post(title: title, body: body)
-    }
-
-    /// Clears a crossing so it can fire again, used when a window resets.
-    public func rearm(keyPrefix: String) {
-        lock.lock()
-        let before = fired.count
-        fired = fired.filter { !$0.hasPrefix(keyPrefix) }
-        let snapshot = Array(fired)
-        let changed = before != fired.count
-        lock.unlock()
-        if changed { JSONStore.save(snapshot, to: Paths.notifiedFile) }
     }
 }

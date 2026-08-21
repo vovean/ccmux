@@ -28,7 +28,6 @@ public final class SessionProxy {
     /// Injectable so the proxy can be exercised against a local stub.
     private let upstream: URL
     fileprivate let queue: DispatchQueue
-    private let relay = UpstreamRelay()
     private var listener: NWListener?
     private var connections: [ObjectIdentifier: ConnectionHandler] = [:]
 
@@ -106,7 +105,6 @@ public final class SessionProxy {
         }
         listener?.cancel()
         listener = nil
-        relay.invalidate()
     }
 
     public enum ProxyError: Error, LocalizedError {
@@ -142,6 +140,7 @@ public final class SessionProxy {
         private var pending: [HTTPRequestParser.Request] = []
         private var busy = false
         private var peerClosed = false
+        private var inFlight: URLSessionDataTask?
 
         init(connection: NWConnection, proxy: SessionProxy) {
             self.connection = connection
@@ -150,11 +149,10 @@ public final class SessionProxy {
 
         func start() {
             guard let proxy else { return }
-            let socket = connection
             connection.stateUpdateHandler = { [weak self] state in
                 switch state {
                 case .failed, .cancelled:
-                    self?.proxy?.forget(socket)
+                    self?.teardown()
                 default:
                     break
                 }
@@ -167,9 +165,17 @@ public final class SessionProxy {
             connection.cancel()
         }
 
+        private func teardown() {
+            if let inFlight {
+                self.inFlight = nil
+                UpstreamRelay.shared.cancel(inFlight)
+            }
+            proxy?.forget(connection)
+        }
+
         private func finish() {
             connection.cancel()
-            proxy?.forget(connection)
+            teardown()
         }
 
         private func receive() {
@@ -204,16 +210,19 @@ public final class SessionProxy {
             guard !busy, !pending.isEmpty, let proxy else { return }
             busy = true
             let request = pending.removeFirst()
-            proxy.forward(request, on: connection) { [weak self] keepAlive in
+            proxy.forward(request, on: connection,
+                          onCancel: { [weak self] task in self?.inFlight = task }) {
+                [weak self] keepAlive in
                 guard let self, let proxy = self.proxy else { return }
                 proxy.queue.async {
                     self.busy = false
-                    if keepAlive && !self.peerClosed {
+                    self.inFlight = nil
+                    // A queued request is served regardless; only an empty queue has to
+                    // decide between waiting for more bytes and closing.
+                    if !self.pending.isEmpty {
                         self.pump()
-                    } else if self.pending.isEmpty {
+                    } else if !keepAlive || self.peerClosed {
                         self.finish()
-                    } else {
-                        self.pump()
                     }
                 }
             }
@@ -227,10 +236,14 @@ public final class SessionProxy {
         "host", "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
         "te", "trailer", "transfer-encoding", "upgrade", "content-length",
         "accept-encoding", "authorization",
+        // If ANTHROPIC_API_KEY is exported in the shell, Claude Code sends x-api-key
+        // too — and that would bill an account other than the one assigned here.
+        "x-api-key",
     ]
 
     fileprivate func forward(_ request: HTTPRequestParser.Request, on connection: NWConnection,
-                         completion: @escaping (Bool) -> Void) {
+                             onCancel: @escaping (URLSessionDataTask) -> Void,
+                             completion: @escaping (Bool) -> Void) {
         guard let assignment = tokenProvider() else {
             connection.send(content: HTTPResponseWriter.error(
                 status: 503, reason: "Service Unavailable",
@@ -246,17 +259,18 @@ public final class SessionProxy {
             return
         }
 
-        var upstream = URLRequest(url: url)
-        upstream.httpMethod = request.method
+        var outbound = URLRequest(url: url)
+        outbound.httpMethod = request.method
         for (name, value) in request.headers
         where !Self.strippedRequestHeaders.contains(name.lowercased()) {
-            upstream.addValue(value, forHTTPHeaderField: name)
+            outbound.addValue(value, forHTTPHeaderField: name)
         }
-        upstream.setValue("Bearer \(assignment.token)", forHTTPHeaderField: "Authorization")
-        if !request.body.isEmpty { upstream.httpBody = request.body }
+        outbound.setValue("Bearer \(assignment.token)", forHTTPHeaderField: "Authorization")
+        if !request.body.isEmpty { outbound.httpBody = request.body }
 
         let keepAlive = request.wantsKeepAlive
         let isHeadRequest = request.method.caseInsensitiveCompare("HEAD") == .orderedSame
+        let sessionID = self.sessionID
         var sentHead = false
         var bodyAllowed = true
 
@@ -264,14 +278,21 @@ public final class SessionProxy {
             onHead: { [weak self] response in
                 guard let self else { return }
                 var headers: [(String, String)] = []
-                var flat: [String: String] = [:]
+                var rateLimit: [String: String] = [:]
                 for (rawName, rawValue) in response.allHeaderFields {
                     guard let name = rawName as? String,
                           let value = rawValue as? String else { continue }
                     headers.append((name, value))
-                    flat[name] = value
+                    // Folded once, and only the keys anything reads: every consumer
+                    // rebuilding its own lower-cased copy of ~30 headers per response
+                    // was pure allocation.
+                    let folded = name.lowercased()
+                    if folded.hasPrefix("anthropic-ratelimit-unified-") {
+                        rateLimit[folded] = value
+                    }
                 }
-                self.observer(Observation(statusCode: response.statusCode, headers: flat,
+                self.observer(Observation(statusCode: response.statusCode,
+                                          headers: rateLimit,
                                           accountID: assignment.accountID))
 
                 // 204 and 304 must not carry a body, and a HEAD response never does.
@@ -295,7 +316,7 @@ public final class SessionProxy {
             },
             onEnd: { error in
                 if let error {
-                    Log.warn("proxy upstream error for session \(self.sessionID): \(error)")
+                    Log.warn("proxy upstream error for session \(sessionID): \(error)")
                     if !sentHead {
                         connection.send(content: HTTPResponseWriter.error(
                             status: 502, reason: "Bad Gateway",
@@ -303,10 +324,12 @@ public final class SessionProxy {
                             completion: .contentProcessed { _ in completion(false) })
                         return
                     }
-                    // The head is already on the wire, so the only honest signal left
-                    // is a truncated body: end the chunk stream and drop the socket.
-                    connection.send(content: HTTPResponseWriter.terminator,
-                                    completion: .contentProcessed { _ in completion(false) })
+                    // The head is already on the wire and the status cannot be taken
+                    // back. Dropping the connection without the terminating chunk is
+                    // the only way to say "incomplete": sending it would hand Claude
+                    // Code a syntactically complete response holding a truncated
+                    // answer, which it would accept as the whole reply.
+                    completion(false)
                     return
                 }
                 if bodyAllowed {
@@ -317,6 +340,9 @@ public final class SessionProxy {
                 }
             })
 
-        _ = relay.send(upstream, handlers: handlers)
+        let task = UpstreamRelay.shared.send(outbound, handlers: handlers)
+        // Held so a client that disconnects mid-request does not leave the upstream leg
+        // running against a one-hour resource timeout.
+        onCancel(task)
     }
 }

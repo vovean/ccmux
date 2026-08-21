@@ -2,11 +2,24 @@ import Foundation
 
 /// One rate-limit window as reported by the usage API or by response headers.
 public struct UsageWindow: Codable, Equatable, Identifiable {
-    public enum Kind: String, Codable, Equatable {
+    public enum Kind: String, Codable, Equatable, CaseIterable {
         case session          // the 5-hour window
         case weeklyAll        // weekly across all models
         case weeklyScoped     // weekly for one model, e.g. Fable
         case other
+
+        public var displayName: String {
+            switch self {
+            case .session: return "5-hour window"
+            case .weeklyAll: return "Weekly (all models)"
+            case .weeklyScoped: return "Weekly (per model, e.g. Fable)"
+            case .other: return "Other windows"
+            }
+        }
+
+        /// The kinds a threshold warning can be asked to watch. `.other` is whatever a
+        /// future API version adds and has no meaning to configure yet.
+        public static let watchable: [Kind] = [.session, .weeklyAll, .weeklyScoped]
     }
 
     public var kind: Kind
@@ -30,27 +43,34 @@ public struct UsageWindow: Codable, Equatable, Identifiable {
 
 public struct UsageSnapshot: Codable, Equatable {
     public var windows: [UsageWindow]
+    /// When any source last updated these numbers, including a proxied response header.
     public var fetchedAt: Date
+    /// When GET /api/oauth/usage last succeeded. Tracked separately from `fetchedAt`
+    /// because response headers refresh the 5-hour and weekly windows but never the
+    /// per-model ones — scheduling polls off `fetchedAt` would let an active session
+    /// suppress the endpoint forever and freeze the Fable window.
+    public var lastEndpointFetchAt: Date?
     /// Set when the last fetch failed, so the UI can show stale-with-reason.
     public var lastError: String?
     public var nextPollAt: Date?
-    public var pollInterval: TimeInterval?
 
     public init(windows: [UsageWindow] = [], fetchedAt: Date = Date(),
-                lastError: String? = nil, nextPollAt: Date? = nil,
-                pollInterval: TimeInterval? = nil) {
+                lastEndpointFetchAt: Date? = nil, lastError: String? = nil,
+                nextPollAt: Date? = nil) {
         self.windows = windows
         self.fetchedAt = fetchedAt
+        self.lastEndpointFetchAt = lastEndpointFetchAt
         self.lastError = lastError
         self.nextPollAt = nextPollAt
-        self.pollInterval = pollInterval
     }
 
-    public func window(_ kind: UsageWindow.Kind, model: String? = nil) -> UsageWindow? {
-        windows.first {
-            guard $0.kind == kind else { return false }
-            guard let model else { return true }
-            return $0.modelName?.caseInsensitiveCompare(model) == .orderedSame
+    /// Windows of a kind, optionally narrowed to one model. The model filter only
+    /// applies to per-model windows, so `.session` is never filtered out by it.
+    public func windows(kind: UsageWindow.Kind, model: String? = nil) -> [UsageWindow] {
+        windows.filter { window in
+            guard window.kind == kind else { return false }
+            guard kind == .weeklyScoped, let model else { return true }
+            return window.modelName?.caseInsensitiveCompare(model) == .orderedSame
         }
     }
 

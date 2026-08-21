@@ -3,10 +3,13 @@ SWIFT_TEST_FLAGS = --disable-xctest --enable-swift-testing \
 	-Xswiftc -F -Xswiftc $(FW) \
 	-Xlinker -F -Xlinker $(FW) -Xlinker -rpath -Xlinker $(FW)
 
-.PHONY: build app test install run clean install-agent uninstall-agent
+.PHONY: build app icon test install run clean install-agent uninstall-agent
 
 build:
 	swift build
+
+icon:
+	./scripts/make-icon.sh
 
 app:
 	./scripts/bundle.sh release

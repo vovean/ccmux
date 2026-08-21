@@ -19,14 +19,22 @@ public enum PolicyEngine {
                                 policy: Policy) -> AccountRanking? {
         guard account.health != .needsRelogin else { return nil }
 
+        // An account we have never measured must not outrank every measured one just
+        // for being unknown, so it starts from a neutral value: a healthy account with
+        // real headroom wins, and an unknown one still beats a nearly-spent account.
+        guard let usage, !usage.windows.isEmpty else {
+            return AccountRanking(accountID: account.id, headroom: unknownHeadroom,
+                                  bindingWindow: nil)
+        }
+
         var tightest = 100.0
         var binding: String?
         for kind in policy.requiredWindows {
-            let windows = matching(kind: kind, model: policy.scopedModel, in: usage)
-            // No window of this kind means the account is not gated on it. A Max plan
-            // with no per-model weekly cap reports no scoped window at all, and that
-            // is unconstrained, not exhausted.
-            for window in windows where window.headroom < tightest {
+            // No window of this kind means the account is not gated on it. A plan with
+            // no per-model weekly cap reports no scoped window at all, and that is
+            // unconstrained, not exhausted.
+            for window in usage.windows(kind: kind, model: policy.scopedModel)
+            where window.headroom < tightest {
                 tightest = window.headroom
                 binding = window.label
             }
@@ -35,15 +43,8 @@ public enum PolicyEngine {
         return AccountRanking(accountID: account.id, headroom: tightest, bindingWindow: binding)
     }
 
-    static func matching(kind: UsageWindow.Kind, model: String?,
-                         in usage: UsageSnapshot?) -> [UsageWindow] {
-        guard let usage else { return [] }
-        return usage.windows.filter { window in
-            guard window.kind == kind else { return false }
-            guard kind == .weeklyScoped, let model else { return true }
-            return window.modelName?.caseInsensitiveCompare(model) == .orderedSame
-        }
-    }
+    /// Ranking value for an account with no usage data at all.
+    public static let unknownHeadroom: Double = 50
 
     /// Best account for a policy, most headroom first, ties broken by priority.
     public static func rank(accounts: [Account], usage: [String: UsageSnapshot],

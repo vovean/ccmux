@@ -20,19 +20,11 @@ struct SettingsPage: View {
                         }
                         .fixedSize()
                     }
-                    ForEach(watchable, id: \.self) { kind in
-                        Toggle(label(for: kind), isOn: Binding(
+                    ForEach(UsageWindow.Kind.watchable, id: \.self) { kind in
+                        Toggle(kind.displayName, isOn: Binding(
                             get: { engine.settings.watchedWindows.contains(kind) },
                             set: { on in
-                                engine.updateSettings { settings in
-                                    if on {
-                                        if !settings.watchedWindows.contains(kind) {
-                                            settings.watchedWindows.append(kind)
-                                        }
-                                    } else {
-                                        settings.watchedWindows.removeAll { $0 == kind }
-                                    }
-                                }
+                                engine.updateSettings { $0.setWatched(kind, on: on) }
                             }))
                     }
                     Toggle("Notify when an account needs re-login", isOn: Binding(
@@ -102,7 +94,7 @@ struct SettingsPage: View {
                         HStack(alignment: .firstTextBaseline) {
                             Text(policy.name).font(.subheadline.monospaced())
                             Spacer()
-                            Text(policy.requiredWindows.map(label(for:))
+                            Text(policy.requiredWindows.map(\.displayName)
                                 .joined(separator: " · "))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -120,22 +112,11 @@ struct SettingsPage: View {
         }
     }
 
-    private var watchable: [UsageWindow.Kind] { [.session, .weeklyAll, .weeklyScoped] }
-
-    private func label(for kind: UsageWindow.Kind) -> String {
-        switch kind {
-        case .session: return "5-hour window"
-        case .weeklyAll: return "Weekly (all models)"
-        case .weeklyScoped: return "Weekly (per model, e.g. Fable)"
-        case .other: return "Other windows"
-        }
-    }
-
     private func labelledPath(_ title: String, _ path: String) -> some View {
         HStack {
             Text(title).foregroundStyle(.secondary)
             Spacer()
-            Text(path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+            Text(Format.shortenHome(path))
                 .font(.caption.monospaced())
                 .textSelection(.enabled)
                 .foregroundStyle(.tertiary)
@@ -146,12 +127,11 @@ struct SettingsPage: View {
 
     private func section<Content: View>(_ title: String,
                                         @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(.headline)
-            content()
+        Card {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title).font(.headline)
+                content()
+            }
         }
-        .padding(12)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
-            .fill(Color.primary.opacity(0.04)))
     }
 }

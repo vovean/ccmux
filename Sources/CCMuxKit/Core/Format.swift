@@ -1,12 +1,27 @@
 import Foundation
 
 public enum Format {
-    /// Absolute time: "23:30" today, "Aug 25 10:00" otherwise.
+    /// Formatters are expensive to build (~24 us each) and these run per window per
+    /// render, so they are built once.
+    private static let sameDayClock: DateFormatter = {
+        let f = DateFormatter()
+        f.timeStyle = .short
+        f.dateStyle = .none
+        return f
+    }()
+
+    private static let otherDayClock: DateFormatter = {
+        let f = DateFormatter()
+        f.setLocalizedDateFormatFromTemplate("MMM d jm")
+        return f
+    }()
+
+    /// Absolute time, in the viewer's 12/24-hour setting: "23:30" today, "Aug 25 10:00"
+    /// otherwise.
     public static func clock(_ date: Date, now: Date = Date()) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = Calendar.current.isDate(date, inSameDayAs: now)
-            ? "HH:mm" : "MMM d HH:mm"
-        return formatter.string(from: date)
+        Calendar.current.isDate(date, inSameDayAs: now)
+            ? sameDayClock.string(from: date)
+            : otherDayClock.string(from: date)
     }
 
     /// `now` is injectable so a caller — or a test — gets the same answer for the same

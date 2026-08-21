@@ -26,15 +26,18 @@ public struct JSONStore {
     }
 
     public static func save<T: Encodable>(_ value: T, to url: URL) {
+        // Unique per call: two concurrent saves of the same file would otherwise race
+        // on one temp path and lose a write.
+        let tmp = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
         do {
             let data = try encoder.encode(value)
-            let tmp = url.deletingLastPathComponent()
-                .appendingPathComponent(".\(url.lastPathComponent).tmp")
             try data.write(to: tmp, options: .atomic)
             try? FileManager.default.setAttributes([.posixPermissions: 0o600],
                                                    ofItemAtPath: tmp.path)
             _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp)
         } catch {
+            try? FileManager.default.removeItem(at: tmp)
             Log.error("could not save \(url.lastPathComponent): \(error)")
         }
     }

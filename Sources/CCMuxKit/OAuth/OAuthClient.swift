@@ -5,17 +5,26 @@ public enum OAuthError: Error, LocalizedError {
     /// The token endpoint rejected the grant. This refresh lineage is dead; only a
     /// fresh login recovers it.
     case invalidGrant(String)
-    /// Network or server trouble; the credential may still be good.
-    case transient(String)
+    /// Network or server trouble; the credential may still be good. `status` is the
+    /// HTTP status when there was one — carried rather than re-parsed out of the
+    /// message, because the 429 backoff depends on recognising it.
+    case transient(String, status: Int? = nil)
     case noRefreshToken
     case badResponse(String)
 
     public var errorDescription: String? {
         switch self {
         case .invalidGrant(let s): return "Sign-in expired: \(s)"
-        case .transient(let s): return s
+        case .transient(let s, _): return s
         case .noRefreshToken: return "No refresh token stored"
         case .badResponse(let s): return "Unexpected response: \(s)"
+        }
+    }
+
+    public var statusCode: Int? {
+        switch self {
+        case .transient(_, let status): return status
+        default: return nil
         }
     }
 
@@ -162,7 +171,8 @@ public struct OAuthClient {
         var request = URLRequest(url: URL(string: "\(Self.apiBase)/api/oauth/profile")!)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let json = try await getJSON(request)
+        request.timeoutInterval = 15
+        let json = try await send(request)
         guard let account = json["account"] as? [String: Any],
               let uuid = (account["uuid"] as? String)?
                   .trimmingCharacters(in: .whitespaces), !uuid.isEmpty
@@ -182,7 +192,7 @@ public struct OAuthClient {
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue(Self.betaHeader, forHTTPHeaderField: "anthropic-beta")
         request.timeoutInterval = 15
-        let json = try await getJSON(request)
+        let json = try await send(request)
         return UsageParser.windows(from: json)
     }
 
@@ -197,11 +207,7 @@ public struct OAuthClient {
         return try await send(request)
     }
 
-    private func getJSON(_ request: URLRequest) async throws -> [String: Any] {
-        var request = request
-        if request.timeoutInterval == 60 { request.timeoutInterval = 15 }
-        return try await send(request)
-    }
+
 
     private func send(_ request: URLRequest) async throws -> [String: Any] {
         let data: Data, response: URLResponse
@@ -219,7 +225,8 @@ public struct OAuthClient {
                text.contains("invalid_grant") || text.contains("invalid_client") {
                 throw OAuthError.invalidGrant(text)
             }
-            throw OAuthError.transient("HTTP \(http.statusCode): \(text)")
+            throw OAuthError.transient("HTTP \(http.statusCode): \(text)",
+                                       status: http.statusCode)
         }
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw OAuthError.badResponse("body was not a JSON object")

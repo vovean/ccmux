@@ -76,10 +76,23 @@ struct PolicyEngineTests {
                                   policy: Self.opus)?.accountID == "live")
     }
 
-    @Test func unknownUsageIsTreatedAsUnconstrained() throws {
+    /// An account nothing has measured must not outrank every measured one just for
+    /// being unknown — but it should still beat a nearly-spent account, because the
+    /// first response header will correct it either way.
+    @Test func unmeasuredAccountRanksNeutrally() throws {
         let ranking = try #require(PolicyEngine.headroom(for: Self.account("a"), usage: nil,
                                                          policy: Self.opus))
-        #expect(ranking.headroom == 100)
+        #expect(ranking.headroom == PolicyEngine.unknownHeadroom)
+
+        let accounts = [Self.account("unmeasured"), Self.account("healthy")]
+        #expect(PolicyEngine.pick(
+            accounts: accounts,
+            usage: ["healthy": Self.snapshot(session: 10, weekly: 10)],
+            policy: Self.opus)?.accountID == "healthy")
+        #expect(PolicyEngine.pick(
+            accounts: accounts,
+            usage: ["healthy": Self.snapshot(session: 95, weekly: 95)],
+            policy: Self.opus)?.accountID == "unmeasured")
     }
 
     @Test func tiesBreakOnPriorityThenName() throws {

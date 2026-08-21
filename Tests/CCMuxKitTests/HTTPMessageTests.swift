@@ -155,3 +155,73 @@ struct ReasonPhraseTests {
         #expect(HTTPResponseWriter.reasonPhrase(599) == "Server Error")
     }
 }
+
+@Suite("Chunked framing edge cases")
+struct ChunkedFramingTests {
+    /// The bug: only the first line after the terminal chunk was consumed, so a trailer
+    /// left a stray CRLF that made the next pipelined request parse as a bad start line.
+    @Test func trailersAreConsumedSoTheNextRequestStillParses() throws {
+        var parser = HTTPRequestParser()
+        parser.append(Data(("POST /v1/messages HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+            + "4\r\nabcd\r\n"
+            + "0\r\n"
+            + "X-Checksum: deadbeef\r\n"
+            + "\r\n"
+            + "HEAD /api/hello HTTP/1.1\r\nHost: x\r\n\r\n").utf8))
+
+        let first = try #require(try parser.next())
+        #expect(String(decoding: first.body, as: UTF8.self) == "abcd")
+        let second = try #require(try parser.next())
+        #expect(second.method == "HEAD")
+        #expect(second.target == "/api/hello")
+    }
+
+    @Test func terminalChunkWithNoTrailersIsFine() throws {
+        var parser = HTTPRequestParser()
+        parser.append(Data(("POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+            + "2\r\nhi\r\n0\r\n\r\n"
+            + "GET /y HTTP/1.1\r\n\r\n").utf8))
+        #expect(String(decoding: try #require(try parser.next()).body, as: UTF8.self) == "hi")
+        #expect(try #require(try parser.next()).target == "/y")
+    }
+
+    /// Chunks arriving one byte at a time must decode to the same body, and must not be
+    /// re-decoded from the start on every read.
+    @Test func chunksDecodeAcrossArbitrarySplits() throws {
+        let wire = "POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+            + "5\r\nhello\r\n1\r\n \r\n5\r\nworld\r\n0\r\n\r\n"
+        var parser = HTTPRequestParser()
+        var result: HTTPRequestParser.Request?
+        for byte in Array(wire.utf8) {
+            parser.append(Data([byte]))
+            if let request = try parser.next() { result = request }
+        }
+        #expect(String(decoding: try #require(result).body, as: UTF8.self) == "hello world")
+    }
+
+    @Test func bodyArrivingInPiecesIsAssembledOnce() throws {
+        var parser = HTTPRequestParser()
+        parser.append(Data("POST /x HTTP/1.1\r\nContent-Length: 9\r\n\r\n".utf8))
+        #expect(try parser.next() == nil)
+        for piece in ["abc", "def", "ghi"] {
+            parser.append(Data(piece.utf8))
+        }
+        #expect(String(decoding: try #require(try parser.next()).body, as: UTF8.self)
+                == "abcdefghi")
+    }
+
+    @Test func headerLookupIsCaseInsensitive() throws {
+        var parser = HTTPRequestParser()
+        parser.append(Data("GET /x HTTP/1.1\r\nCoNtEnT-LeNgTh: 0\r\nX-App: cli\r\n\r\n".utf8))
+        let request = try #require(try parser.next())
+        #expect(request.header("content-length") == "0")
+        #expect(request.header("X-APP") == "cli")
+        #expect(request.header("absent") == nil)
+    }
+
+    @Test func aRequestLineWithoutAPathIsRejected() {
+        var parser = HTTPRequestParser()
+        parser.append(Data("POST notapath HTTP/1.1\r\n\r\n".utf8))
+        #expect(throws: HTTPRequestParser.ParseError.self) { try parser.next() }
+    }
+}

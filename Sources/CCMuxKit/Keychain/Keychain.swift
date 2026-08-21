@@ -23,8 +23,8 @@ public enum Keychain {
     private static let timeout: TimeInterval = 5
 
     /// `security -i` reads stdin with a 4096-byte line buffer; a longer command is
-    /// truncated mid-argument and silently fails to write. Fall back to argv there.
-    private static let stdinLineLimit = 4096 - 64
+    /// truncated mid-argument and silently fails to write.
+    static let stdinLineLimit = 4096 - 64
 
     public static func accountName() -> String {
         if let user = ProcessInfo.processInfo.environment["USER"], !user.isEmpty { return user }
@@ -42,21 +42,19 @@ public enum Keychain {
         throw KeychainError.failed("find-generic-password rc=\(r.code): \(r.stderr)")
     }
 
-    public static func exists(service: String, account: String = accountName()) -> Bool {
-        (try? run([tool, "find-generic-password", "-a", account, "-s", service]))?.code == 0
-    }
-
     public static func write(service: String, account: String = accountName(),
                             value: String) throws {
-        let hex = Data(value.utf8).map { String(format: "%02x", $0) }.joined()
-        let command = "add-generic-password -U -a \(quote(account)) -s \(quote(service)) -X \(hex)\n"
-        let r: Result
-        if command.utf8.count <= stdinLineLimit {
-            r = try run([tool, "-i"], stdin: command)
-        } else {
-            r = try run([tool, "add-generic-password", "-U", "-a", account,
-                         "-s", service, "-X", hex])
+        let command = "add-generic-password -U -a \(quote(account)) -s \(quote(service)) "
+            + "-X \(Data(value.utf8).hexEncoded())\n"
+        // Only the stdin path exists: the argv alternative would put the credential
+        // where `ps` can read it, and a real Claude Code credential hex-encodes to
+        // 1-2 KB against a 4032-byte budget, so refusing loudly beats degrading
+        // silently.
+        guard command.utf8.count <= stdinLineLimit else {
+            throw KeychainError.failed(
+                "credential is too large for `security -i` (\(command.utf8.count) bytes)")
         }
+        let r = try run([tool, "-i"], stdin: command)
         if r.code != 0 {
             throw KeychainError.failed("add-generic-password rc=\(r.code): \(r.stderr)")
         }
@@ -79,6 +77,8 @@ public enum Keychain {
 
     private static func run(_ argv: [String], stdin: String? = nil) throws -> Result {
         let p = Process()
+        // Set before run(): a short-lived child can exit before the handler is
+        // installed, and Process fires it immediately in that case.
         p.executableURL = URL(fileURLWithPath: argv[0])
         p.arguments = Array(argv.dropFirst())
         let out = Pipe(), err = Pipe()
@@ -98,15 +98,29 @@ public enum Keychain {
         let outData = out.fileHandleForReading.readDataToEndOfFile()
         let errData = err.fileHandleForReading.readDataToEndOfFile()
 
-        let deadline = Date().addingTimeInterval(timeout)
-        while p.isRunning && Date() < deadline { usleep(20_000) }
+        // A polled wait costs ~28ms of pure sleep per call, and `security` is on the
+        // proxy's request path; the termination handler answers as soon as the child
+        // is reaped.
         if p.isRunning {
-            p.terminate()
-            throw KeychainError.failed("security timed out after \(Int(timeout))s")
+            let exited = DispatchSemaphore(value: 0)
+            p.terminationHandler = { _ in exited.signal() }
+            if p.isRunning, exited.wait(timeout: .now() + timeout) == .timedOut {
+                p.terminate()
+                throw KeychainError.failed("security timed out after \(Int(timeout))s")
+            }
         }
         return Result(code: p.terminationStatus,
                       stdout: String(decoding: outData, as: UTF8.self),
                       stderr: String(decoding: errData, as: UTF8.self)
                           .trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+}
+
+
+extension Data {
+    /// The encoding that decides which Keychain item is read and what value is written,
+    /// so it exists once.
+    func hexEncoded() -> String {
+        map { String(format: "%02x", $0) }.joined()
     }
 }

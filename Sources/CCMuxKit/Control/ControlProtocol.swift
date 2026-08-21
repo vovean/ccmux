@@ -5,7 +5,7 @@ public enum ControlRequest: Codable, Equatable {
     /// The shim asks for a session. `pid` is the shim's own pid, which becomes the
     /// claude pid because the shim execs claude — that is how a session is later
     /// matched to ~/.claude/sessions/<pid>.json.
-    case newSession(policy: String, cwd: String, pid: Int32)
+    case newSession(policy: String, cwd: String, pid: Int32, accountID: String?)
     case endSession(sessionID: String)
     case assign(sessionID: String, accountID: String)
     case status

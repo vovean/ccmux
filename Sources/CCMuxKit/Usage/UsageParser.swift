@@ -52,26 +52,32 @@ public enum UsageParser {
                            resetsAt: date(dict["resets_at"]))
     }
 
+    /// The usage endpoint sends fractional seconds; the fallback covers a response
+    /// without them. Cached because a parse allocated two of these per timestamp.
+    private static let fractionalISO: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    private static let plainISO = ISO8601DateFormatter()
+
     static func date(_ raw: Any?) -> Date? {
         guard let text = raw as? String, !text.isEmpty else { return nil }
-        let withFraction = ISO8601DateFormatter()
-        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let d = withFraction.date(from: text) { return d }
-        return ISO8601DateFormatter().date(from: text)
+        return fractionalISO.date(from: text) ?? plainISO.date(from: text)
     }
 
     /// Reads the `anthropic-ratelimit-unified-*` response headers that ride along on
     /// every inference response. Free and exact for the 5-hour and weekly windows;
     /// per-model windows never appear here, so they still need the usage endpoint.
+    /// Header names must already be lower-cased; `SessionProxy` does that once while
+    /// it walks the response, rather than every reader rebuilding a folded copy.
     public static func windowsFromResponseHeaders(_ headers: [String: String])
         -> [UsageWindow] {
-        var lowered: [String: String] = [:]
-        for (key, value) in headers { lowered[key.lowercased()] = value }
-
         func window(_ prefix: String, kind: UsageWindow.Kind, label: String) -> UsageWindow? {
-            guard let raw = lowered["anthropic-ratelimit-unified-\(prefix)-utilization"],
+            guard let raw = headers["anthropic-ratelimit-unified-\(prefix)-utilization"],
                   let fraction = Double(raw) else { return nil }
-            let reset = lowered["anthropic-ratelimit-unified-\(prefix)-reset"]
+            let reset = headers["anthropic-ratelimit-unified-\(prefix)-reset"]
                 .flatMap(Double.init)
                 .map { Date(timeIntervalSince1970: $0) }
             // The header is a fraction of the limit (0.35 == 35%).
@@ -83,12 +89,10 @@ public enum UsageParser {
                 window("7d", kind: .weeklyAll, label: "Weekly")].compactMap { $0 }
     }
 
-    /// True when the server says this request was refused for hitting a limit.
+    /// True when the server says this request was refused for hitting a limit. Header
+    /// names must already be lower-cased.
     public static func isRateLimited(headers: [String: String], statusCode: Int) -> Bool {
-        if statusCode == 429 { return true }
-        var lowered: [String: String] = [:]
-        for (key, value) in headers { lowered[key.lowercased()] = value }
-        return lowered["anthropic-ratelimit-unified-status"] == "rejected"
+        statusCode == 429 || headers["anthropic-ratelimit-unified-status"] == "rejected"
     }
 }
 

@@ -16,7 +16,11 @@ public enum ControlClient {
             throw UnixSocketError.failed("ccmux is not running (connect errno \(errno))")
         }
 
-        var timeout = timeval(tv_sec: 20, tv_usec: 0)
+        UnixSocket.suppressSIGPIPE(fd)
+        // Must exceed the slowest server-side handler (importGlobalLogin waits up to
+        // 30s for a profile fetch), or the client gives up first and the server writes
+        // into a closed socket.
+        var timeout = timeval(tv_sec: 45, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout,
                    socklen_t(MemoryLayout<timeval>.size))
 

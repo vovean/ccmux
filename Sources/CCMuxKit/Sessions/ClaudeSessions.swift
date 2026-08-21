@@ -10,13 +10,13 @@ public enum ClaudeSessions {
         }
         var result: [ClaudeSessionInfo] = []
         for name in names where name.hasSuffix(".json") {
+            // The file is named <pid>.json, so a dead session can be skipped without
+            // reading or parsing it — and stale files accumulate.
+            guard let pid = Int32(name.dropLast(5)), isAlive(pid) else { continue }
             let url = dir.appendingPathComponent(name)
             guard let data = try? Data(contentsOf: url),
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let pidNumber = obj["pid"] as? Int
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { continue }
-            let pid = Int32(pidNumber)
-            guard isAlive(pid) else { continue }
             result.append(ClaudeSessionInfo(
                 pid: pid,
                 sessionID: obj["sessionId"] as? String ?? "",

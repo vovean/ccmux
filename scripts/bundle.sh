@@ -13,6 +13,8 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/ccmux"
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
+[ -f "$ROOT/Resources/AppIcon.icns" ] && cp "$ROOT/Resources/AppIcon.icns" \
+  "$APP/Contents/Resources/"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 codesign --force --sign - --identifier io.vovean.ccmux "$APP" >/dev/null

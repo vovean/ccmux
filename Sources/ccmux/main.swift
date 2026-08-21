@@ -109,7 +109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationDidBecomeActive(_ notification: Notification) {
         guard didFinishLaunching else { return }
         guard Date().timeIntervalSince(lastCloseAt) > 1.0 else { return }
-        if window == nil || window?.isVisible != true { showWindow() }
+        if window?.isVisible != true { showWindow() }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -189,6 +189,11 @@ if CLI.isCLIInvocation(arguments) {
     CLI.main(arguments)
 }
 
+if let index = arguments.firstIndex(of: "--render-icon"), index + 1 < arguments.count {
+    MainActor.assumeIsolated { IconRenderer.write(to: arguments[index + 1]) }
+    exit(0)
+}
+
 // Top-level code is not actor-isolated in Swift 5 mode but does run on the main
 // thread. `app.run()` never returns, so `delegate` lives for the process lifetime,
 // which matters because NSApplication holds its delegate weakly.
@@ -200,4 +205,25 @@ MainActor.assumeIsolated {
     // knows whether this launch came from the shim.
     app.setActivationPolicy(.accessory)
     app.run()
+}
+
+
+/// `ccmux --render-icon <path>` rasterises the app icon, so `scripts/make-icon.sh` can
+/// rebuild AppIcon.icns from the same drawing the app ships.
+@MainActor
+enum IconRenderer {
+    static func write(to path: String) {
+        let renderer = ImageRenderer(content: AppIconArt(side: 1024))
+        renderer.scale = 1
+        guard let image = renderer.nsImage,
+              let tiff = image.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff),
+              let png = rep.representation(using: .png, properties: [:])
+        else {
+            FileHandle.standardError.write(Data("could not render the icon\n".utf8))
+            exit(1)
+        }
+        try? png.write(to: URL(fileURLWithPath: path))
+        print("wrote \(path)")
+    }
 }

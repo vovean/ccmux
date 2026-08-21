@@ -64,12 +64,19 @@ public final class ControlServer {
 
     public func stop() {
         running = false
-        if listenFD >= 0 { close(listenFD); listenFD = -1 }
+        if listenFD >= 0 {
+            // shutdown() first: closing the descriptor while a thread is blocked in
+            // accept() on it is undefined, whereas shutdown makes accept return.
+            shutdown(listenFD, SHUT_RDWR)
+            close(listenFD)
+            listenFD = -1
+        }
         try? FileManager.default.removeItem(atPath: Paths.controlSocket.path)
     }
 
     private func serve(_ fd: Int32) {
         defer { close(fd) }
+        UnixSocket.suppressSIGPIPE(fd)
 
         var peerUID = uid_t(0)
         var peerGID = gid_t(0)
