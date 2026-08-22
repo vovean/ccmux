@@ -109,6 +109,26 @@ the Chrome profile each account's login page opens in.
 At the threshold (3% headroom by default) you get a notification. When a window is
 actually hit, the session moves to the best remaining account that satisfies its policy.
 
+**Failover happens before Claude Code sees the refusal.** A limit refusal comes back
+through the proxy first, so ccmux re-issues the same request on an account that can
+actually serve it and returns that response — the session never learns there was a
+problem and never parks. Eligibility is computed per request against the windows that
+really gate it: the 5-hour window, the weekly-all window, and the weekly window for the
+*model named in the request body*. A spent Fable week does not stop an Opus call.
+
+**When nothing can serve it**, ccmux rewrites `anthropic-ratelimit-unified-reset` on the
+refusal to the soonest moment *any* account frees up before handing it to Claude Code.
+That header is where Claude Code reads the time for its automatic continue, and it
+refuses to wait at all when the reset is more than 24 hours out. Left alone, a session
+that hit a Fable weekly limit would be told to wait three days, give up, print
+"`/model` to switch models" and sit idle all night — even though another subscription
+was four hours from freeing up. Now it is told the four hours, arms its own auto-continue
+and resumes itself, and step one puts it on whichever account is live by then.
+
+The residual case: if every account really is days away, Claude Code still declines to
+wait and you get a notification instead. Nothing ccmux can do about that without
+switching models for you, which it does not.
+
 A switch costs the prompt cache: the next request re-reads the whole conversation at full
 price. That is inherent to changing accounts mid-conversation, not something ccmux can
 avoid — which is what **At turn boundary** is for. In that mode a session that is mid-answer

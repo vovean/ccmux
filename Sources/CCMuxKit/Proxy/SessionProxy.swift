@@ -31,10 +31,13 @@ public final class SessionProxy {
     private var listener: NWListener?
     private var connections: [ObjectIdentifier: ConnectionHandler] = [:]
 
-    /// Resolves the account and bearer token to use for the next request. Called per
-    /// request so a reassignment takes effect immediately.
-    private let tokenProvider: () -> (accountID: String, token: String)?
+    /// Resolves who serves a request, and who could serve it if the assigned account
+    /// refuses. Consulted per request, so a reassignment takes effect immediately.
+    private weak var router: SessionRouting?
     private let observer: (Observation) -> Void
+    /// Shared in production so sessions reuse one warm connection pool; injectable so a
+    /// test can have its own and not contend with every other test in the process.
+    private let relay: UpstreamRelay
 
     public private(set) var port: UInt16 = 0
 
@@ -44,12 +47,14 @@ public final class SessionProxy {
 
     public init(sessionID: String, desiredPort: UInt16? = nil,
                 upstream: URL = SessionProxy.defaultUpstream,
-                tokenProvider: @escaping () -> (accountID: String, token: String)?,
+                router: SessionRouting,
+                relay: UpstreamRelay = .shared,
                 observer: @escaping (Observation) -> Void) {
         self.sessionID = sessionID
         self.desiredPort = desiredPort
         self.upstream = upstream
-        self.tokenProvider = tokenProvider
+        self.router = router
+        self.relay = relay
         self.observer = observer
         self.queue = DispatchQueue(label: "io.vovean.ccmux.proxy.\(sessionID)")
     }
@@ -168,7 +173,7 @@ public final class SessionProxy {
         private func teardown() {
             if let inFlight {
                 self.inFlight = nil
-                UpstreamRelay.shared.cancel(inFlight)
+                proxy?.relay.cancel(inFlight)
             }
             proxy?.forget(connection)
         }
@@ -244,7 +249,27 @@ public final class SessionProxy {
     fileprivate func forward(_ request: HTTPRequestParser.Request, on connection: NWConnection,
                              onCancel: @escaping (URLSessionDataTask) -> Void,
                              completion: @escaping (Bool) -> Void) {
-        guard let assignment = tokenProvider() else {
+        // The model decides which weekly window gates this request: a spent Fable week
+        // does not stop an Opus call, and vice versa.
+        let model = ModelRouting.model(inRequestBody: request.body)
+        attempt(request, model: model, tried: [], on: connection, onCancel: onCancel,
+                completion: completion)
+    }
+
+    /// Sends one upstream attempt, and on a limit refusal retries on another account
+    /// before Claude Code ever sees it.
+    ///
+    /// This is what keeps a long run alive: the refusal arrives here first, so an account
+    /// that still has headroom can serve the same request and Claude Code never learns
+    /// there was a problem. Each account is tried at most once — cycling would also risk
+    /// Claude Code's own "stopped after repeated usage-limit hits" guard.
+    private func attempt(_ request: HTTPRequestParser.Request, model: String?,
+                         tried: Set<String>, on connection: NWConnection,
+                         onCancel: @escaping (URLSessionDataTask) -> Void,
+                         completion: @escaping (Bool) -> Void) {
+        guard let assignment = tried.isEmpty
+            ? router?.assignment(sessionID: sessionID)
+            : router?.failover(sessionID: sessionID, model: model, tried: tried) else {
             connection.send(content: HTTPResponseWriter.error(
                 status: 503, reason: "Service Unavailable",
                 message: "ccmux has no account assigned to this session"),
@@ -273,6 +298,9 @@ public final class SessionProxy {
         let sessionID = self.sessionID
         var sentHead = false
         var bodyAllowed = true
+        // Set when this attempt is being replaced; its remaining callbacks must not reach
+        // the client, which is already being served by the retry.
+        var abandoned = false
 
         let handlers = UpstreamRelay.Handlers(
             onHead: { [weak self] response in
@@ -283,19 +311,46 @@ public final class SessionProxy {
                     guard let name = rawName as? String,
                           let value = rawValue as? String else { continue }
                     headers.append((name, value))
-                    // Folded once, and only the keys anything reads: every consumer
-                    // rebuilding its own lower-cased copy of ~30 headers per response
-                    // was pure allocation.
+                    // Folded once, and only the keys anything reads.
                     let folded = name.lowercased()
                     if folded.hasPrefix("anthropic-ratelimit-unified-") {
                         rateLimit[folded] = value
                     }
                 }
+                // Reported for every attempt: a refusal is still real usage news about
+                // the account that produced it.
                 self.observer(Observation(statusCode: response.statusCode,
                                           headers: rateLimit,
                                           accountID: assignment.accountID))
 
-                // 204 and 304 must not carry a body, and a HEAD response never does.
+                if UsageParser.isRateLimited(headers: rateLimit,
+                                             statusCode: response.statusCode) {
+                    var attempted = tried
+                    attempted.insert(assignment.accountID)
+                    if self.router?.failover(sessionID: sessionID, model: model,
+                                             tried: attempted) != nil {
+                        abandoned = true
+                        Log.info("session \(sessionID): \(assignment.accountID) refused "
+                                 + "\(model ?? "request"), retrying on another account")
+                        self.queue.async {
+                            self.attempt(request, model: model, tried: attempted,
+                                         on: connection, onCancel: onCancel,
+                                         completion: completion)
+                        }
+                        return
+                    }
+                    // Nothing can serve it. Claude Code decides whether to wait from
+                    // `anthropic-ratelimit-unified-reset`, and refuses to wait at all when
+                    // that is more than 24h out — so it has to describe the soonest moment
+                    // *any* account frees up, not just this one's window.
+                    if let soonest = self.router?.soonestAvailability(model: model) {
+                        headers = Self.rewritingReset(headers, to: soonest)
+                        Log.info("session \(sessionID): no account can serve "
+                                 + "\(model ?? "request"); Claude Code told to retry at "
+                                 + "\(Format.clock(soonest))")
+                    }
+                }
+
                 bodyAllowed = !isHeadRequest && response.statusCode != 204
                     && response.statusCode != 304
                 let framing = bodyAllowed
@@ -310,11 +365,12 @@ public final class SessionProxy {
                 connection.send(content: head, completion: .contentProcessed { _ in })
             },
             onBody: { data in
-                guard bodyAllowed, !data.isEmpty else { return }
+                guard !abandoned, bodyAllowed, !data.isEmpty else { return }
                 connection.send(content: HTTPResponseWriter.chunk(data),
                                 completion: .contentProcessed { _ in })
             },
             onEnd: { error in
+                guard !abandoned else { return }
                 if let error {
                     Log.warn("proxy upstream error for session \(sessionID): \(error)")
                     if !sentHead {
@@ -324,11 +380,10 @@ public final class SessionProxy {
                             completion: .contentProcessed { _ in completion(false) })
                         return
                     }
-                    // The head is already on the wire and the status cannot be taken
-                    // back. Dropping the connection without the terminating chunk is
-                    // the only way to say "incomplete": sending it would hand Claude
-                    // Code a syntactically complete response holding a truncated
-                    // answer, which it would accept as the whole reply.
+                    // The head is already on the wire and the status cannot be taken back.
+                    // Dropping the connection without the terminating chunk is the only
+                    // way to say "incomplete": sending it would hand Claude Code a
+                    // syntactically complete response holding a truncated answer.
                     completion(false)
                     return
                 }
@@ -340,9 +395,21 @@ public final class SessionProxy {
                 }
             })
 
-        let task = UpstreamRelay.shared.send(outbound, handlers: handlers)
+        let task = relay.send(outbound, handlers: handlers)
         // Held so a client that disconnects mid-request does not leave the upstream leg
         // running against a one-hour resource timeout.
         onCancel(task)
+    }
+
+    /// Replaces the unified reset header, which is where Claude Code reads the time it
+    /// schedules its automatic continue from.
+    static func rewritingReset(_ headers: [(String, String)],
+                               to date: Date) -> [(String, String)] {
+        let stamp = String(Int(date.timeIntervalSince1970))
+        var out = headers.filter {
+            $0.0.caseInsensitiveCompare("anthropic-ratelimit-unified-reset") != .orderedSame
+        }
+        out.append(("anthropic-ratelimit-unified-reset", stamp))
+        return out
     }
 }

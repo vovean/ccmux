@@ -35,7 +35,7 @@ public enum ReassignOutcome: Equatable {
 
 /// Creates, reassigns and tears down sessions: the namespace Claude Code reads its
 /// credential from, and the proxy its requests go through.
-public final class SessionManager {
+public final class SessionManager: SessionRouting {
     private let store: Store
     private let vault: TokenVault
     private var proxies: [String: SessionProxy] = [:]
@@ -154,16 +154,49 @@ public final class SessionManager {
         SessionProxy(
             sessionID: sessionID,
             desiredPort: desiredPort,
-            tokenProvider: { [weak self] in
-                guard let self,
-                      let current = self.store.sessions.get(sessionID),
-                      let token = self.vault.bearerToken(for: current.accountID)
-                else { return nil }
-                return (current.accountID, token)
-            },
+            router: self,
             observer: { [weak self] observation in
                 self?.onObservation?(observation, sessionID)
             })
+    }
+
+    // MARK: - SessionRouting
+
+    public func assignment(sessionID: String) -> (accountID: String, token: String)? {
+        guard let current = store.sessions.get(sessionID),
+              let token = vault.bearerToken(for: current.accountID) else { return nil }
+        return (current.accountID, token)
+    }
+
+    /// Another account that can serve this model right now, preferring the one with the
+    /// most headroom on the windows that actually gate it. Reassigns the session, so the
+    /// rest of it continues on the account that worked.
+    public func failover(sessionID: String, model: String?,
+                         tried: Set<String>) -> (accountID: String, token: String)? {
+        let usage = store.allUsage()
+        let candidate = store.accounts.all()
+            .filter { !tried.contains($0.id) && $0.health != .needsRelogin }
+            .filter { ModelRouting.canServe(model, usage: usage[$0.id]) }
+            .max { lhs, rhs in
+                let l = ModelRouting.headroom(for: model, in: usage[lhs.id]) ?? 100
+                let r = ModelRouting.headroom(for: model, in: usage[rhs.id]) ?? 100
+                if l != r { return l < r }
+                return lhs.priority > rhs.priority
+            }
+        guard let candidate, let token = vault.bearerToken(for: candidate.id) else {
+            return nil
+        }
+        if store.sessions.get(sessionID)?.accountID != candidate.id {
+            try? assign(sessionID: sessionID, accountID: candidate.id)
+        }
+        return (candidate.id, token)
+    }
+
+    /// The soonest any account could serve this model — the number Claude Code needs to
+    /// decide whether waiting is worth it.
+    public func soonestAvailability(model: String?) -> Date? {
+        ModelRouting.soonestAvailable(model, accounts: store.accounts.all(),
+                                      usage: store.allUsage())?.at
     }
 
     /// Writes the account's credential where Claude Code will look for it, in the form

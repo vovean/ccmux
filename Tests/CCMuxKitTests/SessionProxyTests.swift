@@ -50,8 +50,9 @@ struct SessionProxyTests {
         defer { stub.stop() }
 
         let tokens = TokenSequence(["account-a": "token-a", "account-b": "token-b"])
+        defer { withExtendedLifetime(tokens) {} }
         let proxy = SessionProxy(sessionID: "test", upstream: stub.url,
-                                 tokenProvider: { tokens.current() },
+                                 router: tokens, relay: UpstreamRelay(),
                                  observer: { _ in })
         let port = try proxy.start()
         defer { proxy.stop() }
@@ -73,8 +74,9 @@ struct SessionProxyTests {
         let stub = try StubUpstream()
         defer { stub.stop() }
         let tokens = TokenSequence(["account-a": "token-a"])
+        defer { withExtendedLifetime(tokens) {} }
         let proxy = SessionProxy(sessionID: "test", upstream: stub.url,
-                                 tokenProvider: { tokens.current() }, observer: { _ in })
+                                 router: tokens, relay: UpstreamRelay(), observer: { _ in })
         let port = try proxy.start()
         defer { proxy.stop() }
 
@@ -90,8 +92,9 @@ struct SessionProxyTests {
         let stub = try StubUpstream()
         defer { stub.stop() }
         let tokens = TokenSequence(["a": "t"])
+        defer { withExtendedLifetime(tokens) {} }
         let proxy = SessionProxy(sessionID: "test", upstream: stub.url,
-                                 tokenProvider: { tokens.current() }, observer: { _ in })
+                                 router: tokens, relay: UpstreamRelay(), observer: { _ in })
         let port = try proxy.start()
         defer { proxy.stop() }
 
@@ -105,8 +108,9 @@ struct SessionProxyTests {
         let stub = try StubUpstream()
         defer { stub.stop() }
         let tokens = TokenSequence(["a": "t"])
+        defer { withExtendedLifetime(tokens) {} }
         let proxy = SessionProxy(sessionID: "test", upstream: stub.url,
-                                 tokenProvider: { tokens.current() }, observer: { _ in })
+                                 router: tokens, relay: UpstreamRelay(), observer: { _ in })
         let port = try proxy.start()
         defer { proxy.stop() }
 
@@ -123,8 +127,9 @@ struct SessionProxyTests {
         stub.responseChunks = ["event: a\n", "data: one\n\n", "event: b\n", "data: two\n\n"]
         defer { stub.stop() }
         let tokens = TokenSequence(["a": "t"])
+        defer { withExtendedLifetime(tokens) {} }
         let proxy = SessionProxy(sessionID: "test", upstream: stub.url,
-                                 tokenProvider: { tokens.current() }, observer: { _ in })
+                                 router: tokens, relay: UpstreamRelay(), observer: { _ in })
         let port = try proxy.start()
         defer { proxy.stop() }
 
@@ -151,8 +156,9 @@ struct SessionProxyTests {
 
         let observations = ObservationBox()
         let tokens = TokenSequence(["account-a": "token-a"])
+        defer { withExtendedLifetime(tokens) {} }
         let proxy = SessionProxy(sessionID: "test", upstream: stub.url,
-                                 tokenProvider: { tokens.current() },
+                                 router: tokens, relay: UpstreamRelay(),
                                  observer: { observations.append($0) })
         let port = try proxy.start()
         defer { proxy.stop() }
@@ -174,8 +180,9 @@ struct SessionProxyTests {
         let stub = try StubUpstream()
         defer { stub.stop() }
         let tokens = TokenSequence(["a": "t"])
+        defer { withExtendedLifetime(tokens) {} }
         let proxy = SessionProxy(sessionID: "test", upstream: stub.url,
-                                 tokenProvider: { tokens.current() }, observer: { _ in })
+                                 router: tokens, relay: UpstreamRelay(), observer: { _ in })
         let port = try proxy.start()
         defer { proxy.stop() }
 
@@ -189,8 +196,10 @@ struct SessionProxyTests {
     @Test func missingAssignmentIsRefused() throws {
         let stub = try StubUpstream()
         defer { stub.stop() }
+        let empty = TokenSequence([:])
+        defer { withExtendedLifetime(empty) {} }
         let proxy = SessionProxy(sessionID: "test", upstream: stub.url,
-                                 tokenProvider: { nil }, observer: { _ in })
+                                 router: empty, relay: UpstreamRelay(), observer: { _ in })
         let port = try proxy.start()
         defer { proxy.stop() }
 
@@ -207,8 +216,9 @@ struct SessionProxyTests {
 
         let observations = ObservationBox()
         let tokens = TokenSequence(["a": "t"])
+        defer { withExtendedLifetime(tokens) {} }
         let proxy = SessionProxy(sessionID: "test", upstream: stub.url,
-                                 tokenProvider: { tokens.current() },
+                                 router: tokens, relay: UpstreamRelay(),
                                  observer: { observations.append($0) })
         let port = try proxy.start()
         defer { proxy.stop() }
@@ -220,11 +230,17 @@ struct SessionProxyTests {
     }
 }
 
-/// Mutable token source shared with the proxy's request queue.
-final class TokenSequence: @unchecked Sendable {
+/// Router stub: a fixed set of accounts, a selectable current one, and an optional
+/// failover pool so the retry path can be driven.
+final class TokenSequence: SessionRouting, @unchecked Sendable {
     private let lock = NSLock()
     private let tokens: [String: String]
     private var selected: String
+    /// Accounts the proxy is allowed to fail over to, in order.
+    var failoverOrder: [String] = []
+    /// What `soonestAvailability` should report.
+    var soonest: Date?
+    private(set) var failoverRequests: [Set<String>] = []
 
     init(_ tokens: [String: String]) {
         self.tokens = tokens
@@ -235,10 +251,25 @@ final class TokenSequence: @unchecked Sendable {
         lock.lock(); selected = accountID; lock.unlock()
     }
 
-    func current() -> (accountID: String, token: String)? {
+    func assignment(sessionID: String) -> (accountID: String, token: String)? {
         lock.lock(); defer { lock.unlock() }
         guard let token = tokens[selected] else { return nil }
         return (selected, token)
+    }
+
+    func failover(sessionID: String, model: String?,
+                  tried: Set<String>) -> (accountID: String, token: String)? {
+        lock.lock(); defer { lock.unlock() }
+        failoverRequests.append(tried)
+        guard let next = failoverOrder.first(where: { !tried.contains($0) }),
+              let token = tokens[next] else { return nil }
+        selected = next
+        return (next, token)
+    }
+
+    func soonestAvailability(model: String?) -> Date? {
+        lock.lock(); defer { lock.unlock() }
+        return soonest
     }
 }
 
@@ -253,5 +284,175 @@ final class ObservationBox: @unchecked Sendable {
     func all() -> [SessionProxy.Observation] {
         lock.lock(); defer { lock.unlock() }
         return items
+    }
+}
+
+@Suite("Limit failover", .serialized)
+struct FailoverTests {
+    /// The point of the whole feature: a refusal reaches ccmux before Claude Code, so an
+    /// account that still has headroom serves the same request and the session never
+    /// learns there was a problem. Claude Code parking on a limit is what cost a night.
+    @Test func aRefusalIsRetriedOnAnotherAccountAndNeverReachesTheClient() throws {
+        let stub = try StubUpstream()
+        defer { stub.stop() }
+        // The first account is refused; the second serves it.
+        stub.responder = { request in
+            request.authorization == "Bearer token-a"
+                ? .init(status: "429 Too Many Requests",
+                        headers: ["anthropic-ratelimit-unified-status": "rejected",
+                                  "anthropic-ratelimit-unified-reset": "9999999999"],
+                        chunks: ["refused"])
+                : .init(status: "200 OK", headers: [:], chunks: ["served by b"])
+        }
+
+        let router = TokenSequence(["account-a": "token-a", "account-b": "token-b"])
+        defer { withExtendedLifetime(router) {} }
+        router.failoverOrder = ["account-b"]
+        let proxy = SessionProxy(sessionID: "test", upstream: stub.url, router: router,
+                                 relay: UpstreamRelay(), observer: { _ in })
+        let port = try proxy.start()
+        defer { proxy.stop() }
+
+        let response = try SessionProxyTests.request(port: port)
+        #expect(response.hasPrefix("HTTP/1.1 200 OK"))
+        #expect(response.contains("served by b"))
+        // The client must not see the refusal at all, in status or body.
+        #expect(!response.contains("429"))
+        #expect(!response.contains("refused"))
+        #expect(stub.requests().count == 2)
+        #expect(stub.requests()[1].authorization == "Bearer token-b")
+    }
+
+    /// Each account is tried once. Cycling would also risk Claude Code's own
+    /// "stopped after repeated usage-limit hits" guard.
+    @Test func eachAccountIsTriedAtMostOnce() throws {
+        let stub = try StubUpstream()
+        defer { stub.stop() }
+        stub.responder = { _ in
+            .init(status: "429 Too Many Requests",
+                  headers: ["anthropic-ratelimit-unified-status": "rejected"],
+                  chunks: ["refused"])
+        }
+        let router = TokenSequence(["a": "ta", "b": "tb", "c": "tc"])
+        defer { withExtendedLifetime(router) {} }
+        router.failoverOrder = ["b", "c"]
+        let proxy = SessionProxy(sessionID: "test", upstream: stub.url, router: router,
+                                 relay: UpstreamRelay(), observer: { _ in })
+        let port = try proxy.start()
+        defer { proxy.stop() }
+
+        let response = try SessionProxyTests.request(port: port)
+        #expect(response.hasPrefix("HTTP/1.1 429"))
+        #expect(stub.requests().count == 3)
+        #expect(Set(stub.requests().compactMap(\.authorization))
+                == ["Bearer ta", "Bearer tb", "Bearer tc"])
+    }
+
+    /// When nothing can serve it, the refusal goes through — but describing the soonest
+    /// moment *any* account frees up. Claude Code reads its automatic-continue time from
+    /// this header and refuses to wait at all when it is more than 24h out, so a weekly
+    /// reset from one account must not be what it sees when another frees up in hours.
+    @Test func theResetHeaderDescribesTheSoonestAccount() throws {
+        let stub = try StubUpstream()
+        defer { stub.stop() }
+        let weeklyReset = Date().addingTimeInterval(3 * 86400)
+        stub.responder = { _ in
+            .init(status: "429 Too Many Requests",
+                  headers: ["anthropic-ratelimit-unified-status": "rejected",
+                            "anthropic-ratelimit-unified-reset":
+                                String(Int(weeklyReset.timeIntervalSince1970))],
+                  chunks: ["refused"])
+        }
+        let soonest = Date().addingTimeInterval(4 * 3600)
+        let router = TokenSequence(["a": "ta"])
+        defer { withExtendedLifetime(router) {} }
+        router.soonest = soonest
+        let proxy = SessionProxy(sessionID: "test", upstream: stub.url, router: router,
+                                 relay: UpstreamRelay(), observer: { _ in })
+        let port = try proxy.start()
+        defer { proxy.stop() }
+
+        let response = try SessionProxyTests.request(port: port)
+        #expect(response.hasPrefix("HTTP/1.1 429"))
+        #expect(response.contains("anthropic-ratelimit-unified-reset: "
+                                  + String(Int(soonest.timeIntervalSince1970))))
+        #expect(!response.contains(String(Int(weeklyReset.timeIntervalSince1970))))
+        // Exactly one reset header, or the client picks whichever it sees first.
+        #expect(response.components(separatedBy: "anthropic-ratelimit-unified-reset")
+                .count == 2)
+    }
+
+    /// A successful response must not pay for any of this.
+    @Test func anOkResponseIsNotRetriedOrRewritten() throws {
+        let stub = try StubUpstream()
+        defer { stub.stop() }
+        stub.responder = { _ in
+            .init(status: "200 OK",
+                  headers: ["anthropic-ratelimit-unified-reset": "1787355000"],
+                  chunks: ["fine"])
+        }
+        let router = TokenSequence(["a": "ta", "b": "tb"])
+        defer { withExtendedLifetime(router) {} }
+        router.failoverOrder = ["b"]
+        router.soonest = Date().addingTimeInterval(60)
+        let proxy = SessionProxy(sessionID: "test", upstream: stub.url, router: router,
+                                 relay: UpstreamRelay(), observer: { _ in })
+        let port = try proxy.start()
+        defer { proxy.stop() }
+
+        let response = try SessionProxyTests.request(port: port)
+        #expect(stub.requests().count == 1)
+        #expect(response.contains("anthropic-ratelimit-unified-reset: 1787355000"))
+        #expect(router.failoverRequests.isEmpty)
+    }
+
+    /// The model in the body decides which weekly window gates the request, so it has to
+    /// reach the router.
+    @Test func theRequestedModelIsPassedToTheRouter() throws {
+        let stub = try StubUpstream()
+        defer { stub.stop() }
+        stub.responder = { _ in
+            .init(status: "429 Too Many Requests",
+                  headers: ["anthropic-ratelimit-unified-status": "rejected"],
+                  chunks: ["refused"])
+        }
+        let router = ModelRecordingRouter(token: "ta")
+        defer { withExtendedLifetime(router) {} }
+        let proxy = SessionProxy(sessionID: "test", upstream: stub.url, router: router,
+                                 relay: UpstreamRelay(), observer: { _ in })
+        let port = try proxy.start()
+        defer { proxy.stop() }
+
+        _ = try SessionProxyTests.request(
+            port: port, body: #"{"model":"claude-fable-5","max_tokens":16}"#)
+        #expect(router.seenModels.contains("claude-fable-5"))
+    }
+}
+
+final class ModelRecordingRouter: SessionRouting, @unchecked Sendable {
+    private let lock = NSLock()
+    private let token: String
+    private var models: [String?] = []
+
+    init(token: String) { self.token = token }
+
+    var seenModels: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return models.compactMap { $0 }
+    }
+
+    func assignment(sessionID: String) -> (accountID: String, token: String)? {
+        ("a", token)
+    }
+
+    func failover(sessionID: String, model: String?,
+                  tried: Set<String>) -> (accountID: String, token: String)? {
+        lock.lock(); models.append(model); lock.unlock()
+        return nil
+    }
+
+    func soonestAvailability(model: String?) -> Date? {
+        lock.lock(); models.append(model); lock.unlock()
+        return nil
     }
 }

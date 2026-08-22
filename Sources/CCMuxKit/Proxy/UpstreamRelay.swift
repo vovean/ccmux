@@ -5,16 +5,18 @@ import Foundation
 /// URLSession is used for the outbound leg so TLS, HTTP/2 and content decoding are
 /// the system's problem, and a delegate (not `data(for:)`) so SSE frames reach the
 /// client as they arrive instead of at completion.
-final class UpstreamRelay: NSObject, URLSessionDataDelegate {
+public final class UpstreamRelay: NSObject, URLSessionDataDelegate {
     /// Shared across every session proxy: a per-proxy session would give each one its
     /// own connection pool and a cold TLS handshake per new session.
-    static let shared = UpstreamRelay()
+    public static let shared = UpstreamRelay()
 
     struct Handlers {
         let onHead: (HTTPURLResponse) -> Void
         let onBody: (Data) -> Void
         let onEnd: (Error?) -> Void
     }
+
+    public override init() { super.init() }
 
     private let lock = NSLock()
     private var handlers: [Int: Handlers] = [:]
@@ -52,7 +54,7 @@ final class UpstreamRelay: NSObject, URLSessionDataDelegate {
         return handlers[task.taskIdentifier]
     }
 
-    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+    public func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
                     didReceive response: URLResponse,
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
         if let http = response as? HTTPURLResponse {
@@ -61,11 +63,11 @@ final class UpstreamRelay: NSObject, URLSessionDataDelegate {
         completionHandler(.allow)
     }
 
-    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+    public func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         handlers(for: dataTask)?.onBody(data)
     }
 
-    func urlSession(_ session: URLSession, task: URLSessionTask,
+    public func urlSession(_ session: URLSession, task: URLSessionTask,
                     didCompleteWithError error: Error?) {
         let found = handlers(for: task)
         lock.lock()

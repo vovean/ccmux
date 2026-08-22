@@ -18,8 +18,17 @@ final class StubUpstream: @unchecked Sendable {
     private var stopped = false
     let port: UInt16
 
-    /// Response body sent as several writes, so the proxy has to stream rather than
-    /// wait for a complete body.
+    struct Response {
+        var status: String
+        var headers: [String: String]
+        /// Sent as several writes, so the proxy has to stream rather than wait for a
+        /// complete body.
+        var chunks: [String]
+    }
+
+    /// Decides the reply per request, so a test can refuse one account and serve another.
+    /// When nil the fixed properties below are used.
+    var responder: ((Received) -> Response)?
     var responseChunks: [String] = ["hello "]
     var responseHeaders: [String: String] = ["Content-Type": "text/event-stream"]
     var statusLine = "200 OK"
@@ -80,8 +89,13 @@ final class StubUpstream: @unchecked Sendable {
             if done || s < 0 { return }
             let client = accept(s, nil, nil)
             if client < 0 { continue }
-            handle(client)
-            close(client)
+            // One thread per connection: the failover path opens a second connection
+            // while the first is still streaming its body, and a sequential accept loop
+            // would make the retry wait for the response it is replacing.
+            Thread.detachNewThread { [weak self] in
+                self?.handle(client)
+                close(client)
+            }
         }
     }
 
@@ -118,14 +132,17 @@ final class StubUpstream: @unchecked Sendable {
             body += String(decoding: buffer[0..<n], as: UTF8.self)
         }
 
+        let request = Received(method: startLine.first ?? "",
+                               target: startLine.count > 1 ? startLine[1] : "",
+                               authorization: authorization, apiKey: apiKey, body: body)
         lock.lock()
-        received.append(Received(method: startLine.first ?? "", target: startLine.count > 1
-                                 ? startLine[1] : "", authorization: authorization,
-                                 apiKey: apiKey, body: body))
-        let chunks = responseChunks
-        let headers = responseHeaders
-        let status = statusLine
+        received.append(request)
+        let reply = responder?(request)
+            ?? Response(status: statusLine, headers: responseHeaders, chunks: responseChunks)
         lock.unlock()
+        let chunks = reply.chunks
+        let headers = reply.headers
+        let status = reply.status
 
         let total = chunks.reduce(0) { $0 + $1.utf8.count }
         var head2 = "HTTP/1.1 \(status)\r\nContent-Length: \(total)\r\nConnection: close\r\n"
