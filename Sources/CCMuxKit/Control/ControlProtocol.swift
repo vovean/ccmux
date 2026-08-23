@@ -21,9 +21,14 @@ public struct ControlSessionInfo: Codable, Equatable {
     public var accountLabel: String
     public var policyName: String
     public var pid: Int32
+    /// Set when the chosen account did not clear the policy's launch floor, so the shim
+    /// can say the session is starting on scraps. Optional so an older app that does not
+    /// send it still decodes.
+    public var warning: String?
 
     public init(sessionID: String, namespaceDir: String, port: UInt16, accountID: String,
-                accountLabel: String, policyName: String, pid: Int32) {
+                accountLabel: String, policyName: String, pid: Int32,
+                warning: String? = nil) {
         self.sessionID = sessionID
         self.namespaceDir = namespaceDir
         self.port = port
@@ -31,6 +36,7 @@ public struct ControlSessionInfo: Codable, Equatable {
         self.accountLabel = accountLabel
         self.policyName = policyName
         self.pid = pid
+        self.warning = warning
     }
 }
 

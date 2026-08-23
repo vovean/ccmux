@@ -41,6 +41,7 @@ public final class Engine: ObservableObject {
     private var timers: [Timer] = []
     private var chromeStateStamp: Date?
     private var lastForcedPoll = Date.distantPast
+    private var lastProbe: [String: Date] = [:]
     /// Sessions waiting for a turn boundary before their account changes, and when the
     /// wait began.
     private var pendingSwitch: [String: (accountID: String, since: Date)] = [:]
@@ -137,6 +138,7 @@ public final class Engine: ObservableObject {
                 // from the endpoint's hourly budget on a guaranteed 401.
                 await self?.refreshExpiringTokens()
                 await self?.pollDueAccounts()
+                await self?.keepWindowsRolling()
             }
         })
         timers.append(Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
@@ -266,6 +268,27 @@ public final class Engine: ObservableObject {
         snapshot.nextPollAt = plan.nextPollAt
         store.setUsage(snapshot, for: accountID)
         evaluateThresholds(for: accountID, snapshot: snapshot)
+    }
+
+    /// Starts the 5-hour window on accounts whose clock is stopped, so it is already
+    /// running by the time you sit down. One minimal Haiku call per account per cycle.
+    private func keepWindowsRolling() async {
+        guard settings.keepWindowsRolling else { return }
+        for account in store.accounts.all() {
+            guard WindowProbe.shouldProbe(account: account,
+                                          usage: store.usage(for: account.id),
+                                          lastProbe: lastProbe[account.id]) else { continue }
+            guard let token = vault.credential(for: account.id)?.accessToken else { continue }
+            lastProbe[account.id] = Date()
+            do {
+                try await client.startUsageWindow(accessToken: token)
+                Log.info("started the 5-hour window on \(displayName(account.id))")
+                await poll(account.id)
+            } catch {
+                Log.warn("could not start the 5-hour window on "
+                         + "\(displayName(account.id)): \(error.localizedDescription)")
+            }
+        }
     }
 
     public func refreshNow() {

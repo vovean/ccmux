@@ -196,6 +196,40 @@ public struct OAuthClient {
         return UsageParser.windows(from: json)
     }
 
+    // MARK: - Window probe
+
+    /// Cheapest model on the account. The 5-hour window is account-wide, so any model
+    /// starts it, and Haiku leaves the Fable and Opus weekly windows alone.
+    public static let probeModel = "claude-haiku-4-5-20251001"
+
+    /// Sends the smallest possible real request, purely to start the account's 5-hour
+    /// window.
+    ///
+    /// Measured: one call moved `five_hour.resets_at` from null to a real timestamp while
+    /// utilization stayed at 0%, for 22 input and 1 output token. The headers mirror
+    /// Claude Code's because the API refuses OAuth-token requests that do not look like
+    /// it — a bare request gets a 429 with no rate-limit headers at all.
+    public func startUsageWindow(accessToken: String) async throws {
+        var request = URLRequest(url: URL(string: "\(Self.apiBase)/v1/messages?beta=true")!)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("claude-code-20250219,\(Self.betaHeader)",
+                         forHTTPHeaderField: "anthropic-beta")
+        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("cli", forHTTPHeaderField: "x-app")
+        request.setValue("claude-cli/2.1.238 (external, cli)", forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 30
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": Self.probeModel,
+            "max_tokens": 1,
+            "system": [["type": "text",
+                        "text": "You are Claude Code, Anthropic's official CLI for Claude."]],
+            "messages": [["role": "user", "content": "."]],
+        ])
+        _ = try await send(request)
+    }
+
     // MARK: - Transport
 
     private func postJSON(url: URL, body: [String: Any]) async throws -> [String: Any] {

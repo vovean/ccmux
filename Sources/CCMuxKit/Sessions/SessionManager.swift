@@ -86,17 +86,30 @@ public final class SessionManager: SessionRouting {
 
     /// The single place "which account should this session use" is decided, so a rule
     /// added here applies to launches and to auto-switches alike.
-    public func chooseAccount(policyName: String,
-                              excluding excluded: Set<String> = []) throws -> AccountRanking {
+    public func chooseAccount(policyName: String, excluding excluded: Set<String> = [],
+                              applyingLaunchFloors: Bool = false)
+        throws -> (choice: AccountRanking, warning: String?) {
         guard let policy = store.currentSettings().policy(named: policyName) else {
             throw SessionError.unknownPolicy(policyName)
         }
-        guard let choice = PolicyEngine.pick(accounts: store.accounts.all(),
-                                             usage: store.allUsage(), policy: policy,
-                                             excluding: excluded) else {
+        let accounts = store.accounts.all()
+        let usage = store.allUsage()
+        if applyingLaunchFloors,
+           let clears = PolicyEngine.pick(accounts: accounts, usage: usage, policy: policy,
+                                          excluding: excluded, applyingLaunchFloors: true) {
+            return (clears, nil)
+        }
+        // Nothing clears the floor. Starting on scraps beats not starting: the floors
+        // exist to pick a good account, not to refuse work when quota is tight.
+        guard let fallback = PolicyEngine.rank(accounts: accounts, usage: usage,
+                                               policy: policy, excluding: excluded).last else {
             throw SessionError.noEligibleAccount(policy: policyName)
         }
-        return choice
+        let warning = applyingLaunchFloors
+            ? String(format: "no account clears the %@ floor; best has %.0f%% left on %@",
+                     policyName, fallback.headroom, fallback.bindingWindow ?? "its limits")
+            : nil
+        return (fallback, warning)
     }
 
     // MARK: - Creation
@@ -106,7 +119,15 @@ public final class SessionManager: SessionRouting {
         createLock.lock()
         defer { createLock.unlock() }
 
-        let accountID = try requested ?? chooseAccount(policyName: policyName).accountID
+        var warning: String?
+        let accountID: String
+        if let requested {
+            accountID = requested
+        } else {
+            let chosen = try chooseAccount(policyName: policyName, applyingLaunchFloors: true)
+            accountID = chosen.choice.accountID
+            warning = chosen.warning
+        }
         guard let account = store.accounts.get(accountID) else {
             throw SessionError.unknownAccount(accountID)
         }
@@ -147,7 +168,7 @@ public final class SessionManager: SessionRouting {
         return ControlSessionInfo(sessionID: sessionID, namespaceDir: namespace.path,
                                   port: record.port, accountID: accountID,
                                   accountLabel: account.displayName,
-                                  policyName: policyName, pid: pid)
+                                  policyName: policyName, pid: pid, warning: warning)
     }
 
     private func makeProxy(sessionID: String, desiredPort: UInt16?) -> SessionProxy {
@@ -263,7 +284,8 @@ public final class SessionManager: SessionRouting {
         let replacement = PolicyEngine.pick(accounts: accounts, usage: usage,
                                             policy: PolicyEngine.everyWindow,
                                             excluding: excluded)
-            ?? (try? chooseAccount(policyName: record.policyName, excluding: excluded))
+            ?? (try? chooseAccount(policyName: record.policyName,
+                                   excluding: excluded).choice)
         guard let replacement else { return .noneEligible }
         do {
             try assign(sessionID: sessionID, accountID: replacement.accountID)

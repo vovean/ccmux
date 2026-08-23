@@ -76,10 +76,25 @@ Fable weekly headroom left; `cc-opus` ignores that window entirely, so an accoun
 Fable spent is still a perfectly good Opus account. Edit the policies in Settings.
 
 Among the accounts that qualify, ccmux picks the **most drained** one — least remaining
-first, on the tightest window that gates the request. The point is to finish one
+first, ranked on the **weekly** window that gates the request. The point is to finish one
 subscription before starting the next, so the week does not end with three half-used
-plans. There is no minimum: an account with a sliver left is still preferred while it can
-serve at all. The same ordering applies when a session launches and when it fails over.
+plans. Ranking ignores the 5-hour window on purpose: it refills all day, so ranking on it
+would reshuffle the order every few hours without any of the subscription actually being
+used up.
+
+A session still needs somewhere decent to *start*, so each policy has a per-window launch
+floor:
+
+| policy | 5-hour | weekly (all) | weekly (model) |
+|---|---|---|---|
+| `cc-fable` | ≥ 5% | ≥ 3% | ≥ 3% |
+| `cc-opus` | ≥ 3% | ≥ 1% | — |
+
+Floors apply at launch only. A session already running takes whatever can still serve it,
+because refusing a usable account mid-task parks the session when the alternative is a few
+more useful requests. If nothing clears the floor, ccmux starts on the fullest account
+anyway and says so on the shim line, rather than leaving you unable to work at all when
+quota is tight.
 
 Eligibility is never traded away for this. A Fable request will not take an account that
 merely has general weekly headroom, however drained that account is — the model's own
@@ -145,6 +160,23 @@ avoid — which is what **At turn boundary** is for. In that mode a session that
 keeps going on the exhausted account and moves as soon as Claude Code goes idle, so the
 cache is dropped between turns rather than inside one. **Immediately** switches on the very
 next request.
+
+## Keeping the 5-hour window rolling
+
+The 5-hour window starts on first use, not on a clock — leave an account alone overnight
+and its clock is simply stopped. Sit down at 09:00 and the window starts *then*, so the
+next boundary is 14:00.
+
+When an account's clock is stopped, ccmux sends one minimal Haiku request to start it, so
+the cycle keeps turning while you are away and there is less of it left to wait out when
+you come back. Measured on a real account: `five_hour.resets_at` went from null to a real
+timestamp while utilization stayed at **0%**, for 22 input and 1 output token. Haiku is
+used deliberately — the 5-hour window is account-wide so any model starts it, and Haiku
+leaves the Fable and Opus weekly windows alone.
+
+The signal is a missing `resets_at`, not zero usage: a window that has started but is
+unused reports 0% *with* a reset time and is left alone, so this is one probe per account
+per cycle. Toggle it off in Settings › Limit windows.
 
 ## Credentials, and why nothing races
 

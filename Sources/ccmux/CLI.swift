@@ -99,6 +99,9 @@ enum CLI {
         FileHandle.standardError.write(Data(
             "ccmux: \(info.accountLabel) · policy \(info.policyName) · port \(info.port)\n"
                 .utf8))
+        if let warning = info.warning {
+            FileHandle.standardError.write(Data("ccmux: warning — \(warning)\n".utf8))
+        }
 
         setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", info.namespaceDir, 1)
         setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:\(info.port)", 1)

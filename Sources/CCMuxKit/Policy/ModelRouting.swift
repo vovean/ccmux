@@ -52,6 +52,19 @@ public enum ModelRouting {
         return windows.map(\.headroom).min()
     }
 
+    /// Headroom on the tightest *weekly* window gating this model.
+    ///
+    /// This is what accounts are ranked on. The 5-hour window refills all day, so ranking
+    /// on it would reshuffle the order every few hours without any of the subscription
+    /// actually being used up; the weekly quota is the thing that expires unused.
+    public static func weeklyHeadroom(for modelID: String?,
+                                      in usage: UsageSnapshot?) -> Double? {
+        let weekly = bindingWindows(for: modelID, in: usage)
+            .filter { $0.kind == .weeklyAll || $0.kind == .weeklyScoped }
+        guard !weekly.isEmpty else { return headroom(for: modelID, in: usage) }
+        return weekly.map(\.headroom).min()
+    }
+
     /// Whether this account can serve a request for `modelID` right now.
     ///
     /// An account with no usage data yet is allowed through: the alternative is refusing
@@ -92,9 +105,9 @@ public enum ModelRouting {
             .filter { !excluded.contains($0.id) && $0.health != .needsRelogin }
             .filter { canServe(modelID, usage: usage[$0.id]) }
             .sorted { lhs, rhs in
-                let l = headroom(for: modelID, in: usage[lhs.id])
+                let l = weeklyHeadroom(for: modelID, in: usage[lhs.id])
                     ?? PolicyEngine.unknownHeadroom
-                let r = headroom(for: modelID, in: usage[rhs.id])
+                let r = weeklyHeadroom(for: modelID, in: usage[rhs.id])
                     ?? PolicyEngine.unknownHeadroom
                 if l != r { return l < r }
                 return lhs.priority < rhs.priority

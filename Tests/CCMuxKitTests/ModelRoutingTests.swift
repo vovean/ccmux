@@ -225,3 +225,68 @@ struct FailoverOrderingTests {
                 == ["early", "late"])
     }
 }
+
+@Suite("Keeping the 5-hour window rolling")
+struct WindowProbeTests {
+    static func account(_ health: AccountHealth = .ok) -> Account {
+        Account(id: "a", label: "a", health: health)
+    }
+
+    static func snapshot(sessionPercent: Double, resetsAt: Date?) -> UsageSnapshot {
+        UsageSnapshot(windows: [UsageWindow(kind: .session, label: "5-hour",
+                                            percent: sessionPercent, resetsAt: resetsAt)])
+    }
+
+    /// A stopped clock reports no reset time at all — that, not zero utilization, is the
+    /// signal. Measured: before the probe `five_hour.resets_at` was null; after it, a real
+    /// timestamp with utilization still 0%.
+    @Test func aStoppedClockIsProbed() {
+        #expect(WindowProbe.shouldProbe(account: Self.account(),
+                                        usage: Self.snapshot(sessionPercent: 0,
+                                                             resetsAt: nil),
+                                        lastProbe: nil))
+    }
+
+    /// A started but unused window reports 0% *with* a reset time, and must not be probed
+    /// again — that would be a probe every tick, forever.
+    @Test func aRunningButUnusedClockIsLeftAlone() {
+        #expect(!WindowProbe.shouldProbe(
+            account: Self.account(),
+            usage: Self.snapshot(sessionPercent: 0, resetsAt: Date().addingTimeInterval(3600)),
+            lastProbe: nil))
+    }
+
+    @Test func anAccountInUseIsLeftAlone() {
+        #expect(!WindowProbe.shouldProbe(
+            account: Self.account(),
+            usage: Self.snapshot(sessionPercent: 42, resetsAt: Date().addingTimeInterval(900)),
+            lastProbe: nil))
+    }
+
+    @Test func anUnmeasuredAccountIsNotProbed() {
+        // A poll has to land first, or a stopped clock is indistinguishable from an
+        // account nothing knows anything about.
+        #expect(!WindowProbe.shouldProbe(account: Self.account(), usage: nil,
+                                         lastProbe: nil))
+        #expect(!WindowProbe.shouldProbe(account: Self.account(),
+                                         usage: UsageSnapshot(windows: []), lastProbe: nil))
+    }
+
+    @Test func anAccountNeedingReloginIsNotProbed() {
+        #expect(!WindowProbe.shouldProbe(account: Self.account(.needsRelogin),
+                                         usage: Self.snapshot(sessionPercent: 0,
+                                                              resetsAt: nil),
+                                         lastProbe: nil))
+    }
+
+    /// Guard against probing in a loop if an account ever keeps reporting no reset time.
+    @Test func probesAreSpacedOut() {
+        let usage = Self.snapshot(sessionPercent: 0, resetsAt: nil)
+        let now = Date()
+        #expect(!WindowProbe.shouldProbe(account: Self.account(), usage: usage,
+                                         lastProbe: now.addingTimeInterval(-60), now: now))
+        #expect(WindowProbe.shouldProbe(
+            account: Self.account(), usage: usage,
+            lastProbe: now.addingTimeInterval(-WindowProbe.minimumInterval - 1), now: now))
+    }
+}

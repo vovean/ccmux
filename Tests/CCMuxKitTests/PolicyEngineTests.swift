@@ -140,11 +140,53 @@ struct PolicyEngineTests {
         #expect(pick.accountID == "b")
     }
 
-    @Test func minHeadroomIsRespected() {
-        let policy = Policy(name: "strict", requiredWindows: [.session], minHeadroom: 25)
+    /// Launch floors gate which account a session starts on, per window kind.
+    @Test func launchFloorsAreAppliedPerWindow() {
         let accounts = [Self.account("a")]
-        let usage = ["a": Self.snapshot(session: 80, weekly: 0)]
-        #expect(PolicyEngine.pick(accounts: accounts, usage: usage, policy: policy) == nil)
+        let policy = Policy(name: "strict", requiredWindows: [.session, .weeklyAll],
+                            launchFloors: ["session": 25])
+        // 20% left on the 5-hour window: below the floor at launch, fine for failover.
+        let usage = ["a": Self.snapshot(session: 80, weekly: 10)]
+        #expect(PolicyEngine.pick(accounts: accounts, usage: usage, policy: policy,
+                                  applyingLaunchFloors: true) == nil)
+        #expect(PolicyEngine.pick(accounts: accounts, usage: usage, policy: policy) != nil)
+    }
+
+    /// The floors you asked for, pinned so a settings-file edit that drops them is loud.
+    @Test func defaultFloorsMatchTheIntendedPolicy() throws {
+        let settings = Settings()
+        let fable = try #require(settings.policy(named: "fable"))
+        #expect(fable.floor(for: .session) == 5)
+        #expect(fable.floor(for: .weeklyAll) == 3)
+        #expect(fable.floor(for: .weeklyScoped) == 3)
+
+        let opus = try #require(settings.policy(named: "opus"))
+        #expect(opus.floor(for: .session) == 3)
+        #expect(opus.floor(for: .weeklyAll) == 1)
+        #expect(opus.floor(for: .weeklyScoped) == 0)
+    }
+
+    /// A Fable session needs 5% of the 5-hour window; 4% is not enough to start on.
+    @Test func aFableLaunchNeedsMoreRoomThanAnOpusLaunch() {
+        let accounts = [Self.account("a")]
+        let usage = ["a": Self.snapshot(session: 96, weekly: 10, fable: 10)]
+        let settings = Settings()
+        #expect(PolicyEngine.pick(accounts: accounts, usage: usage,
+                                  policy: settings.policy(named: "fable")!,
+                                  applyingLaunchFloors: true) == nil)
+        #expect(PolicyEngine.pick(accounts: accounts, usage: usage,
+                                  policy: settings.policy(named: "opus")!,
+                                  applyingLaunchFloors: true) != nil)
+    }
+
+    /// Ranking is on weekly headroom, so a drained 5-hour window does not reshuffle the
+    /// order every few hours.
+    @Test func rankingIgnoresTheFiveHourWindow() throws {
+        let accounts = [Self.account("weeklyDrained"), Self.account("hourDrained")]
+        let usage = ["weeklyDrained": Self.snapshot(session: 5, weekly: 80),
+                     "hourDrained": Self.snapshot(session: 90, weekly: 20)]
+        let ranked = PolicyEngine.rank(accounts: accounts, usage: usage, policy: Self.opus)
+        #expect(ranked.map(\.accountID) == ["weeklyDrained", "hourDrained"])
     }
 }
 

@@ -13,35 +13,54 @@ public struct AccountRanking: Equatable {
 /// perfectly good Opus account, so the opus policy simply does not look at that
 /// window.
 public enum PolicyEngine {
-    /// Headroom on the tightest window the policy cares about, or nil when the
-    /// account is not eligible at all.
+    /// Headroom for ranking, or nil when the account is not eligible at all.
+    ///
+    /// `applyingLaunchFloors` gates on the policy's per-window minimums; failover passes
+    /// false and only requires the windows to be non-zero.
     public static func headroom(for account: Account, usage: UsageSnapshot?,
-                                policy: Policy) -> AccountRanking? {
+                                policy: Policy,
+                                applyingLaunchFloors: Bool = false) -> AccountRanking? {
         guard account.health != .needsRelogin else { return nil }
 
-        // An account we have never measured must not outrank every measured one just
-        // for being unknown, so it starts from a neutral value: a healthy account with
-        // real headroom wins, and an unknown one still beats a nearly-spent account.
+        // An account we have never measured must not outrank every measured one just for
+        // being unknown, so it starts from a neutral value.
         guard let usage, !usage.windows.isEmpty else {
-            guard unknownHeadroom >= policy.minHeadroom else { return nil }
             return AccountRanking(accountID: account.id, headroom: unknownHeadroom,
                                   bindingWindow: nil)
         }
 
-        var tightest = 100.0
+        var rankOn = 100.0
         var binding: String?
+        var sawWeekly = false
         for kind in policy.requiredWindows {
-            // No window of this kind means the account is not gated on it. A plan with
-            // no per-model weekly cap reports no scoped window at all, and that is
+            let floor = applyingLaunchFloors ? policy.floor(for: kind) : 0
+            // No window of this kind means the account is not gated on it. A plan with no
+            // per-model weekly cap reports no scoped window at all, and that is
             // unconstrained, not exhausted.
-            for window in usage.windows(kind: kind, model: policy.scopedModel)
-            where window.headroom < tightest {
-                tightest = window.headroom
-                binding = window.label
+            for window in usage.windows(kind: kind, model: policy.scopedModel) {
+                guard window.headroom > 0, window.headroom >= floor else { return nil }
+                // Ranked on weekly headroom only: the 5-hour window refills all day, so
+                // ranking on it would reshuffle the order every few hours without using
+                // up any more of the subscription.
+                guard kind == .weeklyAll || kind == .weeklyScoped else { continue }
+                sawWeekly = true
+                if window.headroom < rankOn {
+                    rankOn = window.headroom
+                    binding = window.label
+                }
             }
         }
-        guard tightest >= policy.minHeadroom else { return nil }
-        return AccountRanking(accountID: account.id, headroom: tightest, bindingWindow: binding)
+        if !sawWeekly {
+            // A policy with no weekly window to rank on falls back to the tightest gate.
+            for kind in policy.requiredWindows {
+                for window in usage.windows(kind: kind, model: policy.scopedModel)
+                where window.headroom < rankOn {
+                    rankOn = window.headroom
+                    binding = window.label
+                }
+            }
+        }
+        return AccountRanking(accountID: account.id, headroom: rankOn, bindingWindow: binding)
     }
 
     /// Ranking value for an account with no usage data at all.
@@ -63,13 +82,15 @@ public enum PolicyEngine {
     /// gates on, and eligibility still requires headroom on *every* one of them — a
     /// Fable request will not take an account that only has general weekly left.
     public static func rank(accounts: [Account], usage: [String: UsageSnapshot],
-                            policy: Policy, excluding excluded: Set<String> = [])
-        -> [AccountRanking] {
+                            policy: Policy, excluding excluded: Set<String> = [],
+                            applyingLaunchFloors: Bool = false) -> [AccountRanking] {
         accounts
             .filter { !excluded.contains($0.id) }
             .compactMap { account -> (AccountRanking, Int, String)? in
                 guard let ranking = headroom(for: account, usage: usage[account.id],
-                                             policy: policy) else { return nil }
+                                             policy: policy,
+                                             applyingLaunchFloors: applyingLaunchFloors)
+                else { return nil }
                 return (ranking, account.priority, account.displayName)
             }
             .sorted { lhs, rhs in
@@ -82,8 +103,9 @@ public enum PolicyEngine {
 
     /// The account to use: the most-drained one that can still serve the policy.
     public static func pick(accounts: [Account], usage: [String: UsageSnapshot],
-                            policy: Policy, excluding excluded: Set<String> = [])
-        -> AccountRanking? {
-        rank(accounts: accounts, usage: usage, policy: policy, excluding: excluded).first
+                            policy: Policy, excluding excluded: Set<String> = [],
+                            applyingLaunchFloors: Bool = false) -> AccountRanking? {
+        rank(accounts: accounts, usage: usage, policy: policy, excluding: excluded,
+             applyingLaunchFloors: applyingLaunchFloors).first
     }
 }
