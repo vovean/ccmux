@@ -24,7 +24,7 @@ public enum Page: String, CaseIterable, Identifiable {
 
 public struct RootView: View {
     @ObservedObject var engine: Engine
-    @State private var page: Page = .accounts
+    @StateObject private var nav = NavigationState()
     @State private var curtainOpen = false
 
     public init(engine: Engine) {
@@ -67,13 +67,15 @@ public struct RootView: View {
                         RedDot().offset(x: 3, y: -2)
                     }
                 }
+                // Without this the hit area is the glyph's own box, so the margin around
+                // the three bars swallows clicks that visibly land on the button.
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help(engine.needsAttention
-                  ? "An account needs attention" : "Menu")
+            .help(engine.needsAttention ? "Something needs attention" : "Menu")
             .accessibilityLabel("Menu")
 
-            Text(page.title).font(.headline)
+            Text(nav.page.title).font(.headline)
             Spacer()
         }
         .padding(.horizontal, 12)
@@ -82,9 +84,9 @@ public struct RootView: View {
 
     @ViewBuilder
     private var content: some View {
-        switch page {
-        case .accounts: AccountsPage(engine: engine)
-        case .sessions: SessionsPage(engine: engine)
+        switch nav.page {
+        case .accounts: AccountsPage(engine: engine, nav: nav)
+        case .sessions: SessionsPage(engine: engine, nav: nav)
         case .settings: SettingsPage(engine: engine)
         }
     }
@@ -99,7 +101,7 @@ public struct RootView: View {
 
             ForEach(Page.allCases) { entry in
                 Button {
-                    page = entry
+                    nav.page = entry
                     withAnimation(.easeOut(duration: 0.15)) { curtainOpen = false }
                 } label: {
                     HStack(spacing: 9) {
@@ -107,11 +109,11 @@ public struct RootView: View {
                             .frame(width: 18)
                         Text(entry.title)
                         Spacer()
-                        if entry == .accounts && engine.needsAttention { RedDot() }
+                        if needsDot(entry) { RedDot() }
                     }
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
-                    .background(page == entry
+                    .background(nav.page == entry
                                 ? Color.accentColor.opacity(0.15) : Color.clear)
                     .contentShape(Rectangle())
                 }
@@ -123,12 +125,10 @@ public struct RootView: View {
             if engine.needsAttention {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(engine.accountsNeedingAttention) { account in
-                        HStack(spacing: 6) {
-                            RedDot(size: 6)
-                            Text("\(account.displayName) needs re-login")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
+                        attentionRow("\(account.displayName) needs re-login")
+                    }
+                    ForEach(engine.blocks.all) { blocked in
+                        attentionRow("\(engine.sessionLabel(blocked.sessionID)) is blocked")
                     }
                 }
                 .padding(14)
@@ -138,6 +138,25 @@ public struct RootView: View {
         .frame(maxHeight: .infinity)
         .background(.regularMaterial)
         .overlay(alignment: .trailing) { Divider() }
+    }
+
+    private func attentionRow(_ text: String) -> some View {
+        HStack(spacing: 6) {
+            RedDot(size: 6)
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// Each entry badges only for its own trouble, so the dot points at the screen that
+    /// can actually resolve it.
+    private func needsDot(_ entry: Page) -> Bool {
+        switch entry {
+        case .accounts: return !engine.accountsNeedingAttention.isEmpty
+        case .sessions: return !engine.blocks.isEmpty
+        case .settings: return false
+        }
     }
 
     private func bannerView(_ banner: Engine.Banner) -> some View {
@@ -155,6 +174,8 @@ public struct RootView: View {
                 engine.dismissBanner()
             } label: {
                 Image(systemName: "xmark")
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)

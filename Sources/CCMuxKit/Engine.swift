@@ -20,14 +20,20 @@ public final class Engine: ObservableObject {
     public struct Banner: Equatable {
         public enum Level { case info, warning }
         public enum Action: Equatable { case openNotificationSettings }
+        /// What raised it, for banners that should retract themselves once the condition
+        /// clears. nil stands until the user dismisses it.
+        public enum Source: Equatable { case blockedSession(String) }
         public var level: Level
         public var text: String
         public var action: Action?
+        public var source: Source?
 
-        public init(level: Level, text: String, action: Action? = nil) {
+        public init(level: Level, text: String, action: Action? = nil,
+                    source: Source? = nil) {
             self.level = level
             self.text = text
             self.action = action
+            self.source = source
         }
     }
 
@@ -44,7 +50,8 @@ public final class Engine: ObservableObject {
     private var lastProbe: [String: Date] = [:]
     /// Sessions waiting for a turn boundary before their account changes, and when the
     /// wait began.
-    private var pendingSwitch: [String: (accountID: String, since: Date)] = [:]
+    private var pendingSwitch: [String: (accountID: String, since: Date,
+                                        model: String?)] = [:]
     /// A session retrying against a refusal can report `busy` indefinitely, so the wait
     /// for a turn boundary is capped rather than unbounded.
     private static let turnBoundaryGrace: TimeInterval = 120
@@ -53,8 +60,15 @@ public final class Engine: ObservableObject {
         accounts.filter { $0.health == .needsRelogin }
     }
 
+    /// Sessions that cannot make progress. Visible in the window rather than only as an
+    /// OS notification, which is silently dropped whenever notification permission is
+    /// off — the case this exists to survive.
+    @Published public private(set) var blocks = BlockLedger()
+
     /// What the burger badge surfaces.
-    public var needsAttention: Bool { !accountsNeedingAttention.isEmpty }
+    public var needsAttention: Bool {
+        !accountsNeedingAttention.isEmpty || !blocks.isEmpty
+    }
 
     public init() {
         settings = store.currentSettings()
@@ -86,6 +100,7 @@ public final class Engine: ObservableObject {
         vault.load(accountIDs: store.accounts.all().map(\.id))
 
         sessionManager.recoverAfterLaunch()
+        restoreBlocks()
         reload(rescanClaudeSessions: true)
         refreshChromeProfiles()
         Task { await checkNotificationAuthorization() }
@@ -164,6 +179,11 @@ public final class Engine: ObservableObject {
 
         let freshSessions = store.sessions.all().sorted { $0.startedAt > $1.startedAt }
         if sessions != freshSessions { sessions = freshSessions }
+
+        // A reaped session must not leave the badge lit for something that is gone.
+        for sessionID in blocks.prune(liveSessionIDs: Set(freshSessions.map(\.id))) {
+            retractBanner(owner: sessionID)
+        }
 
         // Only on the timer: this scans ~/.claude/sessions and reads a file per live
         // session, and store changes fire once per proxied response.
@@ -320,7 +340,13 @@ public final class Engine: ObservableObject {
         }
 
         guard UsageParser.isRateLimited(headers: observation.headers,
-                                        statusCode: observation.statusCode) else { return }
+                                        statusCode: observation.statusCode) else {
+            if blocks.served(sessionID: sessionID, accountID: observation.accountID,
+                             model: observation.model) {
+                retractBanner(owner: sessionID)
+            }
+            return
+        }
         // The response may belong to a request that was already on the wire when the
         // account changed. Its usage still counts against the account that served it,
         // but moving the session on it would undo a choice just made.
@@ -329,7 +355,8 @@ public final class Engine: ObservableObject {
                      + "session \(sessionID) has already moved on")
             return
         }
-        handleExhaustion(sessionID: sessionID, accountID: observation.accountID)
+        handleExhaustion(sessionID: sessionID, accountID: observation.accountID,
+                         model: observation.model)
     }
 
     // MARK: - Thresholds and exhaustion
@@ -352,7 +379,7 @@ public final class Engine: ObservableObject {
         }
     }
 
-    private func handleExhaustion(sessionID: String, accountID: String) {
+    private func handleExhaustion(sessionID: String, accountID: String, model: String?) {
         guard let record = store.sessions.get(sessionID) else { return }
         let accountName = displayName(accountID)
 
@@ -360,40 +387,95 @@ public final class Engine: ObservableObject {
         // prompt cache is dropped between turns rather than mid-answer.
         if settings.autoSwitch == .atTurnBoundary, isBusy(pid: record.pid) {
             if pendingSwitch[sessionID] == nil {
-                pendingSwitch[sessionID] = (accountID, Date())
+                pendingSwitch[sessionID] = (accountID, Date(), model)
                 Log.info("session \(sessionID) will move off \(accountID) at its next "
                          + "turn boundary")
             }
             return
         }
-        performSwitch(sessionID: sessionID, from: accountID, accountName: accountName)
+        performSwitch(sessionID: sessionID, from: accountID, accountName: accountName,
+                      model: model)
     }
 
     private func performSwitch(sessionID: String, from accountID: String,
-                               accountName: String) {
+                               accountName: String, model: String?) {
         switch sessionManager.reassignAfterExhaustion(sessionID: sessionID,
                                                       globallyEnabled: settings.autoSwitch != .off) {
         case .switched(_, let to):
+            unblock(sessionID: sessionID)
             if settings.notifyOnAutoSwitch {
                 notifier.post(title: "Switched to \(displayName(to))",
-                              body: "\(accountName) hit its limit; session "
-                                  + "\(sessionID.prefix(8)) moved on its next request.")
+                              body: "\(accountName) hit its limit; "
+                                  + "\(sessionLabel(sessionID)) moved on its next request.")
             }
         case .disabled:
-            notifier.postOnce(key: "exhausted/\(sessionID)/\(accountID)/\(periodStamp(accountID))",
-                              title: "\(accountName) is out of headroom",
-                              body: "Session \(sessionID.prefix(8)) is blocked. "
-                                  + "Pick another account in ccmux.")
+            block(sessionID: sessionID, accountID: accountID, model: model,
+                  reason: .pinned, title: "\(accountName) is out of headroom",
+                  body: "\(sessionLabel(sessionID)) is blocked. "
+                      + "Pick another account in ccmux.")
         case .noneEligible:
-            notifier.postOnce(key: "noheadroom/\(sessionID)/\(accountID)/\(periodStamp(accountID))",
-                              title: "No account left with headroom",
-                              body: "\(accountName) hit its limit and nothing else "
-                                  + "satisfies its policy.")
+            block(sessionID: sessionID, accountID: accountID, model: model,
+                  reason: .noneEligible, title: "No account left with headroom",
+                  body: "\(accountName) hit its limit and nothing else "
+                      + "satisfies its policy.")
         case .failed(let reason):
             Log.error("auto-switch failed for session \(sessionID): \(reason)")
-            banner = Banner(level: .warning, text: "Could not move session "
-                            + "\(sessionID.prefix(8)): \(reason)")
+            banner = Banner(level: .warning, text: "Could not move "
+                            + "\(sessionLabel(sessionID)): \(reason)")
         }
+    }
+
+    /// Blocks live in memory, so a restart while a session sits parked would drop the
+    /// badge until the next refusal — which may be hours away. Only a fully exhausted
+    /// account qualifies here: an inferred block must not fire on an account that is
+    /// merely low. The model is unknown at rest, so any success clears it.
+    private func restoreBlocks() {
+        let accounts = store.accounts.all()
+        let usage = store.allUsage()
+        for record in store.sessions.all() {
+            guard !ModelRouting.canServe(nil, usage: usage[record.accountID]) else { continue }
+            let movable = record.autoSwitchEnabled(default: settings.autoSwitch != .off)
+            if movable {
+                let elsewhere = PolicyEngine.pick(accounts: accounts, usage: usage,
+                                                  policy: PolicyEngine.everyWindow,
+                                                  excluding: [record.accountID])
+                guard elsewhere == nil else { continue }
+            }
+            blocks.block(sessionID: record.id, accountID: record.accountID, model: nil,
+                         reason: movable ? .noneEligible : .pinned)
+        }
+        if !blocks.isEmpty {
+            Log.info("restored \(blocks.count) blocked session(s) after launch")
+        }
+    }
+
+    private func block(sessionID: String, accountID: String, model: String?,
+                       reason: BlockLedger.Entry.Reason, title: String, body: String) {
+        guard blocks.block(sessionID: sessionID, accountID: accountID, model: model,
+                           reason: reason) else { return }
+        banner = Banner(level: .warning, text: "\(title). \(body)",
+                        source: .blockedSession(sessionID))
+        notifier.postOnce(key: "blocked/\(sessionID)/\(accountID)/\(periodStamp(accountID))",
+                          title: title, body: body)
+    }
+
+    private func unblock(sessionID: String) {
+        guard blocks.unblock(sessionID) else { return }
+        retractBanner(owner: sessionID)
+    }
+
+    /// A banner naming a session that has recovered is worse than none: it hands the
+    /// blame to the wrong session while another is still stuck.
+    private func retractBanner(owner sessionID: String) {
+        guard banner?.source == .blockedSession(sessionID) else { return }
+        guard let next = blocks.all.first else {
+            banner = nil
+            return
+        }
+        banner = Banner(level: .warning,
+                        text: "\(displayName(next.accountID)) is out of headroom. "
+                            + "\(sessionLabel(next.sessionID)) is blocked.",
+                        source: .blockedSession(next.sessionID))
     }
 
     /// Identifies the current window period, so a blocked session is announced again
@@ -414,7 +496,8 @@ public final class Engine: ObservableObject {
             guard !isBusy(pid: record.pid) || waited else { continue }
             pendingSwitch.removeValue(forKey: sessionID)
             performSwitch(sessionID: sessionID, from: pending.accountID,
-                          accountName: displayName(pending.accountID))
+                          accountName: displayName(pending.accountID),
+                          model: pending.model)
         }
     }
 
@@ -626,6 +709,7 @@ public final class Engine: ObservableObject {
         do {
             try sessionManager.assign(sessionID: sessionID, accountID: accountID)
             pendingSwitch.removeValue(forKey: sessionID)
+            unblock(sessionID: sessionID)
         } catch {
             banner = Banner(level: .warning, text: error.localizedDescription)
         }
@@ -633,6 +717,9 @@ public final class Engine: ObservableObject {
 
     public func setAutoSwitch(_ enabled: Bool, for sessionID: String) {
         store.sessions.mutate(sessionID) { $0.autoSwitchOverride = enabled }
+        // The recorded reason said auto-switch was off for this session. It re-blocks with
+        // an accurate one on the next refusal.
+        if enabled, blocks[sessionID]?.reason == .pinned { unblock(sessionID: sessionID) }
     }
 
     public func endSession(_ sessionID: String) {
@@ -641,6 +728,15 @@ public final class Engine: ObservableObject {
 
     public func claudeSession(forPID pid: Int32) -> ClaudeSessionInfo? {
         claudeSessions.first { $0.pid == pid }
+    }
+
+    /// How a session is named on its card, so every other mention of it — curtain row,
+    /// banner, notification — points at something the user can actually find.
+    public func sessionLabel(_ sessionID: String) -> String {
+        guard let record = store.sessions.get(sessionID) else {
+            return String(sessionID.prefix(8))
+        }
+        return claudeSession(forPID: record.pid)?.name ?? Format.shortenHome(record.cwd)
     }
 
     /// Live Claude Code sessions ccmux did not launch, so the Sessions screen tells the

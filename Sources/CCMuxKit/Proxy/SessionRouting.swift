@@ -17,7 +17,11 @@ public protocol SessionRouting: AnyObject {
     func failover(sessionID: String, model: String?, servedBy: String,
                   tried: Set<String>) -> (accountID: String, token: String)?
 
-    /// The soonest moment any account could serve `model`, used to tell Claude Code when
-    /// it is worth trying again.
-    func soonestAvailability(model: String?) -> Date?
+    /// The soonest moment this session could be served `model`, used to tell Claude Code
+    /// when it is worth trying again.
+    ///
+    /// Session-scoped on purpose: a session ccmux may not move can only ever be served by
+    /// its own account, and naming an earlier moment belonging to some other account just
+    /// sends Claude Code back into the same refusal.
+    func soonestAvailability(model: String?, for sessionID: String) -> Date?
 }

@@ -155,4 +155,14 @@ public enum ModelRouting {
             .min { $0.1 < $1.1 }
             .map { (accountID: $0.0, at: $0.1) }
     }
+
+    /// The accounts a session could actually end up on. A session ccmux may not move is
+    /// down to its own: quoting a stranger's earlier reset would send Claude Code back
+    /// into the same refusal, and quoting one that is available *now* suppresses the
+    /// wait entirely, which is what kills the session outright.
+    public static func reachableAccounts(_ accounts: [Account], for record: SessionRecord,
+                                         autoSwitchDefault: Bool) -> [Account] {
+        guard !record.autoSwitchEnabled(default: autoSwitchDefault) else { return accounts }
+        return accounts.filter { $0.id == record.accountID }
+    }
 }

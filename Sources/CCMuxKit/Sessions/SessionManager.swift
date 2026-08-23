@@ -248,9 +248,15 @@ public final class SessionManager: SessionRouting {
 
     /// The soonest any account could serve this model — the number Claude Code needs to
     /// decide whether waiting is worth it.
-    public func soonestAvailability(model: String?) -> Date? {
-        ModelRouting.soonestAvailable(model, accounts: store.accounts.all(),
-                                      usage: store.allUsage())?.at
+    public func soonestAvailability(model: String?, for sessionID: String) -> Date? {
+        var accounts = store.accounts.all()
+        if let record = store.sessions.get(sessionID) {
+            accounts = ModelRouting.reachableAccounts(
+                accounts, for: record,
+                autoSwitchDefault: store.currentSettings().autoSwitch != .off)
+        }
+        return ModelRouting.soonestAvailable(model, accounts: accounts,
+                                             usage: store.allUsage())?.at
     }
 
     /// Writes the account's credential where Claude Code will look for it, in the form

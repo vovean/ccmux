@@ -20,6 +20,16 @@ public final class SessionProxy {
         public let statusCode: Int
         public let headers: [String: String]
         public let accountID: String
+        /// What was asked for, so a block raised by one model is not cleared by another.
+        public let model: String?
+
+        public init(statusCode: Int, headers: [String: String], accountID: String,
+                    model: String? = nil) {
+            self.statusCode = statusCode
+            self.headers = headers
+            self.accountID = accountID
+            self.model = model
+        }
     }
 
     public static let defaultUpstream = URL(string: "https://api.anthropic.com")!
@@ -322,7 +332,8 @@ public final class SessionProxy {
                 // the account that produced it.
                 self.observer(Observation(statusCode: response.statusCode,
                                           headers: rateLimit,
-                                          accountID: assignment.accountID))
+                                          accountID: assignment.accountID,
+                                          model: model))
 
                 if UsageParser.isRateLimited(headers: rateLimit,
                                              statusCode: response.statusCode) {
@@ -351,7 +362,7 @@ public final class SessionProxy {
                     // `anthropic-ratelimit-unified-reset`, and refuses to wait at all when
                     // that is more than 24h out — so it has to describe the soonest moment
                     // *any* account frees up, not just this one's window.
-                    if let soonest = self.router?.soonestAvailability(model: model),
+                    if let soonest = self.router?.soonestAvailability(model: model, for: sessionID),
                        let shortened = Self.shorteningReset(headers, to: soonest) {
                         headers = shortened
                         Log.info("session \(sessionID): no account can serve "

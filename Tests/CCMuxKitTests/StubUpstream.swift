@@ -156,7 +156,7 @@ final class StubUpstream: @unchecked Sendable {
     }
 
     private func write(_ fd: Int32, _ text: String) {
-        var data = Array(text.utf8)
+        let data = Array(text.utf8)
         var sent = 0
         while sent < data.count {
             let n = data.withUnsafeBytes { raw in

@@ -241,6 +241,7 @@ final class TokenSequence: SessionRouting, @unchecked Sendable {
     /// What `soonestAvailability` should report.
     var soonest: Date?
     private(set) var failoverRequests: [Set<String>] = []
+    private(set) var availabilityRequests: [String] = []
 
     init(_ tokens: [String: String]) {
         self.tokens = tokens
@@ -267,8 +268,9 @@ final class TokenSequence: SessionRouting, @unchecked Sendable {
         return (next, token)
     }
 
-    func soonestAvailability(model: String?) -> Date? {
+    func soonestAvailability(model: String?, for sessionID: String) -> Date? {
         lock.lock(); defer { lock.unlock() }
+        availabilityRequests.append(sessionID)
         return soonest
     }
 }
@@ -380,6 +382,9 @@ struct FailoverTests {
         // Exactly one reset header, or the client picks whichever it sees first.
         #expect(response.components(separatedBy: "anthropic-ratelimit-unified-reset")
                 .count == 2)
+        // Asked about this session specifically: what a pinned session may be told
+        // differs from what a movable one may be told.
+        #expect(router.availabilityRequests == ["test"])
     }
 
     /// A successful response must not pay for any of this.
@@ -451,7 +456,7 @@ final class ModelRecordingRouter: SessionRouting, @unchecked Sendable {
         return nil
     }
 
-    func soonestAvailability(model: String?) -> Date? {
+    func soonestAvailability(model: String?, for sessionID: String) -> Date? {
         lock.lock(); models.append(model); lock.unlock()
         return nil
     }

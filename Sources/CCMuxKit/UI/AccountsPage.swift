@@ -2,6 +2,7 @@ import SwiftUI
 
 struct AccountsPage: View {
     @ObservedObject var engine: Engine
+    @ObservedObject var nav: NavigationState
     @State private var showingAdd = false
     @State private var renaming: Account?
     @State private var renameText = ""
@@ -75,8 +76,15 @@ struct AccountsPage: View {
                         StatusPill(text: plan, tint: .secondary)
                     }
                     if sessionCount > 0 {
-                        StatusPill(text: "\(sessionCount) session"
-                                   + (sessionCount == 1 ? "" : "s"), tint: .accentColor)
+                        Button {
+                            nav.showSessions(forAccount: account.id)
+                        } label: {
+                            StatusPill(text: "\(sessionCount) session"
+                                       + (sessionCount == 1 ? "" : "s"), tint: .accentColor)
+                                .contentShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Show these sessions")
                     }
                     Spacer()
                     accountMenu(account)
