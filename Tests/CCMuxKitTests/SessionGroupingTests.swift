@@ -104,6 +104,27 @@ struct NavigationStateTests {
         // Only the requested group opens; the rest keep their state.
         #expect(nav.isCollapsed("b"))
     }
+
+    @Test("Jumping asks for that group to be scrolled to, once")
+    func jumpRequestsAScroll() {
+        let nav = NavigationState()
+        #expect(nav.scrollTarget == nil)
+
+        nav.showSessions(forAccount: "a")
+        #expect(nav.scrollTarget == "a")
+
+        // Consumed once, or coming back to the screen would yank the scroll again.
+        nav.clearScrollTarget()
+        #expect(nav.scrollTarget == nil)
+    }
+
+    @Test("Toggling a group does not ask for a scroll")
+    func togglingDoesNotScroll() {
+        let nav = NavigationState()
+        nav.toggle("a")
+        nav.page = .sessions
+        #expect(nav.scrollTarget == nil)
+    }
 }
 
 @Suite("Reachable accounts for a blocked session")

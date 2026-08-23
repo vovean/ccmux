@@ -23,8 +23,17 @@ final class NavigationState: ObservableObject {
         if kept != collapsedGroups { collapsedGroups = kept }
     }
 
+    /// The group to bring to the top of the Sessions screen. Consumed once, so returning
+    /// to the screen later does not yank the scroll position again.
+    @Published private(set) var scrollTarget: String?
+
     func showSessions(forAccount accountID: String) {
         collapsedGroups.remove(accountID)
+        scrollTarget = accountID
         page = .sessions
+    }
+
+    func clearScrollTarget() {
+        if scrollTarget != nil { scrollTarget = nil }
     }
 }

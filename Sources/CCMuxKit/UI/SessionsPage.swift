@@ -11,19 +11,42 @@ struct SessionsPage: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                if engine.sessions.isEmpty {
-                    EmptyHint(title: "No managed sessions",
-                              detail: "Start one with cc-opus or cc-fable in a terminal.")
+        ScrollViewReader { scroller in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if engine.sessions.isEmpty {
+                        EmptyHint(title: "No managed sessions",
+                                  detail: "Start one with cc-opus or cc-fable in a terminal.")
+                    }
+                    ForEach(groups) { group in
+                        groupSection(group).id(group.id)
+                    }
                 }
-                ForEach(groups) { group in
-                    groupSection(group)
-                }
+                .padding(14)
             }
-            .padding(14)
+            .onChange(of: Set(groups.map(\.id))) { _, ids in nav.retainOnly(ids) }
+            .onAppear { bringTargetToTop(using: scroller) }
+            .onChange(of: nav.scrollTarget) { _, _ in bringTargetToTop(using: scroller) }
         }
-        .onChange(of: Set(groups.map(\.id))) { _, ids in nav.retainOnly(ids) }
+    }
+
+    /// Arriving from an account's "N sessions" pill: the group is expanded by then, but it
+    /// can sit below the fold with its sessions off-screen entirely.
+    private func bringTargetToTop(using scroller: ScrollViewProxy) {
+        guard let target = nav.scrollTarget else { return }
+        // A target with no group would leave the request pending forever.
+        guard groups.contains(where: { $0.id == target }) else {
+            nav.clearScrollTarget()
+            return
+        }
+        // One turn later: on the first appearance the rows do not have their geometry yet
+        // and scrollTo lands nowhere.
+        Task { @MainActor in
+            withAnimation(.easeOut(duration: 0.2)) {
+                scroller.scrollTo(target, anchor: .top)
+            }
+            nav.clearScrollTarget()
+        }
     }
 
     @ViewBuilder
