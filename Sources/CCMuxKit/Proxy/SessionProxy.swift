@@ -264,12 +264,13 @@ public final class SessionProxy {
     /// there was a problem. Each account is tried at most once — cycling would also risk
     /// Claude Code's own "stopped after repeated usage-limit hits" guard.
     private func attempt(_ request: HTTPRequestParser.Request, model: String?,
-                         tried: Set<String>, on connection: NWConnection,
+                         tried: Set<String>,
+                         resolved: (accountID: String, token: String)? = nil,
+                         on connection: NWConnection,
                          onCancel: @escaping (URLSessionDataTask) -> Void,
                          completion: @escaping (Bool) -> Void) {
-        guard let assignment = tried.isEmpty
-            ? router?.assignment(sessionID: sessionID)
-            : router?.failover(sessionID: sessionID, model: model, tried: tried) else {
+        let pending = PendingTask()
+        guard let assignment = resolved ?? router?.assignment(sessionID: sessionID) else {
             connection.send(content: HTTPResponseWriter.error(
                 status: 503, reason: "Service Unavailable",
                 message: "ccmux has no account assigned to this session"),
@@ -327,15 +328,22 @@ public final class SessionProxy {
                                              statusCode: response.statusCode) {
                     var attempted = tried
                     attempted.insert(assignment.accountID)
-                    if self.router?.failover(sessionID: sessionID, model: model,
-                                             tried: attempted) != nil {
+                    // Resolved once: `failover` reassigns the session as a side effect, so
+                    // asking twice would rank twice and re-seed the namespace twice.
+                    if let next = self.router?.failover(sessionID: sessionID, model: model,
+                                                        servedBy: assignment.accountID,
+                                                        tried: attempted) {
                         abandoned = true
+                        // The replaced attempt is still streaming a refusal nobody will
+                        // read; left alone it holds a connection until the 1h resource
+                        // timeout.
+                        pending.cancel()
                         Log.info("session \(sessionID): \(assignment.accountID) refused "
-                                 + "\(model ?? "request"), retrying on another account")
+                                 + "\(model ?? "request"), retrying on \(next.accountID)")
                         self.queue.async {
                             self.attempt(request, model: model, tried: attempted,
-                                         on: connection, onCancel: onCancel,
-                                         completion: completion)
+                                         resolved: next, on: connection,
+                                         onCancel: onCancel, completion: completion)
                         }
                         return
                     }
@@ -343,8 +351,9 @@ public final class SessionProxy {
                     // `anthropic-ratelimit-unified-reset`, and refuses to wait at all when
                     // that is more than 24h out — so it has to describe the soonest moment
                     // *any* account frees up, not just this one's window.
-                    if let soonest = self.router?.soonestAvailability(model: model) {
-                        headers = Self.rewritingReset(headers, to: soonest)
+                    if let soonest = self.router?.soonestAvailability(model: model),
+                       let shortened = Self.shorteningReset(headers, to: soonest) {
+                        headers = shortened
                         Log.info("session \(sessionID): no account can serve "
                                  + "\(model ?? "request"); Claude Code told to retry at "
                                  + "\(Format.clock(soonest))")
@@ -396,20 +405,62 @@ public final class SessionProxy {
             })
 
         let task = relay.send(outbound, handlers: handlers)
+        pending.adopt(task, relay: relay)
         // Held so a client that disconnects mid-request does not leave the upstream leg
         // running against a one-hour resource timeout.
         onCancel(task)
     }
 
-    /// Replaces the unified reset header, which is where Claude Code reads the time it
-    /// schedules its automatic continue from.
-    static func rewritingReset(_ headers: [(String, String)],
-                               to date: Date) -> [(String, String)] {
-        let stamp = String(Int(date.timeIntervalSince1970))
-        var out = headers.filter {
-            $0.0.caseInsensitiveCompare("anthropic-ratelimit-unified-reset") != .orderedSame
+    /// Holds the in-flight task so a retry can cancel the attempt it replaces, even if
+    /// the refusal arrives before `relay.send` has returned.
+    private final class PendingTask {
+        private let lock = NSLock()
+        private var task: URLSessionDataTask?
+        private var relay: UpstreamRelay?
+        private var cancelled = false
+
+        func adopt(_ task: URLSessionDataTask, relay: UpstreamRelay) {
+            lock.lock()
+            if cancelled {
+                lock.unlock()
+                relay.cancel(task)
+                return
+            }
+            self.task = task
+            self.relay = relay
+            lock.unlock()
         }
-        out.append(("anthropic-ratelimit-unified-reset", stamp))
+
+        func cancel() {
+            lock.lock()
+            cancelled = true
+            let task = self.task
+            let relay = self.relay
+            self.task = nil
+            lock.unlock()
+            if let task, let relay { relay.cancel(task) }
+        }
+    }
+
+    /// Brings the unified reset header forward to `date`, or returns nil to leave it
+    /// alone. That header is where Claude Code reads the time it schedules its automatic
+    /// continue from.
+    ///
+    /// Only ever shortens the wait. ccmux's view of a per-model weekly window can be
+    /// stale — those windows never appear in response headers — and `availableAt` reports
+    /// "now" when it sees nothing blocked. Writing that over a correct far-future reset
+    /// would make Claude Code retry immediately, in a loop, burning a request on every
+    /// account each time.
+    static func shorteningReset(_ headers: [(String, String)], to date: Date,
+                                now: Date = Date()) -> [(String, String)]? {
+        let name = "anthropic-ratelimit-unified-reset"
+        guard date.timeIntervalSince(now) > 30 else { return nil }
+        let upstream = headers.first { $0.0.caseInsensitiveCompare(name) == .orderedSame }
+            .flatMap { Double($0.1) }
+            .map { Date(timeIntervalSince1970: $0) }
+        if let upstream, upstream <= date { return nil }
+        var out = headers.filter { $0.0.caseInsensitiveCompare(name) != .orderedSame }
+        out.append((name, String(Int(date.timeIntervalSince1970))))
         return out
     }
 }

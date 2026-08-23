@@ -135,9 +135,10 @@ public final class Store {
     public func setUsage(_ snapshot: UsageSnapshot, for id: String) {
         lock.lock()
         usageByAccount[id] = snapshot
-        let all = usageByAccount
+        // Saved under the lock, like Table.write: releasing first lets two writers persist
+        // out of order and an older snapshot land on disk after a newer one.
+        JSONStore.save(usageByAccount, to: Paths.usageFile)
         lock.unlock()
-        JSONStore.save(all, to: Paths.usageFile)
         onChange?()
     }
 
@@ -152,8 +153,8 @@ public final class Store {
         lock.lock()
         body(&settings)
         let snapshot = settings
-        lock.unlock()
         JSONStore.save(snapshot, to: Paths.settingsFile)
+        lock.unlock()
         onChange?()
         return snapshot
     }

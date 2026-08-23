@@ -189,22 +189,58 @@ public final class SessionManager: SessionRouting {
         return (current.accountID, token)
     }
 
-    /// Another account that can serve this model right now, **least remaining first**,
-    /// so a subscription is drained before the next one is started on. Reassigns the
-    /// session, so the rest of it continues on the account that worked.
+    /// Where to retry a request that `servedBy` refused, least remaining first, so a
+    /// subscription is drained before the next one is started on.
     ///
     /// Eligibility is model-aware and is the part that must not be relaxed: a Fable
     /// request only considers accounts with Fable weekly headroom, never one that merely
     /// has general weekly left.
-    public func failover(sessionID: String, model: String?,
+    public func failover(sessionID: String, model: String?, servedBy: String,
                          tried: Set<String>) -> (accountID: String, token: String)? {
-        let candidate = ModelRouting.rankLeastRemaining(model, accounts: store.accounts.all(),
-                                                        usage: store.allUsage(),
-                                                        excluding: tried).first
-        guard let candidate, let token = vault.bearerToken(for: candidate.id) else {
+        guard let record = store.sessions.get(sessionID) else { return nil }
+
+        // The account changed while this request was in flight — the user picked another
+        // one, or an earlier refusal already moved it. Honour that rather than ranking
+        // again, which could drag the session to a third account nobody chose.
+        if record.accountID != servedBy, !tried.contains(record.accountID) {
+            let usage = store.allUsage()
+            if ModelRouting.canServe(model, usage: usage[record.accountID]),
+               let token = vault.cachedBearerToken(for: record.accountID) {
+                return (record.accountID, token)
+            }
+        }
+
+        // Moving a session between subscriptions is exactly what auto-switch governs, so
+        // an explicit "off" has to stop it here too, not only in the exhaustion notice.
+        let settings = store.currentSettings()
+        guard record.autoSwitchEnabled(default: settings.autoSwitch != .off) else {
             return nil
         }
-        if store.sessions.get(sessionID)?.accountID != candidate.id {
+        // A mid-request retry is mid-turn by definition, which is the one thing this mode
+        // exists to avoid. Let the refusal through and let Engine schedule the move for
+        // the turn boundary instead.
+        guard settings.autoSwitch != .atTurnBoundary else { return nil }
+
+        let usage = store.allUsage()
+        let policy = settings.policy(named: record.policyName)
+        let candidate = ModelRouting.rankLeastRemaining(model, accounts: store.accounts.all(),
+                                                        usage: usage, excluding: tried)
+            // Never blocks: a candidate whose token needs refreshing is skipped rather
+            // than waited on, and the vault refreshes it in the background.
+            .first { vault.cachedBearerToken(for: $0.id) != nil }
+        guard let candidate, let token = vault.cachedBearerToken(for: candidate.id) else {
+            return nil
+        }
+
+        // Claude Code makes auxiliary calls (titles, summaries) on models the session's
+        // policy says nothing about. Serving one elsewhere is fine; rehoming the whole
+        // session on the strength of it is not — the next real request would be refused
+        // and switch again, dropping the prompt cache each time.
+        let servesThePolicy = policy.map { p in
+            PolicyEngine.headroom(for: candidate, usage: usage[candidate.id],
+                                  policy: p) != nil
+        } ?? true
+        if record.accountID != candidate.id, servesThePolicy {
             try? assign(sessionID: sessionID, accountID: candidate.id)
         }
         return (candidate.id, token)
@@ -273,6 +309,7 @@ public final class SessionManager: SessionRouting {
             return .failed(SessionError.unknownSession(sessionID).localizedDescription)
         }
         guard record.autoSwitchEnabled(default: globallyEnabled) else { return .disabled }
+        let settings = store.currentSettings()
 
         // Prefer an account with headroom on every window it reports, then fall back to
         // the launch policy. The two differ when the session has switched models
@@ -284,8 +321,10 @@ public final class SessionManager: SessionRouting {
         let replacement = PolicyEngine.pick(accounts: accounts, usage: usage,
                                             policy: PolicyEngine.everyWindow,
                                             excluding: excluded)
-            ?? (try? chooseAccount(policyName: record.policyName,
-                                   excluding: excluded).choice)
+            ?? PolicyEngine.pick(accounts: accounts, usage: usage,
+                                 policy: settings.policy(named: record.policyName)
+                                     ?? PolicyEngine.everyWindow,
+                                 excluding: excluded)
         guard let replacement else { return .noneEligible }
         do {
             try assign(sessionID: sessionID, accountID: replacement.accountID)
@@ -327,6 +366,18 @@ public final class SessionManager: SessionRouting {
         reap()
         restoreProxies()
         sweepOrphanNamespaces()
+        // A session carried over from a build that seeded a *refreshable* credential
+        // would still have one; its Claude Code could rotate the lineage with nothing
+        // adopting the result, killing the account's stored refresh token.
+        for record in store.sessions.all() {
+            guard let credential = vault.credential(for: record.accountID) else { continue }
+            let seeded = credential.neuteredForSession()
+            if let existing = (try? ClaudeCredentialStore.read(namespace: record.namespaceDir))
+                ?? nil, existing.refreshToken == nil,
+               existing.accessToken == seeded.accessToken { continue }
+            try? ClaudeCredentialStore.write(seeded, namespace: record.namespaceDir)
+            Log.info("re-seeded namespace for session \(record.id)")
+        }
     }
 
     /// Removes namespace directories with no matching session record, which is what a

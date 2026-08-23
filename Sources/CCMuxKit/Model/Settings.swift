@@ -26,6 +26,22 @@ public struct Policy: Codable, Equatable, Identifiable {
         self.launchFloors = launchFloors
     }
 
+    /// Hand-written rather than synthesized: synthesized decoding requires every key,
+    /// so a settings file written before a field existed fails to decode entirely and
+    /// `Store` silently falls back to defaults — turning, say, `autoSwitch: off` into
+    /// `immediate` on upgrade. Verified: an inline default on the property does *not*
+    /// make the synthesized decoder tolerant.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let fallback = Policy(name: "", requiredWindows: [])
+        name = try c.decode(String.self, forKey: .name)
+        requiredWindows = try c.decodeIfPresent([UsageWindow.Kind].self,
+                                                forKey: .requiredWindows) ?? []
+        scopedModel = try c.decodeIfPresent(String.self, forKey: .scopedModel)
+        launchFloors = try c.decodeIfPresent([String: Double].self, forKey: .launchFloors)
+            ?? fallback.launchFloors
+    }
+
     public func floor(for kind: UsageWindow.Kind) -> Double {
         launchFloors[kind.rawValue] ?? 0
     }
@@ -86,6 +102,31 @@ public struct Settings: Codable, Equatable {
         self.notifyOnReloginNeeded = notifyOnReloginNeeded
         self.mutedAccountIDs = mutedAccountIDs
         self.keepWindowsRolling = keepWindowsRolling
+    }
+
+    /// See `Policy.init(from:)`: tolerant of keys an older build did not write, so an
+    /// upgrade never silently discards the settings the user chose. Verified that an
+    /// inline default on the property does *not* make the synthesized decoder tolerant.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = Settings()
+        warnThresholdPercent = try c.decodeIfPresent(Double.self,
+                                                     forKey: .warnThresholdPercent)
+            ?? d.warnThresholdPercent
+        watchedWindows = try c.decodeIfPresent([UsageWindow.Kind].self,
+                                               forKey: .watchedWindows) ?? d.watchedWindows
+        autoSwitch = try c.decodeIfPresent(AutoSwitchMode.self, forKey: .autoSwitch)
+            ?? d.autoSwitch
+        policies = try c.decodeIfPresent([Policy].self, forKey: .policies) ?? d.policies
+        notifyOnAutoSwitch = try c.decodeIfPresent(Bool.self, forKey: .notifyOnAutoSwitch)
+            ?? d.notifyOnAutoSwitch
+        notifyOnReloginNeeded = try c.decodeIfPresent(Bool.self,
+                                                      forKey: .notifyOnReloginNeeded)
+            ?? d.notifyOnReloginNeeded
+        mutedAccountIDs = try c.decodeIfPresent([String].self, forKey: .mutedAccountIDs)
+            ?? d.mutedAccountIDs
+        keepWindowsRolling = try c.decodeIfPresent(Bool.self, forKey: .keepWindowsRolling)
+            ?? d.keepWindowsRolling
     }
 
     /// Adds or removes a watched window without letting duplicates into persisted

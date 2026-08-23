@@ -11,18 +11,45 @@ import Foundation
 public enum ModelRouting {
     /// The model named in a `/v1/messages` request body, if there is one.
     public static func model(inRequestBody body: Data) -> String? {
-        guard !body.isEmpty, body.count < 64 * 1024 * 1024,
-              let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-              let model = object["model"] as? String, !model.isEmpty
-        else { return nil }
-        return model
+        guard !body.isEmpty else { return nil }
+        if body.count < 4 * 1024 * 1024,
+           let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+           let model = object["model"] as? String, !model.isEmpty {
+            return model
+        }
+        // Parsing a multi-megabyte conversation just to read one field is not worth it,
+        // and losing the model would silently drop model-scoped eligibility. The field
+        // sits in the first few hundred bytes of every Claude Code request.
+        return modelFromPrefix(body)
+    }
+
+    static func modelFromPrefix(_ body: Data, limit: Int = 8 * 1024) -> String? {
+        let head = String(decoding: body.prefix(limit), as: UTF8.self)
+        guard let key = head.range(of: "\"model\"") else { return nil }
+        let rest = head[key.upperBound...]
+        guard let colon = rest.firstIndex(of: ":") else { return nil }
+        let after = rest[rest.index(after: colon)...]
+        guard let open = after.firstIndex(of: "\"") else { return nil }
+        let value = after[after.index(after: open)...]
+        guard let close = value.firstIndex(of: "\"") else { return nil }
+        let model = String(value[value.startIndex..<close])
+        return model.isEmpty ? nil : model
     }
 
     /// Whether a scoped window governs this model id.
+    ///
+    /// Compared with separators and case removed, so a display name like "Sonnet 4.5"
+    /// still matches `claude-sonnet-4-5`. A name shorter than three characters is
+    /// ignored rather than risk matching every model.
     public static func window(_ window: UsageWindow, governs modelID: String) -> Bool {
-        guard window.kind == .weeklyScoped, let name = window.modelName, !name.isEmpty
-        else { return false }
-        return modelID.lowercased().contains(name.lowercased())
+        guard window.kind == .weeklyScoped, let name = window.modelName else { return false }
+        let needle = normalized(name)
+        guard needle.count >= 3 else { return false }
+        return normalized(modelID).contains(needle)
+    }
+
+    static func normalized(_ text: String) -> String {
+        text.lowercased().filter { $0.isLetter || $0.isNumber }
     }
 
     /// Windows that actually gate a request for `modelID`: the 5-hour and weekly-all

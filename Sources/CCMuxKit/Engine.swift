@@ -93,7 +93,9 @@ public final class Engine: ObservableObject {
         scheduleTimers()
         Task {
             await refreshExpiringTokens()
-            await pollDueAccounts(force: true)
+            // Not `force`: that stamps the manual-refresh floor and would make the
+            // Refresh button a silent no-op for the first minute after launch.
+            await pollDueAccounts()
         }
     }
 
@@ -278,7 +280,9 @@ public final class Engine: ObservableObject {
             guard WindowProbe.shouldProbe(account: account,
                                           usage: store.usage(for: account.id),
                                           lastProbe: lastProbe[account.id]) else { continue }
-            guard let token = vault.credential(for: account.id)?.accessToken else { continue }
+            // Non-blocking: a token that needs refreshing is skipped without stamping,
+            // so the probe is not deferred 30 minutes over a refresh that was in flight.
+            guard let token = vault.cachedBearerToken(for: account.id) else { continue }
             lastProbe[account.id] = Date()
             do {
                 try await client.startUsageWindow(accessToken: token)

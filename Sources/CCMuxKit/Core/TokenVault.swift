@@ -99,6 +99,21 @@ public final class TokenVault {
         return refreshed ?? credential.accessToken
     }
 
+    /// A usable token if one is already in hand, never blocking. Returns nil rather than
+    /// refreshing, and kicks a refresh off in the background instead.
+    ///
+    /// For callers that must not block: the proxy's failover decision runs on the
+    /// URLSession delegate queue, which is shared by every session, so a blocking refresh
+    /// there stalls unrelated streams mid-answer.
+    public func cachedBearerToken(for accountID: String) -> String? {
+        guard let credential = credential(for: accountID) else { return nil }
+        guard !credential.isAccessTokenExpired else {
+            Task { [weak self] in await self?.refresh(accountID) }
+            return nil
+        }
+        return credential.accessToken
+    }
+
     /// Refreshes ahead of expiry so `bearerToken` almost never has to block.
     public func refreshExpiring(accountIDs: [String]) async {
         for id in accountIDs {

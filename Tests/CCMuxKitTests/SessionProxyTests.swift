@@ -257,7 +257,7 @@ final class TokenSequence: SessionRouting, @unchecked Sendable {
         return (selected, token)
     }
 
-    func failover(sessionID: String, model: String?,
+    func failover(sessionID: String, model: String?, servedBy: String,
                   tried: Set<String>) -> (accountID: String, token: String)? {
         lock.lock(); defer { lock.unlock() }
         failoverRequests.append(tried)
@@ -445,7 +445,7 @@ final class ModelRecordingRouter: SessionRouting, @unchecked Sendable {
         ("a", token)
     }
 
-    func failover(sessionID: String, model: String?,
+    func failover(sessionID: String, model: String?, servedBy: String,
                   tried: Set<String>) -> (accountID: String, token: String)? {
         lock.lock(); models.append(model); lock.unlock()
         return nil
