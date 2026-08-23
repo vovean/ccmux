@@ -55,7 +55,7 @@ installed app. CLI subcommands are fine to run directly.
 
 In the app: **Accounts › Add account**. Pick the Chrome profile that is signed into the
 Google account owning that subscription, and sign-in opens there — which is the point,
-since three subscriptions on one Mac usually means three Chrome profiles. Chrome is
+since several subscriptions on one Mac usually means several Chrome profiles. Chrome is
 launched with `--profile-directory=` directly rather than through `open -a`, because
 `open -a` silently drops that argument and would land the login in whichever profile was
 frontmost.
@@ -77,7 +77,7 @@ Fable spent is still a perfectly good Opus account. Edit the policies in Setting
 
 Among the accounts that qualify, ccmux picks the **most drained** one — least remaining
 first, ranked on the **weekly** window that gates the request. The point is to finish one
-subscription before starting the next, so the week does not end with three half-used
+subscription before starting the next, so the week does not end with several half-used
 plans. Ranking ignores the 5-hour window on purpose: it refills all day, so ranking on it
 would reshuffle the order every few hours without any of the subscription actually being
 used up.
@@ -220,6 +220,6 @@ hands out session tokens, so it is not a TCP port.
 ## Develop
 
     swift build
-    make test      # 81 tests; plain `swift test` fails on a CLT-only machine
+    make test      # plain `swift test` fails on a CLT-only machine
     make app       # dist/ccmux.app
     make icon      # re-renders Resources/AppIcon.icns from Sources/CCMuxKit/UI/IconArt.swift
