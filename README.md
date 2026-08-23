@@ -71,9 +71,19 @@ becomes account #1 without signing in again.
 
 Arguments pass straight through: `cc-opus --resume`, `cc-opus -p "…"`.
 
-An alias names a *requirement*, not an account. `cc-fable` picks whichever account has
-the most Fable weekly headroom; `cc-opus` ignores that window entirely, so an account
-with Fable spent is still a perfectly good Opus account. Edit the policies in Settings.
+An alias names a *requirement*, not an account. `cc-fable` only considers accounts with
+Fable weekly headroom left; `cc-opus` ignores that window entirely, so an account with
+Fable spent is still a perfectly good Opus account. Edit the policies in Settings.
+
+Among the accounts that qualify, ccmux picks the **most drained** one — least remaining
+first, on the tightest window that gates the request. The point is to finish one
+subscription before starting the next, so the week does not end with three half-used
+plans. There is no minimum: an account with a sliver left is still preferred while it can
+serve at all. The same ordering applies when a session launches and when it fails over.
+
+Eligibility is never traded away for this. A Fable request will not take an account that
+merely has general weekly headroom, however drained that account is — the model's own
+weekly window has to have room.
 
 **An alias picks the subscription, not the model.** It does not pass `--model`, and
 `/model` inside the session keeps working exactly as it does normally — switch whenever

@@ -4,7 +4,7 @@ import Testing
 
 @Suite("Model-aware limit math")
 struct ModelRoutingTests {
-    static func snapshot(session: Double, weekly: Double,
+    public static func snapshot(session: Double, weekly: Double,
                          scoped: [(String, Double, Date?)] = [],
                          sessionReset: Date? = nil,
                          weeklyReset: Date? = nil) -> UsageSnapshot {
@@ -143,5 +143,85 @@ struct ModelRoutingTests {
         let usage = ["a": Self.snapshot(session: 100, weekly: 10, sessionReset: nil)]
         #expect(ModelRouting.soonestAvailable("claude-opus-5", accounts: accounts,
                                               usage: usage) == nil)
+    }
+}
+
+@Suite("Failover ordering")
+struct FailoverOrderingTests {
+    static func account(_ id: String, priority: Int = 0,
+                        health: AccountHealth = .ok) -> Account {
+        Account(id: id, label: id, priority: priority, health: health)
+    }
+
+    /// Drain one subscription before starting on the next.
+    @Test func theMostDrainedEligibleAccountComesFirst() {
+        let accounts = ["fresh", "half", "nearly"].map { Self.account($0) }
+        let usage = [
+            "fresh": ModelRoutingTests.snapshot(session: 5, weekly: 5,
+                                                scoped: [("Fable", 5, nil)]),
+            "half": ModelRoutingTests.snapshot(session: 5, weekly: 5,
+                                               scoped: [("Fable", 50, nil)]),
+            "nearly": ModelRoutingTests.snapshot(session: 5, weekly: 5,
+                                                 scoped: [("Fable", 97, nil)]),
+        ]
+        let ranked = ModelRouting.rankLeastRemaining("claude-fable-5", accounts: accounts,
+                                                     usage: usage)
+        #expect(ranked.map(\.id) == ["nearly", "half", "fresh"])
+    }
+
+    /// The rule the user cares most about: a Fable session must never land on an account
+    /// that only has general weekly headroom, however drained that account is.
+    @Test func aFableRequestSkipsAccountsWithNoFableLeft() {
+        let accounts = ["noFable", "hasFable"].map { Self.account($0) }
+        let usage = [
+            // The most drained on the general windows, but its Fable week is gone.
+            "noFable": ModelRoutingTests.snapshot(session: 90, weekly: 95,
+                                                  scoped: [("Fable", 100, nil)]),
+            "hasFable": ModelRoutingTests.snapshot(session: 5, weekly: 5,
+                                                   scoped: [("Fable", 20, nil)]),
+        ]
+        #expect(ModelRouting.rankLeastRemaining("claude-fable-5", accounts: accounts,
+                                                usage: usage).map(\.id) == ["hasFable"])
+        // The same account is fine for Opus, and is preferred there for being drained.
+        #expect(ModelRouting.rankLeastRemaining("claude-opus-5", accounts: accounts,
+                                                usage: usage).map(\.id)
+                == ["noFable", "hasFable"])
+    }
+
+    /// No floor: an account with a sliver left is still preferred while it can serve.
+    @Test func thereIsNoMinimumHeadroomToBePreferred() {
+        let accounts = ["scraps", "fresh"].map { Self.account($0) }
+        let usage = ["scraps": ModelRoutingTests.snapshot(session: 99, weekly: 10),
+                     "fresh": ModelRoutingTests.snapshot(session: 1, weekly: 1)]
+        #expect(ModelRouting.rankLeastRemaining("claude-opus-5", accounts: accounts,
+                                                usage: usage).first?.id == "scraps")
+    }
+
+    @Test func exhaustedAndUnhealthyAccountsAreExcluded() {
+        let accounts = [Self.account("spent"), Self.account("dead", health: .needsRelogin),
+                        Self.account("ok")]
+        let usage = ["spent": ModelRoutingTests.snapshot(session: 100, weekly: 10),
+                     "dead": ModelRoutingTests.snapshot(session: 90, weekly: 10),
+                     "ok": ModelRoutingTests.snapshot(session: 10, weekly: 10)]
+        #expect(ModelRouting.rankLeastRemaining("claude-opus-5", accounts: accounts,
+                                                usage: usage).map(\.id) == ["ok"])
+    }
+
+    @Test func alreadyTriedAccountsAreExcluded() {
+        let accounts = ["a", "b"].map { Self.account($0) }
+        let usage = ["a": ModelRoutingTests.snapshot(session: 90, weekly: 10),
+                     "b": ModelRoutingTests.snapshot(session: 10, weekly: 10)]
+        #expect(ModelRouting.rankLeastRemaining("claude-opus-5", accounts: accounts,
+                                                usage: usage, excluding: ["a"])
+                .map(\.id) == ["b"])
+    }
+
+    @Test func tiesBreakOnPriority() {
+        let accounts = [Self.account("late", priority: 9), Self.account("early", priority: 1)]
+        let usage = ["late": ModelRoutingTests.snapshot(session: 50, weekly: 10),
+                     "early": ModelRoutingTests.snapshot(session: 50, weekly: 10)]
+        #expect(ModelRouting.rankLeastRemaining("claude-opus-5", accounts: accounts,
+                                                usage: usage).map(\.id)
+                == ["early", "late"])
     }
 }

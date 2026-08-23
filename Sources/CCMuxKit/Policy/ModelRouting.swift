@@ -77,6 +77,30 @@ public enum ModelRouting {
         return resets.compactMap { $0 }.max()
     }
 
+    /// Accounts that can serve `modelID` right now, **least remaining first**, so a
+    /// subscription is drained before the next one is started on.
+    ///
+    /// Eligibility is the part that must not be relaxed: a Fable request only considers
+    /// accounts with Fable weekly headroom left, never one that merely has general
+    /// weekly headroom. An unmeasured account sorts mid-pack — it is a gamble either
+    /// way, and the first response corrects it.
+    public static func rankLeastRemaining(_ modelID: String?, accounts: [Account],
+                                          usage: [String: UsageSnapshot],
+                                          excluding excluded: Set<String> = [])
+        -> [Account] {
+        accounts
+            .filter { !excluded.contains($0.id) && $0.health != .needsRelogin }
+            .filter { canServe(modelID, usage: usage[$0.id]) }
+            .sorted { lhs, rhs in
+                let l = headroom(for: modelID, in: usage[lhs.id])
+                    ?? PolicyEngine.unknownHeadroom
+                let r = headroom(for: modelID, in: usage[rhs.id])
+                    ?? PolicyEngine.unknownHeadroom
+                if l != r { return l < r }
+                return lhs.priority < rhs.priority
+            }
+    }
+
     /// The soonest any of these accounts could serve `modelID`, and which one.
     public static func soonestAvailable(_ modelID: String?, accounts: [Account],
                                         usage: [String: UsageSnapshot], now: Date = Date())

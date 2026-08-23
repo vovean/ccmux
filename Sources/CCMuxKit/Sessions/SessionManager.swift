@@ -168,21 +168,18 @@ public final class SessionManager: SessionRouting {
         return (current.accountID, token)
     }
 
-    /// Another account that can serve this model right now, preferring the one with the
-    /// most headroom on the windows that actually gate it. Reassigns the session, so the
-    /// rest of it continues on the account that worked.
+    /// Another account that can serve this model right now, **least remaining first**,
+    /// so a subscription is drained before the next one is started on. Reassigns the
+    /// session, so the rest of it continues on the account that worked.
+    ///
+    /// Eligibility is model-aware and is the part that must not be relaxed: a Fable
+    /// request only considers accounts with Fable weekly headroom, never one that merely
+    /// has general weekly left.
     public func failover(sessionID: String, model: String?,
                          tried: Set<String>) -> (accountID: String, token: String)? {
-        let usage = store.allUsage()
-        let candidate = store.accounts.all()
-            .filter { !tried.contains($0.id) && $0.health != .needsRelogin }
-            .filter { ModelRouting.canServe(model, usage: usage[$0.id]) }
-            .max { lhs, rhs in
-                let l = ModelRouting.headroom(for: model, in: usage[lhs.id]) ?? 100
-                let r = ModelRouting.headroom(for: model, in: usage[rhs.id]) ?? 100
-                if l != r { return l < r }
-                return lhs.priority > rhs.priority
-            }
+        let candidate = ModelRouting.rankLeastRemaining(model, accounts: store.accounts.all(),
+                                                        usage: store.allUsage(),
+                                                        excluding: tried).first
         guard let candidate, let token = vault.bearerToken(for: candidate.id) else {
             return nil
         }

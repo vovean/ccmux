@@ -55,7 +55,13 @@ public enum PolicyEngine {
         name: "every-window",
         requiredWindows: [.session, .weeklyAll, .weeklyScoped, .other])
 
-    /// Best account for a policy, most headroom first, ties broken by priority.
+    /// Eligible accounts, **least remaining first**.
+    ///
+    /// Drain one subscription before starting on the next, rather than spreading load
+    /// evenly. Three half-used subscriptions at the end of the week is wasted quota;
+    /// one spent and two fresh is not. Ranking is on the tightest window the policy
+    /// gates on, and eligibility still requires headroom on *every* one of them — a
+    /// Fable request will not take an account that only has general weekly left.
     public static func rank(accounts: [Account], usage: [String: UsageSnapshot],
                             policy: Policy, excluding excluded: Set<String> = [])
         -> [AccountRanking] {
@@ -67,13 +73,14 @@ public enum PolicyEngine {
                 return (ranking, account.priority, account.displayName)
             }
             .sorted { lhs, rhs in
-                if lhs.0.headroom != rhs.0.headroom { return lhs.0.headroom > rhs.0.headroom }
+                if lhs.0.headroom != rhs.0.headroom { return lhs.0.headroom < rhs.0.headroom }
                 if lhs.1 != rhs.1 { return lhs.1 < rhs.1 }
                 return lhs.2.localizedCaseInsensitiveCompare(rhs.2) == .orderedAscending
             }
             .map(\.0)
     }
 
+    /// The account to use: the most-drained one that can still serve the policy.
     public static func pick(accounts: [Account], usage: [String: UsageSnapshot],
                             policy: Policy, excluding excluded: Set<String> = [])
         -> AccountRanking? {

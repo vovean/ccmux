@@ -28,19 +28,45 @@ struct PolicyEngineTests {
                               scopedModel: "Fable")
 
     /// The whole reason the two aliases exist: an account with Fable spent is still a
-    /// perfectly good Opus account.
+    /// perfectly good Opus account. "a" is the more-drained one on the windows opus
+    /// cares about, so least-first picks it despite its Fable week being gone.
     @Test func opusIgnoresAnExhaustedFableWindow() throws {
         let accounts = [Self.account("a"), Self.account("b")]
-        let usage = ["a": Self.snapshot(session: 10, weekly: 20, fable: 100),
-                     "b": Self.snapshot(session: 80, weekly: 90, fable: 0)]
+        let usage = ["a": Self.snapshot(session: 90, weekly: 90, fable: 100),
+                     "b": Self.snapshot(session: 20, weekly: 20, fable: 50)]
 
         let opusPick = try #require(PolicyEngine.pick(accounts: accounts, usage: usage,
                                                       policy: Self.opus))
         #expect(opusPick.accountID == "a")
 
+        // Fable cannot use "a" at all, however drained it is: the model's own weekly
+        // window is exhausted there, and general weekly headroom is no substitute.
         let fablePick = try #require(PolicyEngine.pick(accounts: accounts, usage: usage,
                                                        policy: Self.fable))
         #expect(fablePick.accountID == "b")
+    }
+
+    /// Drain one subscription before starting the next, so the week does not end with
+    /// three half-used accounts.
+    @Test func theMostDrainedEligibleAccountIsPickedFirst() throws {
+        let accounts = [Self.account("fresh"), Self.account("half"), Self.account("nearly")]
+        let usage = ["fresh": Self.snapshot(session: 5, weekly: 5),
+                     "half": Self.snapshot(session: 50, weekly: 50),
+                     "nearly": Self.snapshot(session: 10, weekly: 96)]
+        let ranked = PolicyEngine.rank(accounts: accounts, usage: usage, policy: Self.opus)
+        #expect(ranked.map(\.accountID) == ["nearly", "half", "fresh"])
+        #expect(try #require(PolicyEngine.pick(accounts: accounts, usage: usage,
+                                               policy: Self.opus)).accountID == "nearly")
+    }
+
+    /// No floor: an account with almost nothing left is still preferred while it can
+    /// serve at all.
+    @Test func anAlmostSpentAccountIsStillPreferred() throws {
+        let accounts = [Self.account("scraps"), Self.account("fresh")]
+        let usage = ["scraps": Self.snapshot(session: 98, weekly: 30),
+                     "fresh": Self.snapshot(session: 1, weekly: 1)]
+        #expect(try #require(PolicyEngine.pick(accounts: accounts, usage: usage,
+                                               policy: Self.opus)).accountID == "scraps")
     }
 
     @Test func exhaustedAccountIsNotEligible() {
@@ -76,9 +102,9 @@ struct PolicyEngineTests {
                                   policy: Self.opus)?.accountID == "live")
     }
 
-    /// An account nothing has measured must not outrank every measured one just for
-    /// being unknown — but it should still beat a nearly-spent account, because the
-    /// first response header will correct it either way.
+    /// An account nothing has measured sorts mid-pack: it is a gamble either way, and
+    /// the first response corrects it. So a barely-touched account is left alone in its
+    /// favour, while a genuinely drained one still goes first.
     @Test func unmeasuredAccountRanksNeutrally() throws {
         let ranking = try #require(PolicyEngine.headroom(for: Self.account("a"), usage: nil,
                                                          policy: Self.opus))
@@ -88,11 +114,11 @@ struct PolicyEngineTests {
         #expect(PolicyEngine.pick(
             accounts: accounts,
             usage: ["healthy": Self.snapshot(session: 10, weekly: 10)],
-            policy: Self.opus)?.accountID == "healthy")
+            policy: Self.opus)?.accountID == "unmeasured")
         #expect(PolicyEngine.pick(
             accounts: accounts,
             usage: ["healthy": Self.snapshot(session: 95, weekly: 95)],
-            policy: Self.opus)?.accountID == "unmeasured")
+            policy: Self.opus)?.accountID == "healthy")
     }
 
     @Test func tiesBreakOnPriorityThenName() throws {
