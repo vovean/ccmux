@@ -52,7 +52,9 @@ git push -q origin "v$VERSION"
 print "==> github release"
 NOTES="$(git log --pretty='- %s' "$(git describe --tags --abbrev=0 "v$VERSION^" 2>/dev/null || echo HEAD)..v$VERSION^" 2>/dev/null | grep -v '^- Release ' || true)"
 [[ -n "$NOTES" ]] || NOTES="See the commit history for what changed."
-print "$NOTES" | gh release create "v$VERSION" "$ARTIFACT" \
+# print -r --: the notes begin with "- ", and zsh's print reads a leading dash as an
+# option. Without the terminator this dies after gh has already created the release.
+print -r -- "$NOTES" | gh release create "v$VERSION" "$ARTIFACT" \
   --title "ccmux $VERSION" --notes-file - >/dev/null
 
 # The published bytes are what people install, so the cask must be pinned to those and
