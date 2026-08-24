@@ -26,6 +26,30 @@ enum CLI {
                 run: { _ in uninstallAgent() }),
     ]
 
+    /// Read from the bundle rather than hardcoded, so it cannot drift from what was
+    /// actually shipped — a constant here was still reporting 1.0 out of a 1.1 build.
+    ///
+    /// Homebrew installs the CLI as a symlink into its bin directory, and through a
+    /// symlink `Bundle.main` is not the app bundle at all, so the executable's own path
+    /// is resolved and walked back to Contents/Info.plist.
+    static var version: String {
+        if let bundled = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
+            return bundled
+        }
+        let executable = URL(fileURLWithPath: Bundle.main.executablePath
+                             ?? CommandLine.arguments[0]).resolvingSymlinksInPath()
+        let plist = executable
+            .deletingLastPathComponent()   // …/Contents/MacOS
+            .deletingLastPathComponent()   // …/Contents
+            .appendingPathComponent("Info.plist")
+        guard let data = try? Data(contentsOf: plist),
+              let dictionary = try? PropertyListSerialization.propertyList(
+                  from: data, format: nil) as? [String: Any],
+              let version = dictionary["CFBundleShortVersionString"] as? String
+        else { return "unknown" }
+        return version
+    }
+
     static func isCLIInvocation(_ arguments: [String]) -> Bool {
         guard arguments.count > 1 else { return false }
         let first = arguments[1]
@@ -35,7 +59,7 @@ enum CLI {
 
     static func main(_ arguments: [String]) -> Never {
         let name = arguments[1]
-        if name == "--version" { print("ccmux 1.0"); exit(0) }
+        if name == "--version" { print("ccmux \(version)"); exit(0) }
         guard let command = commands.first(where: { $0.name == name }) else {
             usage()
             exit(name == "help" || name == "--help" || name == "-h" ? 0 : 1)

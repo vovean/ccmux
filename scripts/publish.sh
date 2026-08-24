@@ -42,6 +42,11 @@ print "==> artifact"
 make release VERSION="$VERSION" >/dev/null
 ARTIFACT="dist/ccmux-$VERSION-$(uname -m).zip"
 [[ -f "$ARTIFACT" ]] || die "expected $ARTIFACT"
+
+# The binary must agree with the tag. A hardcoded constant once shipped a 1.1 bundle whose
+# CLI still said 1.0, and nothing in the pipeline noticed.
+BUILT="$(dist/ccmux.app/Contents/MacOS/ccmux --version 2>/dev/null | awk '{print $2}')"
+[[ "$BUILT" == "$VERSION" ]] || die "built binary reports '$BUILT', expected '$VERSION'"
 SHA="$(shasum -a 256 "$ARTIFACT" | cut -d' ' -f1)"
 
 print "==> tag and push"
