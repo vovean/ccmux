@@ -154,7 +154,13 @@ public struct RootView: View {
     private func needsDot(_ entry: Page) -> Bool {
         switch entry {
         case .accounts: return !engine.accountsNeedingAttention.isEmpty
-        case .sessions: return !engine.blocks.isEmpty
+        case .sessions:
+            // A dead sign-in strands every session on that account, so the badge belongs
+            // on this entry too, not only on Accounts.
+            return !engine.blocks.isEmpty
+                || engine.accountsNeedingAttention.contains { account in
+                    engine.sessions.contains { $0.accountID == account.id }
+                }
         case .settings: return false
         }
     }

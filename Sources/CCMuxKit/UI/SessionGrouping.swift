@@ -13,6 +13,17 @@ struct SessionGroup: Identifiable, Equatable {
     var isUnmanaged: Bool { id == SessionGrouping.unmanagedGroupID }
 }
 
+extension SessionGrouping {
+    /// Groups whose account can no longer sign in. Every session in one is dead in the
+    /// water, so the Sessions screen has to say so itself rather than leaving the news
+    /// on the Accounts screen where the user may never look.
+    static func expiredAccountIDs(in groups: [SessionGroup],
+                                  accounts: [Account]) -> Set<String> {
+        let expired = Set(accounts.filter { $0.health == .needsRelogin }.map(\.id))
+        return Set(groups.map(\.id)).intersection(expired)
+    }
+}
+
 enum SessionGrouping {
     /// Account ids are Anthropic account UUIDs, so a leading control character cannot
     /// collide with one.

@@ -213,3 +213,48 @@ struct NavigationPruningTests {
         #expect(nav.isCollapsed("a"))
     }
 }
+
+@Suite("Expired sign-ins surface on the Sessions screen")
+struct ExpiredAccountTests {
+    private func session(_ id: String, account: String) -> SessionRecord {
+        SessionRecord(id: id, pid: 1, port: 9000, accountID: account,
+                      policyName: "opus", cwd: "/tmp")
+    }
+
+    @Test("Only accounts that actually own a group are reported")
+    func onlyGroupsWithSessions() {
+        let accounts = [PolicyEngineTests.account("live", health: .ok),
+                        PolicyEngineTests.account("dead", health: .needsRelogin),
+                        // Expired, but nothing is running on it: the Accounts screen owns
+                        // that news, the Sessions screen has nothing to say about it.
+                        PolicyEngineTests.account("idle-dead", health: .needsRelogin)]
+        let groups = SessionGrouping.groups(
+            accounts: accounts,
+            sessions: [session("s1", account: "live"), session("s2", account: "dead")],
+            unmanaged: [])
+
+        #expect(SessionGrouping.expiredAccountIDs(in: groups, accounts: accounts) == ["dead"])
+    }
+
+    @Test("A healthy set reports nothing")
+    func nothingWhenHealthy() {
+        let accounts = [PolicyEngineTests.account("a", health: .ok)]
+        let groups = SessionGrouping.groups(accounts: accounts,
+                                            sessions: [session("s1", account: "a")],
+                                            unmanaged: [])
+        #expect(SessionGrouping.expiredAccountIDs(in: groups, accounts: accounts).isEmpty)
+    }
+
+    @Test("The unmanaged group is never flagged")
+    func unmanagedGroupIsNeverFlagged() {
+        let accounts = [PolicyEngineTests.account("a", health: .needsRelogin)]
+        let info = ClaudeSessionInfo(pid: 7, sessionID: "x", cwd: "/tmp", name: nil,
+                                     status: nil, version: nil, kind: nil,
+                                     entrypoint: nil, startedAt: nil)
+        let groups = SessionGrouping.groups(accounts: accounts, sessions: [],
+                                            unmanaged: [info])
+        let flagged = SessionGrouping.expiredAccountIDs(in: groups, accounts: accounts)
+        #expect(flagged.isEmpty)
+        #expect(!flagged.contains(SessionGrouping.unmanagedGroupID))
+    }
+}

@@ -4,6 +4,10 @@ struct SessionsPage: View {
     @ObservedObject var engine: Engine
     @ObservedObject var nav: NavigationState
 
+    private var expiredAccounts: Set<String> {
+        SessionGrouping.expiredAccountIDs(in: groups, accounts: engine.accounts)
+    }
+
     private var groups: [SessionGroup] {
         SessionGrouping.groups(accounts: engine.accounts,
                                sessions: engine.sessions,
@@ -60,6 +64,8 @@ struct SessionsPage: View {
                          + "Claude Code is logged into.")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
+                } else if expiredAccounts.contains(group.id) {
+                    reloginNotice(group.id)
                 } else {
                     // Once per group: every session in it draws on the same quota.
                     ForEach(engine.usage[group.id]?.windows ?? []) { window in
@@ -86,6 +92,7 @@ struct SessionsPage: View {
                     .font(.caption2.weight(.bold))
                     .foregroundStyle(.secondary)
                     .rotationEffect(.degrees(collapsed ? 0 : 90))
+                if expiredAccounts.contains(group.id) { RedDot(size: 7) }
                 Text(group.title).font(.subheadline.weight(.semibold))
                 if let subtitle = group.subtitle {
                     Text(subtitle).font(.caption).foregroundStyle(.tertiary)
@@ -99,6 +106,34 @@ struct SessionsPage: View {
         .buttonStyle(.plain)
         .accessibilityLabel("\(group.title), \(group.count) sessions")
         .accessibilityHint(collapsed ? "Expand" : "Collapse")
+    }
+
+    /// The sign-in is gone, so nothing in this group can run until it is renewed — and
+    /// the button is here so renewing it does not mean hunting for another screen.
+    private func reloginNotice(_ accountID: String) -> some View {
+        let account = engine.accounts.first { $0.id == accountID }
+        return HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.red)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Sign-in expired — these sessions cannot run.")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                if let detail = account?.healthDetail {
+                    Text(detail).font(.caption2).foregroundStyle(.tertiary)
+                }
+            }
+            Spacer()
+            Button("Sign in again") { engine.relogin(accountID: accountID) }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(engine.loginInProgress)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .fill(Color.red.opacity(0.10)))
     }
 
     private func unmanagedCard(_ info: ClaudeSessionInfo) -> some View {
