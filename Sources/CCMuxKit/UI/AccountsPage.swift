@@ -9,6 +9,7 @@ struct AccountsPage: View {
     @State private var confirmingRemoval: Account?
     @State private var budgeting: Account?
     @State private var budgetText = ""
+    @State private var budgetError: String?
 
     var body: some View {
         ScrollView {
@@ -153,6 +154,17 @@ struct AccountsPage: View {
         }
     }
 
+    /// Accepts what people actually type. Returns nil for anything unparseable so a
+    /// typo is reported rather than silently clearing the budget — Clear is a button.
+    static func parseBudget(_ raw: String) -> Double? {
+        let cleaned = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "$", with: "")
+            .replacingOccurrences(of: ",", with: "")
+            .replacingOccurrences(of: " ", with: "")
+        guard !cleaned.isEmpty, let value = Double(cleaned), value > 0 else { return nil }
+        return value
+    }
+
     /// Server limits first, then the budget — money reads as one more ceiling.
     private func bars(for account: Account) -> [UsageWindow] {
         var windows = engine.usage[account.id]?.windows ?? []
@@ -176,6 +188,13 @@ struct AccountsPage: View {
             Text("· \(Format.money(account.spendLifetimeUSD)) total")
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.tertiary)
+            if !engine.unpricedModels.isEmpty {
+                Image(systemName: "exclamationmark.circle")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .help("Incomplete: no listed price for "
+                          + engine.unpricedModels.sorted().joined(separator: ", "))
+            }
             Spacer()
         }
     }
@@ -189,6 +208,9 @@ struct AccountsPage: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 120)
             }
+            if let budgetError {
+                Text(budgetError).font(.caption).foregroundStyle(.red)
+            }
             Text("Warns at \(Int(engine.settings.budgetWarnPercent))% and again when "
                  + "exceeded. Nothing is ever blocked — a hard stop would strand whatever "
                  + "session is on the key.")
@@ -201,11 +223,16 @@ struct AccountsPage: View {
                     engine.setMonthlyBudget(nil, for: account.id)
                     budgeting = nil
                 }
+                .help("Remove the budget entirely")
                 Spacer()
                 Button("Cancel") { budgeting = nil }
                 Button("Save") {
-                    engine.setMonthlyBudget(Double(budgetText), for: account.id)
-                    budgeting = nil
+                    if let amount = Self.parseBudget(budgetText) {
+                        engine.setMonthlyBudget(amount, for: account.id)
+                        budgeting = nil
+                    } else {
+                        budgetError = "Enter an amount like 50 or 1,000."
+                    }
                 }
                 .keyboardShortcut(.defaultAction)
             }

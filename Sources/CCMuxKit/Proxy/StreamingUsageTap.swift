@@ -15,6 +15,9 @@ public struct StreamingUsageTap {
     private var partial = Data()
     private var overflowed = false
     private var usage = TokenUsage()
+    /// Set when a line was too big to inspect, so the caller can say the cost is unknown
+    /// rather than reporting a confident zero.
+    public private(set) var droppedOversizedLine = false
 
     public init() {}
 
@@ -35,6 +38,7 @@ public struct StreamingUsageTap {
         guard start < chunk.endIndex else { return }
         if partial.count + chunk.distance(from: start, to: chunk.endIndex) > Self.maxLineBytes {
             overflowed = true
+            droppedOversizedLine = true
             partial.removeAll(keepingCapacity: true)
             return
         }
@@ -85,5 +89,51 @@ public struct StreamingUsageTap {
             usage.cacheWrite5m = v
         }
         if let v = int("output_tokens", raw) { usage.output = max(usage.output, v) }
+    }
+}
+
+/// Banks what a request cost, exactly once.
+///
+/// Anthropic bills for every token it produced before an abort, so cancelling a turn — the
+/// commonest interaction there is — must still be paid for. Both the clean end and the
+/// cancellation path flush through here, and the once-flag is what keeps that from
+/// billing twice. An attempt that loses a failover race is voided instead: its tokens
+/// belong to nobody, because the response was thrown away.
+public final class BillingSink: @unchecked Sendable {
+    private let lock = NSLock()
+    private var tap = StreamingUsageTap()
+    private var settled = false
+    private let emit: (TokenUsage) -> Void
+
+    public init(emit: @escaping (TokenUsage) -> Void) {
+        self.emit = emit
+    }
+
+    public func consume(_ data: Data) {
+        lock.lock()
+        guard !settled else { lock.unlock(); return }
+        tap.consume(data)
+        lock.unlock()
+    }
+
+    /// The response was discarded, so nothing here is owed.
+    public func void() {
+        lock.lock(); settled = true; lock.unlock()
+    }
+
+    public func flush() {
+        lock.lock()
+        guard !settled else { lock.unlock(); return }
+        settled = true
+        tap.finish()
+        let billed = tap.current
+        let dropped = tap.droppedOversizedLine
+        lock.unlock()
+        if dropped {
+            Log.warn("a response line was too large to read token counts from; "
+                     + "this request's cost is not counted")
+        }
+        guard !billed.isEmpty else { return }
+        emit(billed)
     }
 }

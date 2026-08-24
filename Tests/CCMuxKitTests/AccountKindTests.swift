@@ -111,3 +111,28 @@ struct APIKeySessionTests {
                 "an expired placeholder would make Claude Code try to refresh it")
     }
 }
+
+@Suite("Review fixes")
+struct ReviewRoundFixes {
+    /// A prefix match alone would bill a future "claude-sonnet-5-2" at Sonnet 5's rates,
+    /// promotional pricing included, instead of admitting it is an unknown model.
+    @Test("Only a dated snapshot inherits a known model's price")
+    func onlyDatedSnapshotsInheritPricing() {
+        #expect(Pricing.normalize("claude-sonnet-5-20260101") == "claude-sonnet-5")
+        #expect(Pricing.price(for: "claude-sonnet-5-2") == nil)
+        #expect(Pricing.price(for: "claude-opus-5-turbo") == nil)
+        #expect(Pricing.price(for: "claude-opus-5") != nil)
+    }
+
+    /// Clear is a button. A typo must not be read as "remove my budget".
+    @Test("Budget input accepts what people type and rejects the rest")
+    func budgetParsing() {
+        #expect(AccountsPage.parseBudget("50") == 50)
+        #expect(AccountsPage.parseBudget(" $1,000 ") == 1000)
+        #expect(AccountsPage.parseBudget("12.50") == 12.5)
+        #expect(AccountsPage.parseBudget("") == nil)
+        #expect(AccountsPage.parseBudget("abc") == nil)
+        #expect(AccountsPage.parseBudget("-5") == nil)
+        #expect(AccountsPage.parseBudget("0") == nil)
+    }
+}

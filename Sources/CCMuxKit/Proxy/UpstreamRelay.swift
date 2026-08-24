@@ -14,6 +14,10 @@ public final class UpstreamRelay: NSObject, URLSessionDataDelegate {
         let onHead: (HTTPURLResponse) -> Void
         let onBody: (Data) -> Void
         let onEnd: (Error?) -> Void
+        /// Cancelling drops the handlers before URLSession reports completion, so `onEnd`
+        /// never runs for a client that went away mid-stream. This fires instead, and is
+        /// for bookkeeping only — the connection is already gone, so it must not write.
+        var onCancelled: (() -> Void)?
     }
 
     public override init() { super.init() }
@@ -43,8 +47,9 @@ public final class UpstreamRelay: NSObject, URLSessionDataDelegate {
     /// teardown cancels tasks rather than the session.
     func cancel(_ task: URLSessionDataTask) {
         lock.lock()
-        handlers.removeValue(forKey: task.taskIdentifier)
+        let dropped = handlers.removeValue(forKey: task.taskIdentifier)
         lock.unlock()
+        dropped?.onCancelled?()
         task.cancel()
     }
 

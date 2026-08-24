@@ -324,7 +324,12 @@ public final class SessionProxy {
         let sessionID = self.sessionID
         var sentHead = false
         var bodyAllowed = true
-        var tap = StreamingUsageTap()
+        // Weak, so an in-flight request cannot keep a stopped proxy alive.
+        let billing = BillingSink { [weak self] billed in
+            self?.observer(Observation(statusCode: 200, headers: [:],
+                                       accountID: assignment.accountID,
+                                       model: model, usage: billed))
+        }
         // Set when this attempt is being replaced; its remaining callbacks must not reach
         // the client, which is already being served by the retry.
         var abandoned = false
@@ -340,7 +345,10 @@ public final class SessionProxy {
                     headers.append((name, value))
                     // Folded once, and only the keys anything reads.
                     let folded = name.lowercased()
-                    if folded.hasPrefix("anthropic-ratelimit-unified-") {
+                    // Every rate-limit family, not just the unified ones: an API key
+                    // reports per-minute ceilings under different names entirely, and
+                    // narrowing here left those bars with nothing to draw.
+                    if folded.hasPrefix("anthropic-ratelimit-") {
                         rateLimit[folded] = value
                     }
                 }
@@ -361,6 +369,7 @@ public final class SessionProxy {
                                                         servedBy: assignment.accountID,
                                                         tried: attempted) {
                         abandoned = true
+                        billing.void()
                         // The replaced attempt is still streaming a refusal nobody will
                         // read; left alone it holds a connection until the 1h resource
                         // timeout.
@@ -402,12 +411,15 @@ public final class SessionProxy {
             },
             onBody: { data in
                 guard !abandoned, bodyAllowed, !data.isEmpty else { return }
-                tap.consume(data)
+                billing.consume(data)
                 connection.send(content: HTTPResponseWriter.chunk(data),
                                 completion: .contentProcessed { _ in })
             },
             onEnd: { error in
                 guard !abandoned else { return }
+                // Before the error branches: tokens produced before a mid-stream failure
+                // were still billed, and returning early would record the turn as free.
+                billing.flush()
                 if let error {
                     Log.warn("proxy upstream error for session \(sessionID): \(error)")
                     if !sentHead {
@@ -424,15 +436,6 @@ public final class SessionProxy {
                     completion(false)
                     return
                 }
-                // The counts are only complete now, so they ride a second observation
-                // rather than the one sent with the head.
-                tap.finish()
-                let billed = tap.current
-                if !billed.isEmpty {
-                    self.observer(Observation(statusCode: 200, headers: [:],
-                                              accountID: assignment.accountID,
-                                              model: model, usage: billed))
-                }
                 if bodyAllowed {
                     connection.send(content: HTTPResponseWriter.terminator,
                                     completion: .contentProcessed { _ in completion(keepAlive) })
@@ -441,7 +444,12 @@ public final class SessionProxy {
                 }
             })
 
-        let task = relay.send(outbound, handlers: handlers)
+        // A client that disappears mid-turn still owes for what was generated, and that
+        // path never reaches onEnd.
+        var cancellable = handlers
+        cancellable.onCancelled = { billing.flush() }
+
+        let task = relay.send(outbound, handlers: cancellable)
         pending.adopt(task, relay: relay)
         // Held so a client that disconnects mid-request does not leave the upstream leg
         // running against a one-hour resource timeout.

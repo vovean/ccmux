@@ -64,6 +64,9 @@ public final class Engine: ObservableObject {
     /// OS notification, which is silently dropped whenever notification permission is
     /// off — the case this exists to survive.
     @Published public private(set) var blocks = BlockLedger()
+    /// Models seen on an API key that have no listed price, so the UI can admit the
+    /// spend figure is incomplete instead of implying it is exact.
+    @Published public private(set) var unpricedModels: Set<String> = []
 
     /// What the burger badge surfaces.
     public var needsAttention: Bool {
@@ -370,6 +373,10 @@ public final class Engine: ObservableObject {
                      + "session \(sessionID) has already moved on")
             return
         }
+        // Same reasoning as the failover path: an API key reports per-minute ceilings, so
+        // a 429 means "wait a moment", not "this account is spent". Treating it as
+        // exhaustion would rehome the session and strand the user's choice.
+        guard store.accounts.get(observation.accountID)?.kind != .apiKey else { return }
         handleExhaustion(sessionID: sessionID, accountID: observation.accountID,
                          model: observation.model)
     }
@@ -451,7 +458,8 @@ public final class Engine: ObservableObject {
             guard !ModelRouting.canServe(nil, usage: usage[record.accountID]) else { continue }
             let movable = record.autoSwitchEnabled(default: settings.autoSwitch != .off)
             if movable {
-                let elsewhere = PolicyEngine.pick(accounts: accounts, usage: usage,
+                let elsewhere = PolicyEngine.pick(accounts: accounts.filter(\.isAutoAssignable),
+                                                  usage: usage,
                                                   policy: PolicyEngine.everyWindow,
                                                   excluding: [record.accountID])
                 guard elsewhere == nil else { continue }
@@ -467,8 +475,17 @@ public final class Engine: ObservableObject {
     private func recordSpend(_ billed: TokenUsage, model: String?,
                              accountID: String, sessionID: String) {
         guard let account = store.accounts.get(accountID), account.kind == .apiKey,
-              let model, let cost = Pricing.cost(model: model, usage: billed), cost > 0
-        else { return }
+              let model else { return }
+        guard let cost = Pricing.cost(model: model, usage: billed), cost > 0 else {
+            // Better an admitted gap than an invented price: the total would otherwise
+            // read as complete while quietly omitting these requests.
+            if Pricing.price(for: model) == nil {
+                unpricedModels.insert(model)
+                Log.warn("no listed price for \(model); its usage is missing from the "
+                         + "spend total for \(displayName(accountID))")
+            }
+            return
+        }
         store.sessions.mutate(sessionID) { $0.spendUSD += cost }
         store.accounts.mutate(accountID) {
             $0.spendLifetimeUSD += cost

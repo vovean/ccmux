@@ -87,8 +87,17 @@ public enum Pricing {
         var id = modelID.lowercased()
         if let bracket = id.firstIndex(of: "[") { id = String(id[id.startIndex..<bracket]) }
         if table[id] != nil { return id }
-        // Longest match wins, so "claude-opus-4-8" is not shadowed by a shorter key.
-        let matches = table.keys.filter { id.hasPrefix($0) }
+        // Only a dated snapshot of a known model inherits its price. A prefix match alone
+        // would quietly bill a future "claude-sonnet-5-2" at Sonnet 5's rates — including
+        // its promotional ones — instead of reporting an unknown model.
+        let matches = table.keys.filter { key in
+            guard id.hasPrefix(key) else { return false }
+            let suffix = id.dropFirst(key.count)
+            guard suffix.hasPrefix("-") else { return false }
+            // A snapshot suffix is a date: exactly YYYYMMDD. "-2" is a different model.
+            let digits = suffix.dropFirst()
+            return digits.count == 8 && digits.allSatisfy(\.isNumber)
+        }
         return matches.max(by: { $0.count < $1.count }) ?? id
     }
 

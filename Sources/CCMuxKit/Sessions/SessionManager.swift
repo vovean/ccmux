@@ -242,6 +242,12 @@ public final class SessionManager: SessionRouting {
             }
         }
 
+        // A session is only ever on an API key because someone put it there. Its limits
+        // are per-minute and clear in seconds, so a 429 here is a throttle, not
+        // exhaustion — moving the session would revert a spending decision permanently,
+        // since a key can never be chosen automatically to get back to.
+        if store.accounts.get(record.accountID)?.kind == .apiKey { return nil }
+
         // Moving a session between subscriptions is exactly what auto-switch governs, so
         // an explicit "off" has to stop it here too, not only in the exhaustion notice.
         let settings = store.currentSettings()

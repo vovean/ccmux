@@ -173,3 +173,74 @@ final class ReceivedBox: @unchecked Sendable {
     func set(_ v: StubUpstream.Received) { lock.lock(); value = v; lock.unlock() }
     func get() -> StubUpstream.Received? { lock.lock(); defer { lock.unlock() }; return value }
 }
+
+@Suite("Billing survives an abort")
+struct BillingSinkTests {
+    private final class Box: @unchecked Sendable {
+        private let lock = NSLock()
+        private var seen: [TokenUsage] = []
+        func record(_ u: TokenUsage) { lock.lock(); seen.append(u); lock.unlock() }
+        var all: [TokenUsage] { lock.lock(); defer { lock.unlock() }; return seen }
+    }
+
+    /// Anthropic bills for what it produced before the abort, so cancelling a turn — the
+    /// commonest interaction there is — must not record the request as free.
+    @Test("A cancelled stream still bills what was generated")
+    func cancellationBills() {
+        let box = Box()
+        let sink = BillingSink { box.record($0) }
+        sink.consume(Data((#"data: {"type":"message_start","message":{"usage":{"input_tokens":900}}}"# + "\n").utf8))
+        sink.consume(Data((#"data: {"type":"message_delta","usage":{"output_tokens":40}}"# + "\n").utf8))
+        sink.flush()   // the cancellation path
+        #expect(box.all.count == 1)
+        #expect(box.all.first?.input == 900)
+        #expect(box.all.first?.output == 40)
+    }
+
+    @Test("Both flush paths together bill exactly once")
+    func flushIsIdempotent() {
+        let box = Box()
+        let sink = BillingSink { box.record($0) }
+        sink.consume(Data(#"{"usage":{"input_tokens":10,"output_tokens":2}}"#.utf8))
+        sink.flush()
+        sink.flush()
+        #expect(box.all.count == 1, "onEnd and onCancelled must not both bill")
+    }
+
+    /// A failover discards the response, so those tokens are owed by nobody.
+    @Test("A voided attempt bills nothing")
+    func voidedAttemptIsFree() {
+        let box = Box()
+        let sink = BillingSink { box.record($0) }
+        sink.consume(Data(#"{"usage":{"input_tokens":500,"output_tokens":80}}"#.utf8))
+        sink.void()
+        sink.flush()
+        #expect(box.all.isEmpty)
+    }
+
+    @Test("A stream with no usage bills nothing at all")
+    func nothingToBill() {
+        let box = Box()
+        let sink = BillingSink { box.record($0) }
+        sink.consume(Data("data: {\"type\":\"ping\"}\n".utf8))
+        sink.flush()
+        #expect(box.all.isEmpty)
+    }
+}
+
+@Suite("A hand-picked API key is never auto-reverted")
+struct APIKeyThrottleTests {
+    /// A key's ceilings are per-minute and clear in seconds. Treating a 429 as exhaustion
+    /// would rehome the session permanently, because a key can never be auto-chosen to
+    /// get back to — reverting an explicit spending decision on a transient throttle.
+    @Test("A 429 is a throttle on a key, not exhaustion")
+    func perMinuteLimitsAreNotExhaustion() {
+        let full = UsageSnapshot(windows: [
+            UsageWindow(kind: .apiTokens, label: "Tokens/min", percent: 100),
+            UsageWindow(kind: .apiRequests, label: "Requests/min", percent: 100),
+        ])
+        #expect(ModelRouting.canServe("claude-opus-5", usage: full))
+        #expect(ModelRouting.availableAt("claude-opus-5", usage: full) != nil,
+                "a throttled key is still available — nothing is waiting on a reset")
+    }
+}
