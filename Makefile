@@ -3,7 +3,7 @@ SWIFT_TEST_FLAGS = --disable-xctest --enable-swift-testing \
 	-Xswiftc -F -Xswiftc $(FW) \
 	-Xlinker -F -Xlinker $(FW) -Xlinker -rpath -Xlinker $(FW)
 
-.PHONY: build app icon test install run clean install-agent uninstall-agent
+.PHONY: build app icon test install run clean install-agent uninstall-agent release
 
 build:
 	swift build
@@ -41,3 +41,18 @@ uninstall-agent:
 
 clean:
 	rm -rf .build dist
+
+# Release artifact for the Homebrew tap. ditto, not zip: it preserves the bundle's
+# resource forks and the ad-hoc signature, which a plain zip can disturb.
+VERSION ?= $(shell /usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" Resources/Info.plist)
+ARCH := $(shell uname -m)
+RELEASE = dist/ccmux-$(VERSION)-$(ARCH).zip
+
+release: app
+	@rm -f $(RELEASE)
+	@cd dist && ditto -c -k --sequesterRsrc --keepParent ccmux.app $(notdir $(RELEASE))
+	@codesign -v dist/ccmux.app && echo "signature ok"
+	@echo "artifact : $(RELEASE)"
+	@echo "size     : $$(du -h $(RELEASE) | cut -f1)"
+	@echo "sha256   : $$(shasum -a 256 $(RELEASE) | cut -d' ' -f1)"
+	@echo "version  : $(VERSION)   arch: $(ARCH)"

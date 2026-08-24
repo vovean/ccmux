@@ -20,6 +20,10 @@ enum CLI {
         Command(name: "end", usage: "end <session-id>", run: end),
         Command(name: "import", usage: "import", run: { _ in importLogin() }),
         Command(name: "shell-init", usage: "shell-init", run: { _ in shellInit() }),
+        Command(name: "install-agent", usage: "install-agent",
+                run: { _ in installAgent() }),
+        Command(name: "uninstall-agent", usage: "uninstall-agent",
+                run: { _ in uninstallAgent() }),
     ]
 
     static func isCLIInvocation(_ arguments: [String]) -> Bool {
@@ -207,6 +211,73 @@ enum CLI {
         cc-any()   { ccmux run --policy any   "$@" }
         """)
         exit(0)
+    }
+
+    private static var agentPlistURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/io.vovean.ccmux.plist")
+    }
+
+    /// Launches through `open`, never the binary: Launch Services registration is what
+    /// makes notification authorization possible at all. `-g` leaves the window closed.
+    /// KeepAlive is deliberately absent because `open` exits immediately.
+    private static let agentPlist = """
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" \
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    <plist version="1.0">
+    <dict>
+        <key>Label</key>
+        <string>io.vovean.ccmux</string>
+        <key>ProgramArguments</key>
+        <array>
+            <string>/usr/bin/open</string>
+            <string>-g</string>
+            <string>/Applications/ccmux.app</string>
+        </array>
+        <key>RunAtLoad</key>
+        <true/>
+        <key>ProcessType</key>
+        <string>Interactive</string>
+    </dict>
+    </plist>
+    """
+
+    static func installAgent() -> Never {
+        let url = agentPlistURL
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try agentPlist.write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            fail("could not write \(url.path): \(error.localizedDescription)")
+        }
+        let uid = getuid()
+        _ = run("/bin/launchctl", ["bootout", "gui/\(uid)/io.vovean.ccmux"])
+        if run("/bin/launchctl", ["bootstrap", "gui/\(uid)", url.path]) != 0 {
+            fail("wrote \(url.path) but launchctl bootstrap failed")
+        }
+        print("ccmux will start at login")
+        exit(0)
+    }
+
+    static func uninstallAgent() -> Never {
+        _ = run("/bin/launchctl", ["bootout", "gui/\(getuid())/io.vovean.ccmux"])
+        try? FileManager.default.removeItem(at: agentPlistURL)
+        print("login item removed")
+        exit(0)
+    }
+
+    @discardableResult
+    private static func run(_ path: String, _ arguments: [String]) -> Int32 {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return -1 }
+        process.waitUntilExit()
+        return process.terminationStatus
     }
 
     static func fail(_ message: String) -> Never {
