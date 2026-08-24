@@ -107,3 +107,18 @@ public enum JSONValue: Equatable {
         }
     }
 }
+
+public extension OAuthCredential {
+    /// A stand-in written into the namespace of a session running on an API key.
+    ///
+    /// It authenticates nothing: the proxy swaps the header for `x-api-key` on every
+    /// request. It exists only because Claude Code checks for a credential at startup and
+    /// refuses to run without one. The token is deliberately not a real-looking secret,
+    /// and there is no refresh token, so nothing here can rotate a lineage.
+    static func placeholderForAPIKeySession(now: Date = Date()) -> OAuthCredential {
+        OAuthCredential(accessToken: "ccmux-api-key-session",
+                        refreshToken: nil,
+                        expiresAt: now.addingTimeInterval(365 * 86_400),
+                        scopes: ["user:inference", "user:profile"])
+    }
+}

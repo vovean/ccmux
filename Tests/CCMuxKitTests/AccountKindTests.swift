@@ -96,3 +96,18 @@ struct PricingTests {
         #expect(Pricing.cost(model: "claude-something-new", usage: TokenUsage(input: 100)) == nil)
     }
 }
+
+@Suite("An API-key account is actually reachable")
+struct APIKeySessionTests {
+    /// Assigning by hand is the only way to reach an API key, so a credential check that
+    /// only understands OAuth would make the whole feature unusable.
+    @Test("The placeholder credential cannot rotate or leak a lineage")
+    func placeholderIsInert() {
+        let placeholder = OAuthCredential.placeholderForAPIKeySession()
+        #expect(placeholder.refreshToken == nil, "nothing here may rotate a lineage")
+        #expect(placeholder.accessToken.hasPrefix("sk-ant") == false,
+                "it must not look like, or be, a real secret")
+        #expect(placeholder.isAccessTokenExpired == false,
+                "an expired placeholder would make Claude Code try to refresh it")
+    }
+}

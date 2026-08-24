@@ -144,7 +144,7 @@ public final class SessionManager: SessionRouting {
         guard let account = store.accounts.get(accountID) else {
             throw SessionError.unknownAccount(accountID)
         }
-        guard vault.credential(for: accountID) != nil else {
+        guard hasUsableCredential(accountID) else {
             throw SessionError.noCredential(accountID)
         }
 
@@ -302,7 +302,28 @@ public final class SessionManager: SessionRouting {
 
     /// Writes the account's credential where Claude Code will look for it, in the form
     /// it cannot refresh — see `OAuthCredential.neuteredForSession`.
+    /// Whether this account can serve at all — which depends on its kind, since an API
+    /// key never appears in the OAuth vault.
+    private func hasUsableCredential(_ accountID: String) -> Bool {
+        if store.accounts.get(accountID)?.kind == .apiKey {
+            return (try? APIKeyStore.read(accountID)).flatMap { $0.isEmpty ? nil : $0 } != nil
+        }
+        return vault.credential(for: accountID) != nil
+    }
+
     private func seed(accountID: String, into namespace: URL) throws {
+        if store.accounts.get(accountID)?.kind == .apiKey {
+            // Claude Code refuses to start without a credential in its namespace, but an
+            // API key is not one and must never be written where Claude Code could send
+            // it itself. A placeholder gets the session running; the proxy replaces the
+            // header on every request, so the placeholder never authenticates anything.
+            guard let key = try? APIKeyStore.read(accountID), !key.isEmpty else {
+                throw SessionError.noCredential(accountID)
+            }
+            try ClaudeCredentialStore.write(OAuthCredential.placeholderForAPIKeySession(),
+                                            namespace: namespace)
+            return
+        }
         guard var credential = vault.credential(for: accountID) else {
             throw SessionError.noCredential(accountID)
         }
@@ -329,7 +350,7 @@ public final class SessionManager: SessionRouting {
         guard store.accounts.get(accountID) != nil else {
             throw SessionError.unknownAccount(accountID)
         }
-        guard vault.credential(for: accountID) != nil else {
+        guard hasUsableCredential(accountID) else {
             throw SessionError.noCredential(accountID)
         }
         guard let existing = store.sessions.get(sessionID) else {

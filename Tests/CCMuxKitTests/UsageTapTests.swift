@@ -115,3 +115,61 @@ struct APIWindowTests {
         #expect(UsageParser.apiWindowsFromResponseHeaders(unified).isEmpty)
     }
 }
+
+/// A router that hands out whichever credential the test wants, so the proxy's header
+/// rewriting can be checked on the wire rather than reasoned about.
+final class FixedCredentialRouter: SessionRouting, @unchecked Sendable {
+    private let assignmentValue: SessionAssignment
+    init(_ credential: ProxyCredential, accountID: String = "acct") {
+        assignmentValue = SessionAssignment(accountID: accountID, credential: credential)
+    }
+    func assignment(sessionID: String) -> SessionAssignment? { assignmentValue }
+    func failover(sessionID: String, model: String?, servedBy: String,
+                  tried: Set<String>) -> SessionAssignment? { nil }
+    func soonestAvailability(model: String?, for sessionID: String) -> Date? { nil }
+}
+
+@Suite("Credential reaches the wire in the right header", .serialized)
+struct CredentialSwapTests {
+    private func seen(for credential: ProxyCredential) throws -> StubUpstream.Received {
+        let stub = try StubUpstream()
+        defer { stub.stop() }
+        let box = ReceivedBox()
+        stub.responder = { received in
+            box.set(received)
+            return .init(status: "200 OK", headers: [:], chunks: ["{}"])
+        }
+        let router = FixedCredentialRouter(credential)
+        defer { withExtendedLifetime(router) {} }
+        let proxy = SessionProxy(sessionID: "t", upstream: stub.url, router: router,
+                                 relay: UpstreamRelay(), observer: { _ in })
+        let port = try proxy.start()
+        defer { proxy.stop() }
+        _ = try SessionProxyTests.request(port: port)
+        return try #require(box.get())
+    }
+
+    @Test("An OAuth account sends Authorization and no x-api-key")
+    func oauthShape() throws {
+        let received = try seen(for: .oauth("tok-abc"))
+        #expect(received.authorization == "Bearer tok-abc")
+        #expect(received.apiKey == nil)
+    }
+
+    /// Sending both schemes is rejected upstream, and Claude Code always sends
+    /// Authorization — so the unused one has to be cleared, not merely left alone.
+    @Test("An API-key account sends x-api-key and clears Authorization")
+    func apiKeyShape() throws {
+        let received = try seen(for: .apiKey("sk-ant-api03-test"))
+        #expect(received.apiKey == "sk-ant-api03-test")
+        #expect(received.authorization == nil,
+                "Claude Code's own bearer must not survive alongside the key")
+    }
+}
+
+final class ReceivedBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: StubUpstream.Received?
+    func set(_ v: StubUpstream.Received) { lock.lock(); value = v; lock.unlock() }
+    func get() -> StubUpstream.Received? { lock.lock(); defer { lock.unlock() }; return value }
+}
