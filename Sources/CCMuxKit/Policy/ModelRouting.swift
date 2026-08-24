@@ -66,6 +66,13 @@ public enum ModelRouting {
             case .weeklyScoped:
                 guard let modelID else { return false }
                 return self.window(window, governs: modelID)
+            case .apiRequests, .apiTokens, .apiInputTokens, .apiOutputTokens:
+                // Per-minute ceilings refill continuously — they throttle a request, they
+                // never make an account the wrong choice.
+                return false
+            case .budget:
+                // Advisory. Crossing it warns; it must not withhold a request.
+                return false
             case .other:
                 return false
             }

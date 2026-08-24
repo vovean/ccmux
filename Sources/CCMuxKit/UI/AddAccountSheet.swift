@@ -7,8 +7,65 @@ struct AddAccountSheet: View {
     @State private var label = ""
     @State private var loginHint = ""
     @State private var chromeProfile: String?
+    @State private var kind: AccountKind = .subscription
+    @State private var apiKey = ""
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Picker("", selection: $kind) {
+                Text("Subscription").tag(AccountKind.subscription)
+                Text("API key").tag(AccountKind.apiKey)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            if kind == .apiKey { apiKeyForm } else { subscriptionForm }
+        }
+        .padding(18)
+        .frame(width: 460)
+    }
+
+    private var apiKeyForm: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Add an API key").font(.headline)
+
+            Text("Billed per token rather than against a plan. ccmux never picks an API "
+                 + "key on its own — assign a session to it from the Sessions screen when "
+                 + "you want to spend money on it.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Form {
+                TextField("Name", text: $label, prompt: Text("e.g. console-key"))
+                SecureField("API key", text: $apiKey, prompt: Text("sk-ant-api03-…"))
+            }
+            .formStyle(.grouped)
+            .frame(height: 92)
+
+            Text("The key is verified before it is stored, and kept in the Keychain — "
+                 + "never in a config file or a session's environment.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button(engine.loginInProgress ? "Verifying…" : "Verify and add") {
+                    Task {
+                        if await engine.addAPIKeyAccount(key: apiKey, label: label) {
+                            dismiss()
+                        }
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(engine.loginInProgress || apiKey.isEmpty)
+            }
+        }
+    }
+
+    private var subscriptionForm: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Add a subscription").font(.headline)
 
@@ -61,7 +118,5 @@ struct AddAccountSheet: View {
                 .disabled(engine.loginInProgress)
             }
         }
-        .padding(18)
-        .frame(width: 460)
     }
 }

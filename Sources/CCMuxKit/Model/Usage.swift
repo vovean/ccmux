@@ -6,6 +6,14 @@ public struct UsageWindow: Codable, Equatable, Identifiable {
         case session          // the 5-hour window
         case weeklyAll        // weekly across all models
         case weeklyScoped     // weekly for one model, e.g. Fable
+        // API-key accounts report per-minute ceilings instead of subscription quota.
+        case apiRequests
+        case apiTokens
+        case apiInputTokens
+        case apiOutputTokens
+        /// Not a server limit at all — spend against the monthly budget, drawn as a bar
+        /// so money reads the same way every other ceiling does.
+        case budget
         case other
 
         public var displayName: String {
@@ -13,6 +21,11 @@ public struct UsageWindow: Codable, Equatable, Identifiable {
             case .session: return "5-hour window"
             case .weeklyAll: return "Weekly (all models)"
             case .weeklyScoped: return "Weekly (per model, e.g. Fable)"
+            case .apiRequests: return "API requests per minute"
+            case .apiTokens: return "API tokens per minute"
+            case .apiInputTokens: return "API input tokens per minute"
+            case .apiOutputTokens: return "API output tokens per minute"
+            case .budget: return "Monthly spend"
             case .other: return "Other windows"
             }
         }
@@ -29,6 +42,15 @@ public struct UsageWindow: Codable, Equatable, Identifiable {
     public var modelName: String?
 
     public var id: String { "\(kind.rawValue)/\(modelName ?? label)" }
+
+    /// A per-minute ceiling refills continuously, so it says nothing about whether an
+    /// account is worth choosing — only whether a request would be throttled right now.
+    public var isPerMinute: Bool {
+        switch kind {
+        case .apiRequests, .apiTokens, .apiInputTokens, .apiOutputTokens: return true
+        default: return false
+        }
+    }
     public var headroom: Double { max(0, 100 - percent) }
 
     public init(kind: Kind, label: String, percent: Double,

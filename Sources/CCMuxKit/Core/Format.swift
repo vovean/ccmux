@@ -40,3 +40,14 @@ public enum Format {
         path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
     }
 }
+
+public extension Format {
+    /// Sub-cent amounts still matter when a single cheap request is the whole story, so
+    /// small numbers keep more places rather than collapsing to "$0.00".
+    static func money(_ usd: Double) -> String {
+        if usd == 0 { return "$0" }
+        if usd < 0.01 { return String(format: "$%.4f", usd) }
+        if usd < 1 { return String(format: "$%.3f", usd) }
+        return String(format: "$%.2f", usd)
+    }
+}

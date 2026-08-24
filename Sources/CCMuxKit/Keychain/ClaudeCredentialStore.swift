@@ -53,3 +53,21 @@ public enum AccountCredentialStore {
         try Keychain.delete(service: service, account: accountID)
     }
 }
+
+/// Anthropic API keys, kept apart from the OAuth items so nothing can confuse the two
+/// credential shapes — they authenticate with different headers entirely.
+public enum APIKeyStore {
+    static let service = "ccmux-apikeys"
+
+    public static func read(_ accountID: String) throws -> String? {
+        try Keychain.read(service: service, account: accountID)
+    }
+
+    public static func write(_ key: String, for accountID: String) throws {
+        try Keychain.write(service: service, account: accountID, value: key)
+    }
+
+    public static func delete(_ accountID: String) throws {
+        try Keychain.delete(service: service, account: accountID)
+    }
+}

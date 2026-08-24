@@ -105,7 +105,7 @@ public final class SessionManager: SessionRouting {
         guard let policy = store.currentSettings().policy(named: policyName) else {
             throw SessionError.unknownPolicy(policyName)
         }
-        let accounts = store.accounts.all()
+        let accounts = store.accounts.all().filter(\.isAutoAssignable)
         let usage = store.allUsage()
         if applyingLaunchFloors,
            let clears = PolicyEngine.pick(accounts: accounts, usage: usage, policy: policy,
@@ -196,10 +196,24 @@ public final class SessionManager: SessionRouting {
 
     // MARK: - SessionRouting
 
-    public func assignment(sessionID: String) -> (accountID: String, token: String)? {
-        guard let current = store.sessions.get(sessionID),
-              let token = vault.bearerToken(for: current.accountID) else { return nil }
-        return (current.accountID, token)
+    public func assignment(sessionID: String) -> SessionAssignment? {
+        guard let current = store.sessions.get(sessionID) else { return nil }
+        return credential(for: current.accountID, allowingBlockingRefresh: true)
+    }
+
+    /// Resolves whichever credential the account authenticates with. An API key needs no
+    /// refresh and never expires, so it is read straight from the Keychain.
+    private func credential(for accountID: String,
+                            allowingBlockingRefresh: Bool) -> SessionAssignment? {
+        if store.accounts.get(accountID)?.kind == .apiKey {
+            guard let key = try? APIKeyStore.read(accountID), !key.isEmpty else { return nil }
+            return SessionAssignment(accountID: accountID, credential: .apiKey(key))
+        }
+        let token = allowingBlockingRefresh
+            ? vault.bearerToken(for: accountID)
+            : vault.cachedBearerToken(for: accountID)
+        guard let token else { return nil }
+        return SessionAssignment(accountID: accountID, credential: .oauth(token))
     }
 
     /// Where to retry a request that `servedBy` refused, least remaining first, so a
@@ -209,7 +223,7 @@ public final class SessionManager: SessionRouting {
     /// request only considers accounts with Fable weekly headroom, never one that merely
     /// has general weekly left.
     public func failover(sessionID: String, model: String?, servedBy: String,
-                         tried: Set<String>) -> (accountID: String, token: String)? {
+                         tried: Set<String>) -> SessionAssignment? {
         guard let record = store.sessions.get(sessionID) else { return nil }
 
         // The account changed while this request was in flight — the user picked another
@@ -217,9 +231,14 @@ public final class SessionManager: SessionRouting {
         // again, which could drag the session to a third account nobody chose.
         if record.accountID != servedBy, !tried.contains(record.accountID) {
             let usage = store.allUsage()
-            if ModelRouting.canServe(model, usage: usage[record.accountID]),
-               let token = vault.cachedBearerToken(for: record.accountID) {
-                return (record.accountID, token)
+            // An account the user picked by hand is honoured whatever its kind — that is
+            // the one path by which an API key ever serves a request.
+            if store.accounts.get(record.accountID)?.kind == .apiKey
+                || ModelRouting.canServe(model, usage: usage[record.accountID]) {
+                if let resolved = credential(for: record.accountID,
+                                             allowingBlockingRefresh: false) {
+                    return resolved
+                }
             }
         }
 
@@ -236,14 +255,17 @@ public final class SessionManager: SessionRouting {
 
         let usage = store.allUsage()
         let policy = settings.policy(named: record.policyName)
-        let candidate = ModelRouting.rankLeastRemaining(model, accounts: store.accounts.all(),
+        // Only accounts ccmux may choose on its own: out of rotation, or an API key that
+        // would spend money nobody asked to spend, and it is not a candidate here.
+        let eligible = store.accounts.all().filter(\.isAutoAssignable)
+        let candidate = ModelRouting.rankLeastRemaining(model, accounts: eligible,
                                                         usage: usage, excluding: tried)
             // Never blocks: a candidate whose token needs refreshing is skipped rather
             // than waited on, and the vault refreshes it in the background.
             .first { vault.cachedBearerToken(for: $0.id) != nil }
-        guard let candidate, let token = vault.cachedBearerToken(for: candidate.id) else {
-            return nil
-        }
+        guard let candidate,
+              let resolved = credential(for: candidate.id, allowingBlockingRefresh: false)
+        else { return nil }
 
         // Claude Code makes auxiliary calls (titles, summaries) on models the session's
         // policy says nothing about. Serving one elsewhere is fine; rehoming the whole
@@ -256,14 +278,20 @@ public final class SessionManager: SessionRouting {
         if record.accountID != candidate.id, servesThePolicy {
             try? assign(sessionID: sessionID, accountID: candidate.id)
         }
-        return (candidate.id, token)
+        return resolved
     }
 
     /// The soonest any account could serve this model — the number Claude Code needs to
     /// decide whether waiting is worth it.
     public func soonestAvailability(model: String?, for sessionID: String) -> Date? {
-        var accounts = store.accounts.all()
+        var accounts = store.accounts.all().filter { $0.isAutoAssignable }
         if let record = store.sessions.get(sessionID) {
+            // The session's own account counts even when it is not auto-assignable: it is
+            // already there, and its reset is exactly what Claude Code is waiting on.
+            if let own = store.accounts.get(record.accountID),
+               !accounts.contains(where: { $0.id == own.id }) {
+                accounts.append(own)
+            }
             accounts = ModelRouting.reachableAccounts(
                 accounts, for: record,
                 autoSwitchDefault: store.currentSettings().autoSwitch != .off)
@@ -336,7 +364,7 @@ public final class SessionManager: SessionRouting {
         // the launch policy. The two differ when the session has switched models
         // in-flight: `cc-opus` deliberately ignores the per-model weekly window, so the
         // window that actually ran out may be one its own policy does not look at.
-        let accounts = store.accounts.all()
+        let accounts = store.accounts.all().filter(\.isAutoAssignable)
         let usage = store.allUsage()
         let excluded: Set<String> = [record.accountID]
         let replacement = PolicyEngine.pick(accounts: accounts, usage: usage,

@@ -293,3 +293,26 @@ extension Data {
             .replacingOccurrences(of: "=", with: "")
     }
 }
+
+public extension OAuthClient {
+    /// Confirms a key works and reports what it can reach. `/v1/models` costs nothing and
+    /// answers 401 cleanly on a bad key, which makes it the right probe: verifying by
+    /// sending a message would bill the user to find out they typed it wrong.
+    func validateAPIKey(_ key: String) async throws -> [String] {
+        var request = URLRequest(url: URL(string: "\(Self.apiBase)/v1/models")!)
+        request.setValue(key, forHTTPHeaderField: "x-api-key")
+        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        request.timeoutInterval = 20
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard status == 200 else {
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            let message = ((json?["error"] as? [String: Any])?["message"] as? String)
+                ?? "HTTP \(status)"
+            throw OAuthError.badResponse(message)
+        }
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let models = (json?["data"] as? [[String: Any]])?.compactMap { $0["id"] as? String }
+        return models ?? []
+    }
+}

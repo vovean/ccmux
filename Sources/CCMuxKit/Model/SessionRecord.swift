@@ -15,10 +15,13 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
     /// permanently opt out every session started while auto-switch was off, which is
     /// indistinguishable from the feature being broken.
     public var autoSwitchOverride: Bool?
+    /// Dollars this session has spent on API-key accounts. Subscription requests are
+    /// prepaid, so they never add to it — a number here always means real money.
+    public var spendUSD: Double
 
     public init(id: String, pid: Int32, port: UInt16, accountID: String,
                 policyName: String, cwd: String, startedAt: Date = Date(),
-                autoSwitchOverride: Bool? = nil) {
+                autoSwitchOverride: Bool? = nil, spendUSD: Double = 0) {
         self.id = id
         self.pid = pid
         self.port = port
@@ -27,6 +30,22 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
         self.cwd = cwd
         self.startedAt = startedAt
         self.autoSwitchOverride = autoSwitchOverride
+        self.spendUSD = spendUSD
+    }
+
+    /// Hand-written so a sessions file written before `spendUSD` existed still decodes;
+    /// synthesized decoding would fail the whole table and drop every live session.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        pid = try c.decode(Int32.self, forKey: .pid)
+        port = try c.decode(UInt16.self, forKey: .port)
+        accountID = try c.decode(String.self, forKey: .accountID)
+        policyName = try c.decode(String.self, forKey: .policyName)
+        cwd = try c.decode(String.self, forKey: .cwd)
+        startedAt = try c.decodeIfPresent(Date.self, forKey: .startedAt) ?? Date()
+        autoSwitchOverride = try c.decodeIfPresent(Bool.self, forKey: .autoSwitchOverride)
+        spendUSD = try c.decodeIfPresent(Double.self, forKey: .spendUSD) ?? 0
     }
 
     public var namespaceDir: URL { Paths.namespace(id) }

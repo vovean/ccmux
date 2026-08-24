@@ -221,6 +221,9 @@ public final class Engine: ObservableObject {
             lastForcedPoll = now
         }
         let due = store.accounts.all().filter { account in
+            // An API key has no subscription usage endpoint to poll; its ceilings arrive
+            // on response headers and its spend is accumulated per request.
+            guard account.kind == .subscription else { return false }
             guard account.health != .needsRelogin else { return false }
             if force { return true }
             guard let next = store.usage(for: account.id)?.nextPollAt else { return true }
@@ -330,7 +333,18 @@ public final class Engine: ObservableObject {
     /// and exact for the 5-hour and weekly windows; per-model windows never appear
     /// there, so whatever the usage endpoint last reported is kept.
     private func handle(_ observation: SessionProxy.Observation, sessionID: String) {
-        let fromHeaders = UsageParser.windowsFromResponseHeaders(observation.headers)
+        // A usage observation is the tail of a request that already reported its head.
+        // It carries no headers and no verdict — only what the request cost.
+        if let billed = observation.usage {
+            recordSpend(billed, model: observation.model,
+                        accountID: observation.accountID, sessionID: sessionID)
+            return
+        }
+
+        let isAPIKey = store.accounts.get(observation.accountID)?.kind == .apiKey
+        let fromHeaders = isAPIKey
+            ? UsageParser.apiWindowsFromResponseHeaders(observation.headers)
+            : UsageParser.windowsFromResponseHeaders(observation.headers)
         if !fromHeaders.isEmpty {
             var snapshot = store.usage(for: observation.accountID) ?? UsageSnapshot()
             for window in fromHeaders { snapshot.windows.upsert(window) }
@@ -448,6 +462,57 @@ public final class Engine: ObservableObject {
         if !blocks.isEmpty {
             Log.info("restored \(blocks.count) blocked session(s) after launch")
         }
+    }
+
+    private func recordSpend(_ billed: TokenUsage, model: String?,
+                             accountID: String, sessionID: String) {
+        guard let account = store.accounts.get(accountID), account.kind == .apiKey,
+              let model, let cost = Pricing.cost(model: model, usage: billed), cost > 0
+        else { return }
+        store.sessions.mutate(sessionID) { $0.spendUSD += cost }
+        store.accounts.mutate(accountID) {
+            $0.spendLifetimeUSD += cost
+            var month = $0.spendThisMonth
+                ?? MonthlySpend(month: MonthlySpend.monthKey(), amountUSD: 0)
+            month.add(cost)
+            $0.spendThisMonth = month
+        }
+        evaluateBudget(accountID)
+    }
+
+    /// The budget is advisory: it warns once per month per crossing and never withholds a
+    /// request. Blocking would strand whatever session is on the key with nowhere to go.
+    private func evaluateBudget(_ accountID: String) {
+        guard let account = store.accounts.get(accountID),
+              let budget = account.monthlyBudgetUSD, budget > 0,
+              let window = Engine.budgetWindow(for: account), window.percent >= 100
+                  || window.percent >= settings.budgetWarnPercent
+        else { return }
+        let spent = account.spendThisMonth?.amount() ?? 0
+        notifier.postOnce(
+            key: "budget/\(accountID)/\(MonthlySpend.monthKey())/"
+                + (window.percent >= 100 ? "over" : "warn"),
+            title: window.percent >= 100
+                ? "\(account.displayName) is over budget"
+                : "\(account.displayName) is near its budget",
+            body: String(format: "$%.2f of $%.2f this month.", spent, budget))
+    }
+
+    /// Spend against the monthly budget, shaped as a window so it draws as one more bar.
+    public static func budgetWindow(for account: Account,
+                                    now: Date = Date()) -> UsageWindow? {
+        guard let budget = account.monthlyBudgetUSD, budget > 0 else { return nil }
+        let spent = account.spendThisMonth?.amount(inMonthOf: now) ?? 0
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC") ?? .current
+        let startOfMonth = calendar.date(from: calendar.dateComponents([.year, .month],
+                                                                      from: now))
+        let resets = startOfMonth.flatMap {
+            calendar.date(byAdding: DateComponents(month: 1), to: $0)
+        }
+        return UsageWindow(kind: .budget,
+                           label: String(format: "Budget $%.0f", budget),
+                           percent: min(100, spent / budget * 100), resetsAt: resets)
     }
 
     private func block(sessionID: String, accountID: String, model: String?,
@@ -650,7 +715,8 @@ public final class Engine: ObservableObject {
     /// entitlements, which silently withholds models the plan actually includes.
     private func backfillMissingPlans() async {
         for account in store.accounts.all()
-        where account.subscriptionType == nil || account.rateLimitTier == nil {
+        where account.kind == .subscription
+            && (account.subscriptionType == nil || account.rateLimitTier == nil) {
             guard account.health != .needsRelogin,
                   let token = vault.cachedBearerToken(for: account.id),
                   let identity = try? await client.profile(accessToken: token),
@@ -699,11 +765,62 @@ public final class Engine: ObservableObject {
         return account
     }
 
+    /// Adds an API key as an account. The key is verified before anything is stored, so
+    /// a typo fails here rather than as a puzzling 401 on the user's next request.
+    public func addAPIKeyAccount(key: String, label: String) async -> Bool {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            banner = Banner(level: .warning, text: "Paste an API key first.")
+            return false
+        }
+        loginInProgress = true
+        defer { loginInProgress = false }
+        do {
+            let models = try await client.validateAPIKey(trimmed)
+            let name = label.trimmingCharacters(in: .whitespacesAndNewlines)
+            let id = UUID().uuidString
+            var account = Account(id: id, label: name.isEmpty ? "API key" : name,
+                                  kind: .apiKey)
+            account.health = .ok
+            account.priority = (store.accounts.all().map(\.priority).max() ?? 0) + 1
+            try APIKeyStore.write(trimmed, for: id)
+            store.accounts.upsert(account)
+            banner = Banner(level: .info,
+                            text: "Added \(account.displayName) · \(models.count) models "
+                                + "reachable. Assign a session to it from the Sessions "
+                                + "screen — API keys are never picked automatically.")
+            return true
+        } catch {
+            banner = Banner(level: .warning,
+                            text: "That key was rejected: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    public func setInRotation(_ inRotation: Bool, for accountID: String) {
+        store.accounts.mutate(accountID) { $0.inRotation = inRotation }
+    }
+
+    public func setMonthlyBudget(_ budgetUSD: Double?, for accountID: String) {
+        store.accounts.mutate(accountID) {
+            $0.monthlyBudgetUSD = (budgetUSD ?? 0) > 0 ? budgetUSD : nil
+        }
+    }
+
+    /// What the live sessions on this account have spent, which is not the same as what
+    /// the account has spent — ended sessions keep counting toward the lifetime total.
+    public func liveSpend(forAccount accountID: String) -> Double {
+        sessions.filter { $0.accountID == accountID }.reduce(0) { $0 + $1.spendUSD }
+    }
+
     public func removeAccount(_ accountID: String) {
         for record in store.sessions(forAccount: accountID) {
             sessionManager.endSession(record.id)
         }
         vault.forget(accountID)
+        // Leaving the key behind would keep a working credential in the Keychain for an
+        // account the user believes they deleted.
+        try? APIKeyStore.delete(accountID)
         store.removeAccount(accountID)
     }
 

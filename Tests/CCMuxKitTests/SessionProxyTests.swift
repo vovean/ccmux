@@ -252,20 +252,20 @@ final class TokenSequence: SessionRouting, @unchecked Sendable {
         lock.lock(); selected = accountID; lock.unlock()
     }
 
-    func assignment(sessionID: String) -> (accountID: String, token: String)? {
+    func assignment(sessionID: String) -> SessionAssignment? {
         lock.lock(); defer { lock.unlock() }
         guard let token = tokens[selected] else { return nil }
-        return (selected, token)
+        return SessionAssignment(accountID: selected, credential: .oauth(token))
     }
 
     func failover(sessionID: String, model: String?, servedBy: String,
-                  tried: Set<String>) -> (accountID: String, token: String)? {
+                  tried: Set<String>) -> SessionAssignment? {
         lock.lock(); defer { lock.unlock() }
         failoverRequests.append(tried)
         guard let next = failoverOrder.first(where: { !tried.contains($0) }),
               let token = tokens[next] else { return nil }
         selected = next
-        return (next, token)
+        return SessionAssignment(accountID: next, credential: .oauth(token))
     }
 
     func soonestAvailability(model: String?, for sessionID: String) -> Date? {
@@ -446,12 +446,12 @@ final class ModelRecordingRouter: SessionRouting, @unchecked Sendable {
         return models.compactMap { $0 }
     }
 
-    func assignment(sessionID: String) -> (accountID: String, token: String)? {
-        ("a", token)
+    func assignment(sessionID: String) -> SessionAssignment? {
+        SessionAssignment(accountID: "a", credential: .oauth(token))
     }
 
     func failover(sessionID: String, model: String?, servedBy: String,
-                  tried: Set<String>) -> (accountID: String, token: String)? {
+                  tried: Set<String>) -> SessionAssignment? {
         lock.lock(); models.append(model); lock.unlock()
         return nil
     }

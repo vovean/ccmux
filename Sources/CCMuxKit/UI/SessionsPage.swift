@@ -68,7 +68,7 @@ struct SessionsPage: View {
                     reloginNotice(group.id)
                 } else {
                     // Once per group: every session in it draws on the same quota.
-                    ForEach(engine.usage[group.id]?.windows ?? []) { window in
+                    ForEach(groupBars(group.id)) { window in
                         UsageBar(window: window,
                                  threshold: engine.settings.warnThresholdPercent)
                     }
@@ -81,6 +81,21 @@ struct SessionsPage: View {
                 }
             }
         }
+    }
+
+    private func account(_ id: String) -> Account? {
+        engine.accounts.first { $0.id == id }
+    }
+
+    /// The account's own ceilings, plus its budget when it has one, so a group shows the
+    /// same limits the Accounts screen does without having to switch screens.
+    private func groupBars(_ accountID: String) -> [UsageWindow] {
+        var windows = engine.usage[accountID]?.windows ?? []
+        if let account = account(accountID),
+           let budget = Engine.budgetWindow(for: account) {
+            windows.append(budget)
+        }
+        return windows
     }
 
     private func groupHeader(_ group: SessionGroup, collapsed: Bool) -> some View {
@@ -99,6 +114,13 @@ struct SessionsPage: View {
                 }
                 StatusPill(text: "\(group.count)",
                            tint: group.isUnmanaged ? .secondary : .accentColor)
+                if let account = account(group.id), account.kind == .apiKey {
+                    Text(Format.money(engine.liveSpend(forAccount: account.id)))
+                        .font(.caption.monospacedDigit().weight(.semibold))
+                    Text("live · \(Format.money(account.spendLifetimeUSD)) total")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
             }
             .contentShape(Rectangle())
@@ -205,6 +227,11 @@ struct SessionsPage: View {
                     .labelsHidden()
                     .frame(maxWidth: 220)
                     Spacer()
+                    if session.spendUSD > 0 {
+                        Text(Format.money(session.spendUSD))
+                            .font(.caption.monospacedDigit().weight(.medium))
+                            .help("Spent by this session")
+                    }
                     Text("pid \(session.pid) · port \(session.port)")
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.tertiary)

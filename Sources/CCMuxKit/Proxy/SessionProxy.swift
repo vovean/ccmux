@@ -22,13 +22,18 @@ public final class SessionProxy {
         public let accountID: String
         /// What was asked for, so a block raised by one model is not cleared by another.
         public let model: String?
+        /// Tokens billed for this request. Only present on the follow-up observation
+        /// emitted once the body has finished streaming — the head arrives long before
+        /// the counts do.
+        public let usage: TokenUsage?
 
         public init(statusCode: Int, headers: [String: String], accountID: String,
-                    model: String? = nil) {
+                    model: String? = nil, usage: TokenUsage? = nil) {
             self.statusCode = statusCode
             self.headers = headers
             self.accountID = accountID
             self.model = model
+            self.usage = usage
         }
     }
 
@@ -275,7 +280,7 @@ public final class SessionProxy {
     /// Claude Code's own "stopped after repeated usage-limit hits" guard.
     private func attempt(_ request: HTTPRequestParser.Request, model: String?,
                          tried: Set<String>,
-                         resolved: (accountID: String, token: String)? = nil,
+                         resolved: SessionAssignment? = nil,
                          on connection: NWConnection,
                          onCancel: @escaping (URLSessionDataTask) -> Void,
                          completion: @escaping (Bool) -> Void) {
@@ -301,7 +306,17 @@ public final class SessionProxy {
         where !Self.strippedRequestHeaders.contains(name.lowercased()) {
             outbound.addValue(value, forHTTPHeaderField: name)
         }
-        outbound.setValue("Bearer \(assignment.token)", forHTTPHeaderField: "Authorization")
+        // Sending both schemes is rejected upstream, and Claude Code always sends
+        // Authorization — so whichever one is not in use has to be cleared, not just
+        // left alone.
+        switch assignment.credential {
+        case .oauth(let token):
+            outbound.setValue(nil, forHTTPHeaderField: "x-api-key")
+            outbound.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        case .apiKey(let key):
+            outbound.setValue(nil, forHTTPHeaderField: "Authorization")
+            outbound.setValue(key, forHTTPHeaderField: "x-api-key")
+        }
         if !request.body.isEmpty { outbound.httpBody = request.body }
 
         let keepAlive = request.wantsKeepAlive
@@ -309,6 +324,7 @@ public final class SessionProxy {
         let sessionID = self.sessionID
         var sentHead = false
         var bodyAllowed = true
+        var tap = StreamingUsageTap()
         // Set when this attempt is being replaced; its remaining callbacks must not reach
         // the client, which is already being served by the retry.
         var abandoned = false
@@ -386,6 +402,7 @@ public final class SessionProxy {
             },
             onBody: { data in
                 guard !abandoned, bodyAllowed, !data.isEmpty else { return }
+                tap.consume(data)
                 connection.send(content: HTTPResponseWriter.chunk(data),
                                 completion: .contentProcessed { _ in })
             },
@@ -406,6 +423,15 @@ public final class SessionProxy {
                     // syntactically complete response holding a truncated answer.
                     completion(false)
                     return
+                }
+                // The counts are only complete now, so they ride a second observation
+                // rather than the one sent with the head.
+                tap.finish()
+                let billed = tap.current
+                if !billed.isEmpty {
+                    self.observer(Observation(statusCode: 200, headers: [:],
+                                              accountID: assignment.accountID,
+                                              model: model, usage: billed))
                 }
                 if bodyAllowed {
                     connection.send(content: HTTPResponseWriter.terminator,

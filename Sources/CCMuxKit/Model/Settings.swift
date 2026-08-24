@@ -76,6 +76,8 @@ public enum AutoSwitchMode: String, Codable, Equatable, CaseIterable {
 
 public struct Settings: Codable, Equatable {
     public var warnThresholdPercent: Double
+    /// Percentage of an API-key account's monthly budget at which to warn.
+    public var budgetWarnPercent: Double
     public var watchedWindows: [UsageWindow.Kind]
     public var autoSwitch: AutoSwitchMode
     public var policies: [Policy]
@@ -87,6 +89,7 @@ public struct Settings: Codable, Equatable {
     public var keepWindowsRolling: Bool
 
     public init(warnThresholdPercent: Double = 3,
+                budgetWarnPercent: Double = 80,
                 watchedWindows: [UsageWindow.Kind] = [.session, .weeklyAll, .weeklyScoped],
                 autoSwitch: AutoSwitchMode = .immediate,
                 policies: [Policy] = Policy.defaults,
@@ -95,6 +98,7 @@ public struct Settings: Codable, Equatable {
                 mutedAccountIDs: [String] = [],
                 keepWindowsRolling: Bool = true) {
         self.warnThresholdPercent = warnThresholdPercent
+        self.budgetWarnPercent = budgetWarnPercent
         self.watchedWindows = watchedWindows
         self.autoSwitch = autoSwitch
         self.policies = policies
@@ -113,6 +117,9 @@ public struct Settings: Codable, Equatable {
         warnThresholdPercent = try c.decodeIfPresent(Double.self,
                                                      forKey: .warnThresholdPercent)
             ?? d.warnThresholdPercent
+        budgetWarnPercent = try c.decodeIfPresent(Double.self,
+                                                  forKey: .budgetWarnPercent)
+            ?? d.budgetWarnPercent
         watchedWindows = try c.decodeIfPresent([UsageWindow.Kind].self,
                                                forKey: .watchedWindows) ?? d.watchedWindows
         autoSwitch = try c.decodeIfPresent(AutoSwitchMode.self, forKey: .autoSwitch)

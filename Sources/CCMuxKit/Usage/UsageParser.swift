@@ -105,3 +105,35 @@ extension String {
         return first.uppercased() + dropFirst()
     }
 }
+
+public extension UsageParser {
+    /// Per-minute ceilings an API key gets back. Shape differs from the subscription
+    /// headers in every respect: limit/remaining rather than a utilization fraction, and
+    /// an ISO-8601 reset rather than a unix timestamp.
+    static func apiWindowsFromResponseHeaders(_ headers: [String: String],
+                                              now: Date = Date()) -> [UsageWindow] {
+        let families: [(String, UsageWindow.Kind, String)] = [
+            ("requests", .apiRequests, "Requests/min"),
+            ("tokens", .apiTokens, "Tokens/min"),
+            ("input-tokens", .apiInputTokens, "Input tokens/min"),
+            ("output-tokens", .apiOutputTokens, "Output tokens/min"),
+        ]
+        return families.compactMap { family, kind, label in
+            let prefix = "anthropic-ratelimit-\(family)"
+            guard let limitRaw = headers["\(prefix)-limit"],
+                  let limit = Double(limitRaw), limit > 0,
+                  let remainingRaw = headers["\(prefix)-remaining"],
+                  let remaining = Double(remainingRaw) else { return nil }
+            let used = max(0, min(limit, limit - remaining))
+            let reset = headers["\(prefix)-reset"].flatMap(isoDate)
+            return UsageWindow(kind: kind, label: label,
+                               percent: used / limit * 100, resetsAt: reset)
+        }
+    }
+
+    static func isoDate(_ raw: String) -> Date? {
+        let withFraction = ISO8601DateFormatter()
+        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return withFraction.date(from: raw) ?? ISO8601DateFormatter().date(from: raw)
+    }
+}
