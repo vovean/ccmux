@@ -39,7 +39,7 @@ public struct UpstreamProxy: Codable, Equatable {
         let port = url.port ?? 3128
         guard port > 0, port <= 65_535 else { return nil }
         // URLComponents percent-decodes `user` and `password` for us, which is what makes
-        // a pasted `v%2A0y` arrive as the literal password the proxy expects.
+        // a pasted `p%2Ass` arrive as the literal `p*ss` the proxy expects.
         let user = (url.user?.isEmpty == false) ? url.user : nil
         let password = (url.password?.isEmpty == false) ? url.password : nil
         return (UpstreamProxy(host: host, port: port, username: user), password)
