@@ -3,7 +3,7 @@ SWIFT_TEST_FLAGS = --disable-xctest --enable-swift-testing \
 	-Xswiftc -F -Xswiftc $(FW) \
 	-Xlinker -F -Xlinker $(FW) -Xlinker -rpath -Xlinker $(FW)
 
-.PHONY: build app icon test install run clean install-agent uninstall-agent release
+.PHONY: build app icon test install run clean install-agent uninstall-agent release publish
 
 build:
 	swift build
@@ -56,3 +56,14 @@ release: app
 	@echo "size     : $$(du -h $(RELEASE) | cut -f1)"
 	@echo "sha256   : $$(shasum -a 256 $(RELEASE) | cut -d' ' -f1)"
 	@echo "version  : $(VERSION)   arch: $(ARCH)"
+
+# Cuts and publishes a release end to end: tests, clean build, version bump, tag, GitHub
+# release, and the tap's cask. Guarded at every step — see scripts/publish.sh.
+#   make publish VERSION=1.1
+# VERSION defaults to Info.plist for `release`, which would make a bare `make publish`
+# silently re-cut the current version. Publishing must be deliberate, so it is only
+# accepted from the command line.
+publish:
+	@[ "$(origin VERSION)" = "command line" ] || { \
+	  echo "publish: pass a version, e.g. make publish VERSION=1.1" >&2; exit 1; }
+	@./scripts/publish.sh $(VERSION)
