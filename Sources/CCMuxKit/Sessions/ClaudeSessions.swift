@@ -27,6 +27,8 @@ public enum ClaudeSessions {
                 kind: obj["kind"] as? String,
                 entrypoint: obj["entrypoint"] as? String,
                 startedAt: (obj["startedAt"] as? Double)
+                    .map { Date(timeIntervalSince1970: $0 / 1000) },
+                updatedAt: (obj["updatedAt"] as? Double)
                     .map { Date(timeIntervalSince1970: $0 / 1000) }))
         }
         return result.sorted { ($0.startedAt ?? .distantPast) > ($1.startedAt ?? .distantPast) }

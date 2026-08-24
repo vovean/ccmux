@@ -31,7 +31,8 @@ enum SessionGrouping {
 
     static func groups(accounts: [Account],
                        sessions: [SessionRecord],
-                       unmanaged: [ClaudeSessionInfo]) -> [SessionGroup] {
+                       unmanaged: [ClaudeSessionInfo],
+                       live: [Int32: ClaudeSessionInfo] = [:]) -> [SessionGroup] {
         var byAccount: [String: [SessionRecord]] = [:]
         for session in sessions {
             byAccount[session.accountID, default: []].append(session)
@@ -43,7 +44,7 @@ enum SessionGrouping {
             groups.append(SessionGroup(id: account.id,
                                        title: account.displayName,
                                        subtitle: account.subscriptionType,
-                                       sessions: owned,
+                                       sessions: sorted(owned, live: live),
                                        unmanaged: []))
         }
 
@@ -53,7 +54,8 @@ enum SessionGrouping {
             groups.append(SessionGroup(id: accountID,
                                        title: "Unknown account",
                                        subtitle: String(accountID.prefix(8)),
-                                       sessions: byAccount[accountID] ?? [],
+                                       sessions: sorted(byAccount[accountID] ?? [],
+                                                        live: live),
                                        unmanaged: []))
         }
 
@@ -62,8 +64,62 @@ enum SessionGrouping {
                                        title: "Not managed by ccmux",
                                        subtitle: nil,
                                        sessions: [],
-                                       unmanaged: unmanaged))
+                                       unmanaged: sortedUnmanaged(unmanaged)))
         }
         return groups
+    }
+}
+
+extension SessionGrouping {
+    /// What a session is doing, ranked by how much it wants the user.
+    ///
+    /// `waiting` outranks `busy` deliberately: a working session needs nothing, while a
+    /// blocked one is asking a question and will sit there until it is answered. Claude
+    /// Code maps the same status to a tempo of "blocked".
+    enum Activity: Int, Comparable {
+        case waiting = 0
+        case busy = 1
+        case other = 2
+        case idle = 3
+
+        init(status: String?) {
+            switch status {
+            case "waiting": self = .waiting
+            case "busy": self = .busy
+            case "idle", nil: self = .idle
+            default: self = .other
+            }
+        }
+
+        static func < (lhs: Activity, rhs: Activity) -> Bool {
+            lhs.rawValue < rhs.rawValue
+        }
+    }
+
+    /// Most-wanting-attention first, and within one tier the most recently active first.
+    /// A session with no known time sorts last in its tier rather than first, so an
+    /// unknown never outranks a measured one.
+    static func sorted(_ records: [SessionRecord],
+                       live: [Int32: ClaudeSessionInfo]) -> [SessionRecord] {
+        records.sorted { a, b in
+            let (infoA, infoB) = (live[a.pid], live[b.pid])
+            let (rankA, rankB) = (Activity(status: infoA?.status),
+                                  Activity(status: infoB?.status))
+            if rankA != rankB { return rankA < rankB }
+            let timeA = infoA?.updatedAt ?? .distantPast
+            let timeB = infoB?.updatedAt ?? .distantPast
+            if timeA != timeB { return timeA > timeB }
+            return a.startedAt > b.startedAt
+        }
+    }
+
+    static func sortedUnmanaged(_ infos: [ClaudeSessionInfo]) -> [ClaudeSessionInfo] {
+        infos.sorted { a, b in
+            let (rankA, rankB) = (Activity(status: a.status), Activity(status: b.status))
+            if rankA != rankB { return rankA < rankB }
+            let timeA = a.updatedAt ?? a.startedAt ?? .distantPast
+            let timeB = b.updatedAt ?? b.startedAt ?? .distantPast
+            return timeA > timeB
+        }
     }
 }

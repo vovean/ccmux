@@ -11,7 +11,8 @@ struct SessionsPage: View {
     private var groups: [SessionGroup] {
         SessionGrouping.groups(accounts: engine.accounts,
                                sessions: engine.sessions,
-                               unmanaged: engine.unmanagedSessions)
+                               unmanaged: engine.unmanagedSessions,
+                               live: engine.liveByPID)
     }
 
     var body: some View {
@@ -83,6 +84,14 @@ struct SessionsPage: View {
         }
     }
 
+    /// Shown on the header so a collapsed group still says someone is waiting on you.
+    private func waitingCount(_ group: SessionGroup) -> Int {
+        let managed = group.sessions.filter {
+            engine.claudeSession(forPID: $0.pid)?.status == "waiting"
+        }.count
+        return managed + group.unmanaged.filter { $0.status == "waiting" }.count
+    }
+
     private func account(_ id: String) -> Account? {
         engine.accounts.first { $0.id == id }
     }
@@ -114,6 +123,18 @@ struct SessionsPage: View {
                 }
                 StatusPill(text: "\(group.count)",
                            tint: group.isUnmanaged ? .secondary : .accentColor)
+                if waitingCount(group) > 0 {
+                    HStack(spacing: 3) {
+                        Image(systemName: "hand.raised.fill").font(.system(size: 8))
+                        Text(waitingCount(group) == 1
+                             ? "1 waiting" : "\(waitingCount(group)) waiting")
+                    }
+                    .font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Color.orange.opacity(0.22)))
+                    .foregroundStyle(.orange)
+                }
                 if let account = account(group.id), account.kind == .apiKey {
                     Text(Format.money(engine.liveSpend(forAccount: account.id)))
                         .font(.caption.monospacedDigit().weight(.semibold))
@@ -163,7 +184,9 @@ struct SessionsPage: View {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 8) {
                     Text(info.name ?? "claude").font(.subheadline)
-                    if let status = info.status {
+                    if info.status == "waiting" {
+                        waitingLabel
+                    } else if let status = info.status {
                         StatusPill(text: status, tint: statusTint(status))
                     }
                     Spacer()
@@ -186,7 +209,9 @@ struct SessionsPage: View {
                 HStack(spacing: 8) {
                     if blocked != nil { RedDot() }
                     Text(info?.name ?? Format.shortenHome(session.cwd)).font(.headline)
-                    if let status = info?.status {
+                    if info?.status == "waiting" {
+                        waitingLabel
+                    } else if let status = info?.status {
                         StatusPill(text: status, tint: statusTint(status))
                     }
                     StatusPill(text: session.policyName, tint: .purple)
@@ -251,6 +276,20 @@ struct SessionsPage: View {
             return "\(account) is out of headroom and no other account satisfies this "
                 + "session's policy."
         }
+    }
+
+    /// A blocked session is asking a question and will sit there until it is answered,
+    /// which is worth more than the word "waiting" in a grey pill.
+    private var waitingLabel: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "hand.raised.fill").font(.system(size: 9))
+            Text("waiting for you")
+        }
+        .font(.caption2.weight(.semibold))
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background(Capsule().fill(Color.orange.opacity(0.22)))
+        .foregroundStyle(.orange)
     }
 
     private func statusTint(_ status: String) -> Color {

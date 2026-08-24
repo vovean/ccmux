@@ -892,6 +892,12 @@ public final class Engine: ObservableObject {
         sessionManager.endSession(sessionID)
     }
 
+    /// Claude Code's own view of every live session, by pid, for the Sessions screen to
+    /// order by what each one is actually doing.
+    public var liveByPID: [Int32: ClaudeSessionInfo] {
+        Dictionary(claudeSessions.map { ($0.pid, $0) }, uniquingKeysWith: { first, _ in first })
+    }
+
     public func claudeSession(forPID pid: Int32) -> ClaudeSessionInfo? {
         claudeSessions.first { $0.pid == pid }
     }

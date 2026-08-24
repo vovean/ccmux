@@ -29,7 +29,9 @@ struct SessionGroupingTests {
 
         #expect(groups.map(\.id) == ["a", "c"])
         #expect(groups[0].count == 1)
-        #expect(groups[1].sessions.map(\.id) == ["s1", "s3"])
+        // Membership, not order: within a group sessions are ordered by what they are
+        // doing, which SessionOrderTests covers.
+        #expect(Set(groups[1].sessions.map(\.id)) == ["s1", "s3"])
     }
 
     @Test("The unmanaged group comes last and only when it has members")
@@ -256,5 +258,91 @@ struct ExpiredAccountTests {
         let flagged = SessionGrouping.expiredAccountIDs(in: groups, accounts: accounts)
         #expect(flagged.isEmpty)
         #expect(!flagged.contains(SessionGrouping.unmanagedGroupID))
+    }
+}
+
+@Suite("Sessions are ordered by what they want")
+struct SessionOrderTests {
+    private func record(_ id: String, pid: Int32, started: TimeInterval = 0) -> SessionRecord {
+        SessionRecord(id: id, pid: pid, port: 9000, accountID: "a", policyName: "opus",
+                      cwd: "/tmp", startedAt: Date(timeIntervalSince1970: started))
+    }
+
+    private func info(_ pid: Int32, _ status: String?,
+                      updated: TimeInterval?) -> ClaudeSessionInfo {
+        ClaudeSessionInfo(pid: pid, sessionID: "s\(pid)", cwd: "/tmp", name: nil,
+                          status: status, version: nil, kind: nil, entrypoint: nil,
+                          startedAt: nil,
+                          updatedAt: updated.map { Date(timeIntervalSince1970: $0) })
+    }
+
+    /// A busy session needs nothing; a blocked one is asking a question and will sit
+    /// there until answered. So waiting outranks busy, and idle comes last.
+    @Test("Waiting first, then busy, then idle")
+    func activityOrder() {
+        let records = [record("idle", pid: 1), record("busy", pid: 2),
+                       record("waiting", pid: 3), record("shell", pid: 4)]
+        let live: [Int32: ClaudeSessionInfo] = [
+            1: info(1, "idle", updated: 100),
+            2: info(2, "busy", updated: 100),
+            3: info(3, "waiting", updated: 100),
+            4: info(4, "shell", updated: 100),
+        ]
+        #expect(SessionGrouping.sorted(records, live: live).map(\.id)
+                == ["waiting", "busy", "shell", "idle"])
+    }
+
+    @Test("Within one tier the most recently active comes first")
+    func recencyWithinTier() {
+        let records = [record("old", pid: 1), record("new", pid: 2), record("mid", pid: 3)]
+        let live: [Int32: ClaudeSessionInfo] = [
+            1: info(1, "idle", updated: 100),
+            2: info(2, "idle", updated: 900),
+            3: info(3, "idle", updated: 500),
+        ]
+        #expect(SessionGrouping.sorted(records, live: live).map(\.id)
+                == ["new", "mid", "old"])
+    }
+
+    /// Recency must never promote a session past a tier: an idle session touched a second
+    /// ago still comes after one that is blocking on the user.
+    @Test("Recency never outranks activity")
+    func tierBeatsRecency() {
+        let records = [record("freshIdle", pid: 1), record("staleWaiting", pid: 2)]
+        let live: [Int32: ClaudeSessionInfo] = [
+            1: info(1, "idle", updated: 10_000),
+            2: info(2, "waiting", updated: 1),
+        ]
+        #expect(SessionGrouping.sorted(records, live: live).map(\.id)
+                == ["staleWaiting", "freshIdle"])
+    }
+
+    /// An unknown time must not float to the top of its tier ahead of a measured one.
+    @Test("A session with no known time sorts last in its tier")
+    func unknownTimeSortsLast() {
+        let records = [record("unknown", pid: 1), record("known", pid: 2)]
+        let live: [Int32: ClaudeSessionInfo] = [
+            1: info(1, "idle", updated: nil),
+            2: info(2, "idle", updated: 5),
+        ]
+        #expect(SessionGrouping.sorted(records, live: live).map(\.id)
+                == ["known", "unknown"])
+    }
+
+    @Test("A session Claude Code has not published yet is treated as idle")
+    func missingLiveInfoIsIdle() {
+        let records = [record("ghost", pid: 1), record("busy", pid: 2)]
+        let live: [Int32: ClaudeSessionInfo] = [2: info(2, "busy", updated: 1)]
+        #expect(SessionGrouping.sorted(records, live: live).map(\.id) == ["busy", "ghost"])
+    }
+
+    @Test("Unmanaged sessions order the same way")
+    func unmanagedOrder() {
+        let sorted = SessionGrouping.sortedUnmanaged([
+            info(1, "idle", updated: 900),
+            info(2, "waiting", updated: 1),
+            info(3, "busy", updated: 50),
+        ])
+        #expect(sorted.map(\.pid) == [2, 3, 1])
     }
 }

@@ -66,6 +66,9 @@ public struct ClaudeSessionInfo: Equatable, Identifiable {
     public var kind: String?
     public var entrypoint: String?
     public var startedAt: Date?
+    /// When Claude Code last touched this session — its best available stand-in for the
+    /// time of the last message.
+    public var updatedAt: Date?
 
     public var id: Int32 { pid }
 }
