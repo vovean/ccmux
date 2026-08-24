@@ -154,6 +154,7 @@ public final class Engine: ObservableObject {
                 // Tokens first: polling with one that is about to expire spends a request
                 // from the endpoint's hourly budget on a guaranteed 401.
                 await self?.refreshExpiringTokens()
+                await self?.backfillMissingPlans()
                 await self?.pollDueAccounts()
                 await self?.keepWindowsRolling()
             }
@@ -644,6 +645,32 @@ public final class Engine: ObservableObject {
         }
     }
 
+    /// Repairs an account whose plan never landed on its record. Until it does, every
+    /// session on that account is seeded with a credential Claude Code reads as having no
+    /// entitlements, which silently withholds models the plan actually includes.
+    private func backfillMissingPlans() async {
+        for account in store.accounts.all()
+        where account.subscriptionType == nil || account.rateLimitTier == nil {
+            guard account.health != .needsRelogin,
+                  let token = vault.cachedBearerToken(for: account.id),
+                  let identity = try? await client.profile(accessToken: token),
+                  identity.subscriptionType != nil || identity.rateLimitTier != nil
+            else { continue }
+
+            store.accounts.mutate(account.id) {
+                $0.subscriptionType = $0.subscriptionType ?? identity.subscriptionType
+                $0.rateLimitTier = $0.rateLimitTier ?? identity.rateLimitTier
+            }
+            Log.info("backfilled plan for \(displayName(account.id)): "
+                     + "\(identity.subscriptionType ?? "?")")
+            // Live sessions are holding the unentitled credential right now, and only a
+            // re-seed puts the plan in front of them without a restart.
+            if let credential = vault.credential(for: account.id) {
+                sessionManager.reseedNamespaces(accountID: account.id, credential: credential)
+            }
+        }
+    }
+
     private func adopt(credential: OAuthCredential, chromeProfileDirectory: String?,
                        label: String?) async throws -> Account {
         let identity = try await client.profile(accessToken: credential.accessToken)
@@ -653,8 +680,13 @@ public final class Engine: ObservableObject {
         account.email = identity.email ?? account.email
         account.organizationUUID = identity.organizationUUID
         account.organizationName = identity.organizationName ?? account.organizationName
-        account.subscriptionType = credential.subscriptionType ?? account.subscriptionType
-        account.rateLimitTier = credential.rateLimitTier ?? account.rateLimitTier
+        // The profile is the fallback, not an afterthought: a token exchange can hand
+        // back a credential with no plan on it at all, and an account left without one
+        // seeds sessions that Claude Code reads as having no entitlements.
+        account.subscriptionType = credential.subscriptionType
+            ?? identity.subscriptionType ?? account.subscriptionType
+        account.rateLimitTier = credential.rateLimitTier
+            ?? identity.rateLimitTier ?? account.rateLimitTier
         if let chromeProfileDirectory { account.chromeProfileDirectory = chromeProfileDirectory }
         account.health = .ok
         account.healthDetail = nil

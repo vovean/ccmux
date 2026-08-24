@@ -70,8 +70,21 @@ public final class SessionManager: SessionRouting {
     /// but Claude Code makes its own calls to the profile and usage endpoints straight
     /// to Anthropic, and it re-reads the Keychain for those. Re-seeding is what keeps
     /// the account name and `/usage` inside a long session from going stale.
-    private func reseedNamespaces(accountID: String, credential: OAuthCredential) {
-        let seeded = credential.neuteredForSession()
+    /// Claude Code decides what a session is entitled to from the credential alone. A
+    /// credential missing its plan is read as having none, which silently downgrades
+    /// model availability — so the account's own record fills the gap.
+    private func planCompleted(_ credential: OAuthCredential,
+                               accountID: String) -> OAuthCredential {
+        guard credential.subscriptionType == nil || credential.rateLimitTier == nil,
+              let account = store.accounts.get(accountID) else { return credential }
+        var copy = credential
+        copy.subscriptionType = copy.subscriptionType ?? account.subscriptionType
+        copy.rateLimitTier = copy.rateLimitTier ?? account.rateLimitTier
+        return copy
+    }
+
+    public func reseedNamespaces(accountID: String, credential: OAuthCredential) {
+        let seeded = planCompleted(credential, accountID: accountID).neuteredForSession()
         for namespace in liveNamespaces(accountID: accountID) {
             do {
                 try ClaudeCredentialStore.write(seeded, namespace: namespace)
@@ -275,7 +288,9 @@ public final class SessionManager: SessionRouting {
             _ = semaphore.wait(timeout: .now() + 20)
             if let refreshed { credential = refreshed }
         }
-        try ClaudeCredentialStore.write(credential.neuteredForSession(), namespace: namespace)
+        try ClaudeCredentialStore.write(
+            planCompleted(credential, accountID: accountID).neuteredForSession(),
+            namespace: namespace)
     }
 
     // MARK: - Reassignment

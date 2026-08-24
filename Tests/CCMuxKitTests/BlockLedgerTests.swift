@@ -112,3 +112,31 @@ struct BlockLedgerTests {
         #expect(again == false)
     }
 }
+
+@Suite("Plan reaches the session credential")
+struct SessionPlanTests {
+    /// Claude Code reads the plan from the credential in the namespace. When it is absent
+    /// the session is treated as having no entitlements at all, and models the plan
+    /// includes are withheld behind a usage-credits prompt.
+    @Test("The profile's organization type maps to the credential's spelling")
+    func planNameMapping() {
+        #expect(AccountIdentity.planName(fromOrganizationType: "claude_team") == "team")
+        #expect(AccountIdentity.planName(fromOrganizationType: "claude_max") == "max")
+        // Already-unprefixed values must survive untouched.
+        #expect(AccountIdentity.planName(fromOrganizationType: "team") == "team")
+        #expect(AccountIdentity.planName(fromOrganizationType: nil) == nil)
+        #expect(AccountIdentity.planName(fromOrganizationType: "") == nil)
+    }
+
+    @Test("Neutering a credential preserves the plan")
+    func neuteringKeepsThePlan() {
+        let credential = OAuthCredential(
+            accessToken: "at", refreshToken: "rt",
+            expiresAt: Date(timeIntervalSince1970: 1_000_000),
+            subscriptionType: "team", rateLimitTier: "default_claude_max_5x")
+        let seeded = credential.neuteredForSession()
+        #expect(seeded.refreshToken == nil, "the whole point of neutering")
+        #expect(seeded.subscriptionType == "team")
+        #expect(seeded.rateLimitTier == "default_claude_max_5x")
+    }
+}

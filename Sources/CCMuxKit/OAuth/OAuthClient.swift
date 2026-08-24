@@ -41,6 +41,19 @@ public struct AccountIdentity: Equatable {
     public var email: String?
     public var organizationUUID: String?
     public var organizationName: String?
+    /// The plan, in the form Claude Code writes into its own credential ("team", "max").
+    /// The profile spells it "claude_team"; the credential spells it "team", and Claude
+    /// Code reads the credential — a session whose credential omits this is treated as
+    /// having no plan entitlement at all.
+    public var subscriptionType: String?
+    public var rateLimitTier: String?
+
+    /// "claude_team" -> "team". Unprefixed values pass through unchanged.
+    public static func planName(fromOrganizationType raw: String?) -> String? {
+        guard let raw, !raw.isEmpty else { return nil }
+        let prefix = "claude_"
+        return raw.hasPrefix(prefix) ? String(raw.dropFirst(prefix.count)) : raw
+    }
 }
 
 /// Talks to the same OAuth and usage endpoints Claude Code uses.
@@ -182,7 +195,10 @@ public struct OAuthClient {
                                email: account["email"] as? String
                                    ?? account["email_address"] as? String,
                                organizationUUID: org?["uuid"] as? String,
-                               organizationName: org?["name"] as? String)
+                               organizationName: org?["name"] as? String,
+                               subscriptionType: AccountIdentity.planName(
+                                   fromOrganizationType: org?["organization_type"] as? String),
+                               rateLimitTier: org?["rate_limit_tier"] as? String)
     }
 
     // MARK: - Usage
