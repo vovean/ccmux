@@ -71,3 +71,22 @@ public enum APIKeyStore {
         try Keychain.delete(service: service, account: accountID)
     }
 }
+
+/// The upstream proxy password. Its own service so it is never confused with an account
+/// credential, and out of settings.json because that file is plaintext on disk.
+public enum ProxyPasswordStore {
+    static let service = "ccmux-proxy"
+    static let account = "upstream"
+
+    public static func read() throws -> String? {
+        try Keychain.read(service: service, account: account)
+    }
+
+    public static func write(_ password: String?) throws {
+        guard let password, !password.isEmpty else {
+            try? Keychain.delete(service: service, account: account)
+            return
+        }
+        try Keychain.write(service: service, account: account, value: password)
+    }
+}

@@ -24,15 +24,33 @@ public final class UpstreamRelay: NSObject, URLSessionDataDelegate {
 
     private let lock = NSLock()
     private var handlers: [Int: Handlers] = [:]
-    private lazy var session: URLSession = {
+    private var proxyCredential: URLCredential?
+    private lazy var session: URLSession = Self.makeSession(proxy: nil, delegate: self)
+
+    private static func makeSession(proxy: UpstreamProxy?,
+                                    delegate: URLSessionDelegate) -> URLSession {
         let config = URLSessionConfiguration.ephemeral
         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         config.httpShouldUsePipelining = false
         config.timeoutIntervalForRequest = 0
         // Inference requests legitimately run for many minutes.
         config.timeoutIntervalForResource = 3600
-        return URLSession(configuration: config, delegate: self, delegateQueue: nil)
-    }()
+        ProxyTransport.apply(proxy, to: config)
+        return URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+    }
+
+    /// Rebuilds the session, because a URLSession's proxy is fixed at construction.
+    /// In-flight requests keep the old session until they finish, which is why the old
+    /// one is finished rather than invalidated: cancelling would abort live turns.
+    public func setProxy(_ proxy: UpstreamProxy?, password: String?) {
+        let credential = ProxyTransport.credential(for: proxy, password: password)
+        lock.lock()
+        proxyCredential = credential
+        let old = session
+        session = Self.makeSession(proxy: proxy, delegate: self)
+        lock.unlock()
+        old.finishTasksAndInvalidate()
+    }
 
     func send(_ request: URLRequest, handlers: Handlers) -> URLSessionDataTask {
         let task = session.dataTask(with: request)
@@ -57,6 +75,16 @@ public final class UpstreamRelay: NSObject, URLSessionDataDelegate {
         lock.lock()
         defer { lock.unlock() }
         return handlers[task.taskIdentifier]
+    }
+
+    public func urlSession(_ session: URLSession, task: URLSessionTask,
+                           didReceive challenge: URLAuthenticationChallenge,
+                           completionHandler: @escaping (URLSession.AuthChallengeDisposition,
+                                                         URLCredential?) -> Void) {
+        lock.lock(); let credential = proxyCredential; lock.unlock()
+        let (disposition, chosen) = ProxyTransport.respond(to: challenge,
+                                                           credential: credential)
+        completionHandler(disposition, chosen)
     }
 
     public func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,

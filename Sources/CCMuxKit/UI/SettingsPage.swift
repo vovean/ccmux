@@ -2,6 +2,9 @@ import SwiftUI
 
 struct SettingsPage: View {
     @ObservedObject var engine: Engine
+    @State private var proxyText = ""
+    @State private var proxyTesting = false
+    @State private var proxyResult: String?
 
     var body: some View {
         ScrollView {
@@ -10,6 +13,7 @@ struct SettingsPage: View {
                 exhaustion
                 limitWindows
                 signInBrowser
+                upstreamProxySection
                 policies
                 paths
             }
@@ -181,6 +185,78 @@ struct SettingsPage: View {
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
                 .truncationMode(.head)
+        }
+    }
+
+    @ViewBuilder
+    private var upstreamProxySection: some View {
+        section("Outbound proxy") {
+            Text("Sends everything ccmux talks to Anthropic through an HTTP proxy — "
+                 + "inference, token refresh, usage and probes alike. This affects ccmux "
+                 + "only: it does not change system proxy settings, routing, or how any "
+                 + "other program reaches the network.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let proxy = engine.settings.upstreamProxy {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.shield.fill")
+                        .foregroundStyle(.green)
+                        .font(.caption)
+                    Text(proxy.displayString)
+                        .font(.caption.monospaced())
+                    if proxy.username != nil {
+                        Text("· password in Keychain")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                    Spacer()
+                }
+            }
+
+            HStack(spacing: 8) {
+                TextField("http://user:password@host:3128", text: $proxyText)
+                    .textFieldStyle(.roundedBorder)
+                Button("Use") {
+                    if engine.setUpstreamProxy(proxyText) {
+                        proxyText = ""
+                        proxyResult = nil
+                    }
+                }
+                .disabled(proxyText.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+
+            HStack(spacing: 8) {
+                Button(proxyTesting ? "Testing…" : "Test") {
+                    proxyTesting = true
+                    proxyResult = nil
+                    Task {
+                        proxyResult = await engine.testUpstreamProxy()
+                        proxyTesting = false
+                    }
+                }
+                .disabled(proxyTesting || engine.settings.upstreamProxy == nil)
+                Button("Stop using a proxy") {
+                    engine.clearUpstreamProxy()
+                    proxyResult = nil
+                }
+                .disabled(engine.settings.upstreamProxy == nil)
+                Spacer()
+            }
+
+            if let proxyResult {
+                Text(proxyResult)
+                    .font(.caption)
+                    .foregroundStyle(proxyResult.hasPrefix("Proxy failed") ? .red : .green)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Text("The password is stored in the Keychain, never in settings.json. "
+                 + "Existing sessions pick the change up on their next request.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

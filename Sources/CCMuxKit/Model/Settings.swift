@@ -78,6 +78,9 @@ public struct Settings: Codable, Equatable {
     public var warnThresholdPercent: Double
     /// Percentage of an API-key account's monthly budget at which to warn.
     public var budgetWarnPercent: Double
+    /// Sends every outbound ccmux request through this proxy. Process-local: it does not
+    /// touch system proxy settings or routing, and affects nothing but ccmux.
+    public var upstreamProxy: UpstreamProxy?
     public var watchedWindows: [UsageWindow.Kind]
     public var autoSwitch: AutoSwitchMode
     public var policies: [Policy]
@@ -90,6 +93,7 @@ public struct Settings: Codable, Equatable {
 
     public init(warnThresholdPercent: Double = 3,
                 budgetWarnPercent: Double = 80,
+                upstreamProxy: UpstreamProxy? = nil,
                 watchedWindows: [UsageWindow.Kind] = [.session, .weeklyAll, .weeklyScoped],
                 autoSwitch: AutoSwitchMode = .immediate,
                 policies: [Policy] = Policy.defaults,
@@ -99,6 +103,7 @@ public struct Settings: Codable, Equatable {
                 keepWindowsRolling: Bool = true) {
         self.warnThresholdPercent = warnThresholdPercent
         self.budgetWarnPercent = budgetWarnPercent
+        self.upstreamProxy = upstreamProxy
         self.watchedWindows = watchedWindows
         self.autoSwitch = autoSwitch
         self.policies = policies
@@ -120,6 +125,7 @@ public struct Settings: Codable, Equatable {
         budgetWarnPercent = try c.decodeIfPresent(Double.self,
                                                   forKey: .budgetWarnPercent)
             ?? d.budgetWarnPercent
+        upstreamProxy = try c.decodeIfPresent(UpstreamProxy.self, forKey: .upstreamProxy)
         watchedWindows = try c.decodeIfPresent([UsageWindow.Kind].self,
                                                forKey: .watchedWindows) ?? d.watchedWindows
         autoSwitch = try c.decodeIfPresent(AutoSwitchMode.self, forKey: .autoSwitch)

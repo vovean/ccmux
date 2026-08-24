@@ -78,6 +78,21 @@ public struct OAuthClient {
         self.session = session
     }
 
+    /// A client whose refresh, profile, usage and probe calls all go through the proxy.
+    /// Routing only the relay would look like the setting worked while token refreshes
+    /// still went direct — and on a machine that needs the proxy, those are exactly the
+    /// calls that would fail.
+    public static func proxied(_ proxy: UpstreamProxy?, password: String?) -> OAuthClient {
+        guard proxy != nil else { return OAuthClient() }
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 30
+        ProxyTransport.apply(proxy, to: config)
+        let auth = ProxyAuthenticator(
+            credential: ProxyTransport.credential(for: proxy, password: password))
+        return OAuthClient(session: URLSession(configuration: config, delegate: auth,
+                                               delegateQueue: nil))
+    }
+
     // MARK: - Login
 
     public struct PKCE {
@@ -303,7 +318,7 @@ public extension OAuthClient {
         request.setValue(key, forHTTPHeaderField: "x-api-key")
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         request.timeoutInterval = 20
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else {
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]

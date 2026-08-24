@@ -32,7 +32,9 @@ public final class TokenVault {
     private var credentials: [String: OAuthCredential] = [:]
     private var inFlight: [String: (id: UInt64, task: Task<OAuthCredential?, Never>)] = [:]
     private var nextRefreshID: UInt64 = 0
-    private let client: OAuthClient
+    /// Swappable so an upstream-proxy change reaches token refresh too, which is the one
+    /// call that must not keep going direct on a machine that needs the proxy.
+    private var client: OAuthClient
 
     /// Refresh this far ahead of expiry so a request rarely has to wait on one.
     private static let refreshLead: TimeInterval = 10 * 60
@@ -40,6 +42,10 @@ public final class TokenVault {
 
     public init(client: OAuthClient = OAuthClient()) {
         self.client = client
+    }
+
+    public func setClient(_ client: OAuthClient) {
+        lock.lock(); self.client = client; lock.unlock()
     }
 
     public func load(accountIDs: [String]) {

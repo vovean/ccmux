@@ -40,7 +40,7 @@ public final class Engine: ObservableObject {
     private let store = Store()
     private let vault = TokenVault()
     private let notifier = Notifier()
-    private let client = OAuthClient()
+    private var client = OAuthClient()
     private lazy var sessionManager = SessionManager(store: store, vault: vault)
     private var controlHandler: ControlHandler?
     private var controlServer: ControlServer?
@@ -102,6 +102,7 @@ public final class Engine: ObservableObject {
         // deferring.
         vault.load(accountIDs: store.accounts.all().map(\.id))
 
+        applyUpstreamProxy()
         sessionManager.recoverAfterLaunch()
         restoreBlocks()
         reload(rescanClaudeSessions: true)
@@ -811,6 +812,72 @@ public final class Engine: ObservableObject {
             banner = Banner(level: .warning,
                             text: "That key was rejected: \(error.localizedDescription)")
             return false
+        }
+    }
+
+    /// Points every outbound path at the proxy — the relay, the vault's refresher, and
+    /// this engine's own client. A URLSession's proxy is fixed at construction, so each
+    /// is rebuilt; in-flight requests drain on the old sessions rather than being cut off.
+    public func applyUpstreamProxy() {
+        let proxy = settings.upstreamProxy
+        let password = try? ProxyPasswordStore.read()
+        UpstreamRelay.shared.setProxy(proxy, password: password)
+        let proxied = OAuthClient.proxied(proxy, password: password)
+        client = proxied
+        vault.setClient(proxied)
+        if let proxy {
+            Log.info("outbound requests now go through \(proxy.displayString)")
+        }
+    }
+
+    /// Accepts what someone would paste into HTTPS_PROXY. The password is split out and
+    /// stored in the Keychain rather than in settings.json, which is plaintext on disk.
+    public func setUpstreamProxy(_ raw: String) -> Bool {
+        guard let parsed = UpstreamProxy.parse(raw) else {
+            banner = Banner(level: .warning,
+                            text: "That does not look like a proxy URL. Expected "
+                                + "something like http://user:pass@host:3128")
+            return false
+        }
+        do {
+            try ProxyPasswordStore.write(parsed.password)
+        } catch {
+            banner = Banner(level: .warning,
+                            text: "Could not store the proxy password: "
+                                + error.localizedDescription)
+            return false
+        }
+        updateSettings { $0.upstreamProxy = parsed.proxy }
+        applyUpstreamProxy()
+        return true
+    }
+
+    public func clearUpstreamProxy() {
+        try? ProxyPasswordStore.write(nil)
+        updateSettings { $0.upstreamProxy = nil }
+        applyUpstreamProxy()
+    }
+
+    /// One real request through the proxy, so the answer is "it works" or the actual
+    /// reason — rather than a silent hang the next time a session needs a token.
+    public func testUpstreamProxy() async -> String {
+        let proxy = settings.upstreamProxy
+        guard proxy != nil else { return "No proxy configured." }
+        let password = try? ProxyPasswordStore.read()
+        let probe = OAuthClient.proxied(proxy, password: password)
+        do {
+            _ = try await probe.validateAPIKey("sk-ant-connectivity-probe")
+            return "Reached Anthropic through the proxy."
+        } catch let error as OAuthError {
+            // A 401 is the proxy working perfectly: the tunnel carried our request and
+            // Anthropic rejected a deliberately invalid key.
+            if case .badResponse(let message) = error,
+               message.lowercased().contains("api key") || message.contains("401") {
+                return "Proxy works — reached Anthropic (it rejected the dummy key, as expected)."
+            }
+            return "Proxy failed: \(error.localizedDescription)"
+        } catch {
+            return "Proxy failed: \(error.localizedDescription)"
         }
     }
 
