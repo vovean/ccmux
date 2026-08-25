@@ -92,7 +92,10 @@ relaunch
 # `-c ccmux` matters: without it any process listening on a session's port passes the
 # check, including whatever took the port in the failure this exists to catch.
 listening() {
-  lsof -nP -iTCP -sTCP:LISTEN -a -c ccmux 2>/dev/null | awk '{print $9}' | sed 's/.*://'
+  # `|| true` is load-bearing: lsof exits 1 when nothing matches, which under
+  # `set -o pipefail` is every poll before the app has finished binding.
+  lsof -nP -iTCP -sTCP:LISTEN -a -c ccmux 2>/dev/null | awk '{print $9}' | sed 's/.*://' \
+    || true
 }
 
 missing=()
