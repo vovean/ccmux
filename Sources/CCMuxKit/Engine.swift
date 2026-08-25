@@ -19,7 +19,10 @@ public final class Engine: ObservableObject {
 
     public struct Banner: Equatable {
         public enum Level { case info, warning }
-        public enum Action: Equatable { case openNotificationSettings }
+        public enum Action: Equatable {
+            case openNotificationSettings
+            case openAutomationSettings
+        }
         /// What raised it, for banners that should retract themselves once the condition
         /// clears. nil stands until the user dismisses it.
         public enum Source: Equatable { case blockedSession(String) }
@@ -626,18 +629,23 @@ public final class Engine: ObservableObject {
                          + "\(error.localizedDescription)")
             }
         }
-        let report = Rebalance.report(moved: moved, failed: failed, skipped: plan.skipped)
-        // A plain info banner here would replace a blocked-session warning with one that
-        // carries no source, so `retractBanner` could never bring the warning back and
-        // the blocked session would go unannounced until its next refusal.
-        if let stuck = blocks.all.first {
-            banner = Banner(level: .warning,
-                            text: report + " \(displayName(stuck.accountID)) is still out "
-                                + "of headroom; \(sessionLabel(stuck.sessionID)) is blocked.",
-                            source: .blockedSession(stuck.sessionID))
-        } else {
-            banner = Banner(level: failed > 0 ? .warning : .info, text: report)
+        raise(Rebalance.report(moved: moved, failed: failed, skipped: plan.skipped),
+              level: failed > 0 ? .warning : .info)
+    }
+
+    /// Shows a transient message without burying a blocked-session warning. A banner
+    /// with no source replacing one that has a source leaves `retractBanner` unable to
+    /// bring it back, so the blocked session goes unannounced until its next refusal.
+    private func raise(_ text: String, level: Banner.Level,
+                       action: Banner.Action? = nil) {
+        guard let stuck = blocks.all.first else {
+            banner = Banner(level: level, text: text, action: action)
+            return
         }
+        banner = Banner(level: .warning,
+                        text: text + " \(displayName(stuck.accountID)) is still out of "
+                            + "headroom; \(sessionLabel(stuck.sessionID)) is blocked.",
+                        action: action, source: .blockedSession(stuck.sessionID))
     }
 
     /// What a reassign would do right now, so the menu can name the number instead of
@@ -701,6 +709,33 @@ public final class Engine: ObservableObject {
                             text: "Notifications are turned off for ccmux, so limit "
                                 + "warnings cannot reach you.",
                             action: .openNotificationSettings)
+        }
+    }
+
+    /// Brings a session's terminal tab to the front. Nothing is stored for this: the
+    /// handle is read from the process when it is asked for, so it works on sessions
+    /// started before the feature existed and on ones ccmux did not launch.
+    public func revealInTerminal(pid: Int32) {
+        // Off the main thread on purpose. The first press raises the Automation consent
+        // dialog, and `osascript` does not return until it is answered — on main that
+        // freezes the whole window behind the very prompt asking to proceed.
+        Task.detached {
+            let outcome = TerminalOpener.open(pid: pid)
+            guard let message = outcome.message else { return }
+            await MainActor.run { [weak self] in
+                self?.raise(message, level: .warning,
+                            action: outcome == .denied ? .openAutomationSettings : nil)
+            }
+        }
+    }
+
+    public var canRevealInTerminal: Bool { TerminalOpener.isITermInstalled }
+
+    public func openAutomationSettings() {
+        for candidate in ["x-apple.systempreferences:com.apple.preference.security"
+                              + "?Privacy_Automation",
+                          "x-apple.systempreferences:com.apple.preference.security"] {
+            if let url = URL(string: candidate), NSWorkspace.shared.open(url) { return }
         }
     }
 

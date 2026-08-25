@@ -117,6 +117,22 @@ struct SessionsPage: View {
         }
     }
 
+    /// Jumps to the tab this session is running in. Offered for unmanaged sessions too:
+    /// the handle comes from the process, so ccmux does not need to have launched it.
+    @ViewBuilder
+    private func revealButton(_ pid: Int32) -> some View {
+        if engine.canRevealInTerminal {
+            Button {
+                engine.revealInTerminal(pid: pid)
+            } label: {
+                Image(systemName: "arrow.up.forward.app")
+            }
+            .buttonStyle(.plain)
+            .help("Show this session's iTerm tab")
+            .accessibilityLabel("Show in iTerm")
+        }
+    }
+
     /// Shown on the header so a collapsed group still says someone is waiting on you.
     private func waitingCount(_ group: SessionGroup) -> Int {
         let managed = group.sessions.filter {
@@ -223,6 +239,7 @@ struct SessionsPage: View {
                         StatusPill(text: status, tint: statusTint(status))
                     }
                     Spacer()
+                    revealButton(info.pid)
                     Text("pid \(info.pid)")
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.tertiary)
@@ -251,6 +268,7 @@ struct SessionsPage: View {
                     }
                     StatusPill(text: session.policyName, tint: .purple)
                     Spacer()
+                    revealButton(session.pid)
                     Menu {
                         Toggle("Auto-switch when exhausted", isOn: Binding(
                             get: {

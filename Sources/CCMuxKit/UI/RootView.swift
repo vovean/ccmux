@@ -176,6 +176,10 @@ public struct RootView: View {
                 Button("Open Settings") { engine.openNotificationSettings() }
                     .controlSize(.small)
             }
+            if banner.action == .openAutomationSettings {
+                Button("Open Settings") { engine.openAutomationSettings() }
+                    .controlSize(.small)
+            }
             Button {
                 engine.dismissBanner()
             } label: {

@@ -126,6 +126,12 @@ weekly-per-model when the plan has one) with the reset countdown.
 session's account from the picker and it takes effect on that session's next request.
 Sessions started as plain `claude` are listed too, marked as not managed.
 
+Each session has a button that brings its iTerm tab to the front. Nothing is stored for
+it: the handle is read from the process when you press it — the UUID out of its
+`ITERM_SESSION_ID`, or its controlling tty — so it works on sessions that predate the
+feature and on ones ccmux did not launch. macOS will ask once to let ccmux control
+iTerm; because ccmux is ad-hoc signed it may ask again after an upgrade.
+
 **Settings** — warning threshold, which windows it watches, auto-switch behaviour, the
 Chrome profile each account's login page opens in, and the project-to-account bindings
 below.
