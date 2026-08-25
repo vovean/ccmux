@@ -22,6 +22,8 @@ struct SessionsPage: View {
                     if engine.sessions.isEmpty {
                         EmptyHint(title: "No managed sessions",
                                   detail: "Start one with cc-opus or cc-fable in a terminal.")
+                    } else {
+                        reassignBar
                     }
                     ForEach(groups) { group in
                         groupSection(group).id(group.id)
@@ -81,6 +83,37 @@ struct SessionsPage: View {
                     unmanagedCard(info)
                 }
             }
+        }
+    }
+
+    /// Re-picks accounts for running sessions the way a fresh `cc-opus` would. The
+    /// counts are on the items because the useful number is how many would actually
+    /// move, not how many are in scope.
+    private var reassignBar: some View {
+        HStack(spacing: 8) {
+            Spacer()
+            Menu {
+                Button(item("Idle sessions", .idle)) {
+                    engine.reassignSessions(scope: .idle)
+                }
+                Button(item("All sessions", .all)) {
+                    engine.reassignSessions(scope: .all)
+                }
+            } label: {
+                Label("Reassign", systemImage: "arrow.triangle.2.circlepath")
+            }
+            .controlSize(.small)
+            .fixedSize()
+            .help("Move sessions to the account they would launch on now")
+        }
+    }
+
+    private func item(_ title: String, _ scope: Rebalance.Scope) -> String {
+        let count = engine.reassignPreview(scope: scope)
+        switch count {
+        case 0: return "\(title) — none to move"
+        case 1: return "\(title) — 1 will move"
+        default: return "\(title) — \(count) will move"
         }
     }
 
@@ -207,7 +240,9 @@ struct SessionsPage: View {
         return Card {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
-                    if blocked != nil { RedDot() }
+                    if blocked != nil || engine.unreachableSessions.contains(session.id) {
+                        RedDot()
+                    }
                     Text(info?.name ?? Format.shortenHome(session.cwd)).font(.headline)
                     if info?.status == "waiting" {
                         waitingLabel
@@ -238,6 +273,14 @@ struct SessionsPage: View {
                     Text(blockedMessage(blocked))
                         .font(.caption)
                         .foregroundStyle(.red)
+                }
+
+                if engine.unreachableSessions.contains(session.id) {
+                    Text("Port \(String(session.port)) is held by something else, so this "
+                         + "session's requests are failing. ccmux retries every few "
+                         + "seconds and it resumes on its own once the port frees.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
                 }
 
                 HStack(spacing: 8) {

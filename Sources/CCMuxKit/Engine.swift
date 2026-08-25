@@ -64,6 +64,9 @@ public final class Engine: ObservableObject {
     /// OS notification, which is silently dropped whenever notification permission is
     /// off — the case this exists to survive.
     @Published public private(set) var blocks = BlockLedger()
+    /// Sessions with no listener on their port: their claude process is alive and
+    /// pointed at a port something else took during a restart. Retried every tick.
+    @Published public private(set) var unreachableSessions: Set<String> = []
     /// Models seen on an API key that have no listed price, so the UI can admit the
     /// spend figure is incomplete instead of implying it is exact.
     @Published public private(set) var unpricedModels: Set<String> = []
@@ -71,6 +74,7 @@ public final class Engine: ObservableObject {
     /// What the burger badge surfaces.
     public var needsAttention: Bool {
         !accountsNeedingAttention.isEmpty || !blocks.isEmpty
+            || !unreachableSessions.isEmpty
     }
 
     public init() {
@@ -125,6 +129,18 @@ public final class Engine: ObservableObject {
         sessionManager.stopAll()
     }
 
+    /// Stops taking new work while letting the requests already in flight finish, so a
+    /// restart does not sever a response mid-body. `activeRequests` reports when it is
+    /// safe to exit.
+    public func beginShutdown() {
+        for timer in timers { timer.invalidate() }
+        timers = []
+        controlServer?.stop()
+        sessionManager.quiesceAll()
+    }
+
+    public var activeRequests: Int { sessionManager.activeRequestCount() }
+
     private func startControlServer() {
         let handler = ControlHandler(store: store, sessions: sessionManager)
         handler.importGlobalLogin = { [weak self] in
@@ -149,6 +165,7 @@ public final class Engine: ObservableObject {
         timers.append(Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.sessionManager.reap()
+                self?.sessionManager.retryUnreachable()
                 self?.reload(rescanClaudeSessions: true)
                 self?.applyPendingSwitches()
             }
@@ -199,6 +216,9 @@ public final class Engine: ObservableObject {
 
         let freshSettings = store.currentSettings()
         if settings != freshSettings { settings = freshSettings }
+
+        let parked = sessionManager.unreachableSessionIDs()
+        if unreachableSessions != parked { unreachableSessions = parked }
     }
 
     /// Chrome's `Local State` changes when a profile is added, which is close to never,
@@ -583,6 +603,39 @@ public final class Engine: ObservableObject {
                           accountName: displayName(pending.accountID),
                           model: pending.model)
         }
+    }
+
+    /// Re-picks accounts for sessions on demand, answering "where would these launch if
+    /// I started them now". Nothing does this on a timer: a session stays where it is
+    /// until it is refused or until this is asked for.
+    public func reassignSessions(scope: Rebalance.Scope) {
+        let plan = Rebalance.plan(sessions: store.sessions.all(),
+                                  accounts: store.accounts.all(), usage: store.allUsage(),
+                                  settings: settings, live: liveByPID, scope: scope)
+        var moved = 0
+        var failed = 0
+        for move in plan.moves {
+            do {
+                try sessionManager.assign(sessionID: move.sessionID, accountID: move.to)
+                pendingSwitch.removeValue(forKey: move.sessionID)
+                unblock(sessionID: move.sessionID)
+                moved += 1
+            } catch {
+                failed += 1
+                Log.warn("could not reassign session \(move.sessionID): "
+                         + "\(error.localizedDescription)")
+            }
+        }
+        banner = Banner(level: failed > 0 ? .warning : .info,
+                        text: Rebalance.report(moved: moved, failed: failed,
+                                               skipped: plan.skipped))
+    }
+
+    /// What a reassign would do right now, so the menu can name the number instead of
+    /// making the user press it to find out.
+    public func reassignPreview(scope: Rebalance.Scope) -> Int {
+        Rebalance.plan(sessions: sessions, accounts: accounts, usage: usage,
+                       settings: settings, live: liveByPID, scope: scope).moves.count
     }
 
     private func isBusy(pid: Int32) -> Bool {

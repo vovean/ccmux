@@ -14,6 +14,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var lastCloseAt = Date.distantPast
     private var activity: NSObjectProtocol?
     private let headless: Bool
+    private var termination: DispatchSourceSignal?
+    private var exiting = false
+    /// How long a shutdown waits for in-flight requests. Long enough for a response to
+    /// finish streaming, short enough that a restart is not something you avoid doing.
+    private static let drainDeadline: TimeInterval = 8
 
     override init() {
         headless = Paths.consumeHeadlessMarker()
@@ -49,6 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             reason: "ccmux proxies Claude Code sessions")
 
         buildMenu()
+        installTerminationHandler()
         engine.start()
 
         if headless {
@@ -62,6 +68,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         engine.stop()
+    }
+
+    /// SIGTERM is what `pkill` and every restart script sends, and its default
+    /// disposition kills the process outright — AppKit never runs
+    /// `applicationWillTerminate`, so responses are severed mid-body. Ignoring the
+    /// signal first is what lets the dispatch source see it at all.
+    private func installTerminationHandler() {
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        source.setEventHandler { [weak self] in self?.beginGracefulExit() }
+        source.resume()
+        termination = source
+    }
+
+    private func beginGracefulExit() {
+        guard !exiting else { return }
+        exiting = true
+        engine.beginShutdown()
+        drain(until: Date().addingTimeInterval(Self.drainDeadline))
+    }
+
+    private func drain(until deadline: Date) {
+        let active = engine.activeRequests
+        guard active > 0, Date() < deadline else {
+            if active > 0 {
+                Log.warn("exiting with \(active) request(s) still in flight")
+            }
+            engine.stop()
+            exit(0)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.drain(until: deadline)
+        }
     }
 
     // MARK: - Window

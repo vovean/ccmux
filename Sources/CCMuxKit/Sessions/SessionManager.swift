@@ -39,6 +39,11 @@ public final class SessionManager: SessionRouting {
     private let store: Store
     private let vault: TokenVault
     private var proxies: [String: SessionProxy] = [:]
+    /// Sessions whose recorded port could not be bound. The record is deliberately kept
+    /// — the claude process still points at that port, so the session comes back the
+    /// moment it frees up, and ending it would strand a live process with nowhere to
+    /// send requests and no way to re-adopt it.
+    private var unreachable: Set<String> = []
     private let lock = NSLock()
     /// Creating a session reads the session table to decide lineage ownership and then
     /// writes to it. Two shims racing would both read "nobody owns this account" and
@@ -164,9 +169,9 @@ public final class SessionManager: SessionRouting {
             throw SessionError.seedFailed("\(error)")
         }
 
-        let proxy = makeProxy(sessionID: sessionID, desiredPort: nil)
+        let proxy: SessionProxy
         do {
-            record.port = try proxy.start()
+            (proxy, record.port) = try startNewProxy(sessionID: sessionID)
         } catch {
             try? ClaudeCredentialStore.clear(namespace: namespace)
             try? FileManager.default.removeItem(at: namespace)
@@ -182,6 +187,21 @@ public final class SessionManager: SessionRouting {
                                   port: record.port, accountID: accountID,
                                   accountLabel: account.displayName,
                                   policyName: policyName, pid: pid, warning: warning)
+    }
+
+    /// Binds a new session's proxy inside ccmux's own port band, falling back to an
+    /// ephemeral port rather than refusing to start a session over it.
+    private func startNewProxy(sessionID: String) throws -> (SessionProxy, UInt16) {
+        let taken = Set(store.sessions.all().map(\.port))
+        for candidate in ProxyPorts.candidates(avoiding: taken) {
+            let proxy = makeProxy(sessionID: sessionID, desiredPort: candidate)
+            if let port = try? proxy.start() { return (proxy, port) }
+        }
+        Log.warn("no free port in \(ProxyPorts.range.lowerBound)–"
+                 + "\(ProxyPorts.range.upperBound); falling back to an ephemeral one, "
+                 + "which may not survive a restart")
+        let proxy = makeProxy(sessionID: sessionID, desiredPort: nil)
+        return (proxy, try proxy.start())
     }
 
     private func makeProxy(sessionID: String, desiredPort: UInt16?) -> SessionProxy {
@@ -415,6 +435,7 @@ public final class SessionManager: SessionRouting {
     public func endSession(_ sessionID: String) {
         lock.lock()
         let proxy = proxies.removeValue(forKey: sessionID)
+        unreachable.remove(sessionID)
         lock.unlock()
         proxy?.stop()
 
@@ -481,20 +502,68 @@ public final class SessionManager: SessionRouting {
     /// Rebinds proxies for sessions that outlived a previous run of the app.
     ///
     /// The port is baked into each session's ANTHROPIC_BASE_URL, so recovery means
-    /// re-binding the same port. A session whose port is gone cannot be rescued and is
-    /// ended, which is at least an honest failure.
+    /// re-binding the same port.
     private func restoreProxies() {
-        for record in store.sessions.all() {
-            let proxy = makeProxy(sessionID: record.id, desiredPort: record.port)
-            do {
-                let port = try proxy.start()
-                lock.lock(); proxies[record.id] = proxy; lock.unlock()
-                Log.info("restored proxy for session \(record.id) on port \(port)")
-            } catch {
-                Log.warn("could not rebind port \(record.port) for session "
-                         + "\(record.id): \(error.localizedDescription)")
-                endSession(record.id)
+        for record in store.sessions.all() { rebind(record) }
+    }
+
+    /// A port that is momentarily taken is not a reason to destroy a live session, so a
+    /// failed bind parks the session instead and `retryUnreachable` keeps trying.
+    @discardableResult
+    private func rebind(_ record: SessionRecord) -> Bool {
+        let proxy = makeProxy(sessionID: record.id, desiredPort: record.port)
+        do {
+            let port = try proxy.start()
+            lock.lock()
+            proxies[record.id] = proxy
+            let wasStuck = unreachable.remove(record.id) != nil
+            lock.unlock()
+            Log.info((wasStuck ? "recovered" : "restored")
+                     + " proxy for session \(record.id) on port \(port)")
+            return true
+        } catch {
+            lock.lock()
+            let firstFailure = unreachable.insert(record.id).inserted
+            lock.unlock()
+            if firstFailure {
+                Log.warn("port \(record.port) for session \(record.id) is taken: "
+                         + "\(error.localizedDescription). The session is parked until "
+                         + "it frees up.")
             }
+            return false
         }
+    }
+
+    /// Retries parked sessions. Whoever took the port during the restart is almost
+    /// always an outbound connection that closes within seconds.
+    public func retryUnreachable() {
+        lock.lock(); let parked = unreachable; lock.unlock()
+        guard !parked.isEmpty else { return }
+        for sessionID in parked {
+            guard let record = store.sessions.get(sessionID) else {
+                lock.lock(); unreachable.remove(sessionID); lock.unlock()
+                continue
+            }
+            rebind(record)
+        }
+    }
+
+    /// Sessions with no listener on their port, so the screen can say a session is
+    /// stalled rather than leaving it looking healthy while every request is refused.
+    public func unreachableSessionIDs() -> Set<String> {
+        lock.lock(); defer { lock.unlock() }
+        return unreachable
+    }
+
+    /// Stops accepting new connections while leaving the ones in flight to finish, so a
+    /// shutdown can wait for the current turns instead of severing them mid-response.
+    public func quiesceAll() {
+        lock.lock(); let all = proxies; lock.unlock()
+        for proxy in all.values { proxy.quiesce() }
+    }
+
+    public func activeRequestCount() -> Int {
+        lock.lock(); let all = proxies; lock.unlock()
+        return all.values.reduce(0) { $0 + $1.activeRequests() }
     }
 }

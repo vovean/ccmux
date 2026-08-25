@@ -127,6 +127,19 @@ public final class SessionProxy {
         listener = nil
     }
 
+    /// Stops accepting new connections and leaves the ones in flight alone. A shutdown
+    /// that goes straight to `stop()` severs whatever response is streaming, which the
+    /// session sees as a failed turn.
+    public func quiesce() {
+        listener?.cancel()
+        listener = nil
+    }
+
+    /// Requests being served right now. Never call this from the proxy's own queue.
+    public func activeRequests() -> Int {
+        queue.sync { connections.values.reduce(0) { $0 + ($1.isServing ? 1 : 0) } }
+    }
+
     public enum ProxyError: Error, LocalizedError {
         case startFailed(String)
 
@@ -159,6 +172,7 @@ public final class SessionProxy {
         private var parser = HTTPRequestParser()
         private var pending: [HTTPRequestParser.Request] = []
         private var busy = false
+        fileprivate var isServing: Bool { busy }
         private var peerClosed = false
         private var inFlight: URLSessionDataTask?
 

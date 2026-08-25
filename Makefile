@@ -3,7 +3,8 @@ SWIFT_TEST_FLAGS = --disable-xctest --enable-swift-testing \
 	-Xswiftc -F -Xswiftc $(FW) \
 	-Xlinker -F -Xlinker $(FW) -Xlinker -rpath -Xlinker $(FW)
 
-.PHONY: build app icon test install run clean install-agent uninstall-agent release publish
+.PHONY: build app icon test install run restart upgrade clean install-agent \
+	uninstall-agent release publish
 
 build:
 	swift build
@@ -26,6 +27,13 @@ install: app
 
 run: install
 	open /Applications/ccmux.app
+
+# Restarts what is installed without losing live sessions: waits for a clean exit,
+# then verifies every session's proxy port came back. See scripts/restart.sh.
+restart:
+	./scripts/restart.sh
+
+upgrade: install restart
 
 install-agent:
 	mkdir -p $(HOME)/Library/LaunchAgents
