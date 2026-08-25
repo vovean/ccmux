@@ -16,9 +16,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let headless: Bool
     private var termination: DispatchSourceSignal?
     private var exiting = false
-    /// How long a shutdown waits for in-flight requests. Long enough for a response to
-    /// finish streaming, short enough that a restart is not something you avoid doing.
-    private static let drainDeadline: TimeInterval = 8
+    /// How long a shutdown waits for in-flight requests. A real turn streams for far
+    /// longer than this, so the deadline is a compromise: it sits just under the 20s
+    /// `scripts/restart.sh` waits before it gives up and sends SIGKILL, leaving room for
+    /// the exit itself. Listeners are already cancelled by then, so a longer wait also
+    /// means longer refusing new connections — which a session survives by retrying,
+    /// unlike a response cut off mid-body.
+    private static let drainDeadline: TimeInterval = 15
 
     override init() {
         headless = Paths.consumeHeadlessMarker()

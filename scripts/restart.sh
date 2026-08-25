@@ -59,6 +59,9 @@ relaunch() {
   pgrep -f "$PATTERN" >/dev/null 2>&1 || open -g "$APP" ) &!
 trap relaunch EXIT INT TERM
 
+# Timed from the kill, not from the relaunch: the app cancels its listeners as soon as
+# SIGTERM lands, so new connections are refused for the whole drain too.
+down=$EPOCHREALTIME
 running=(${(f)"$(pgrep -f "$PATTERN" || true)"})
 running=(${running:#})
 if (( ${#running} )); then
@@ -84,10 +87,13 @@ else
   print -r -- "restart: not running"
 fi
 
-down=$EPOCHREALTIME
 relaunch
 
-listening() { lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | awk '{print $9}' | sed 's/.*://'; }
+# `-c ccmux` matters: without it any process listening on a session's port passes the
+# check, including whatever took the port in the failure this exists to catch.
+listening() {
+  lsof -nP -iTCP -sTCP:LISTEN -a -c ccmux 2>/dev/null | awk '{print $9}' | sed 's/.*://'
+}
 
 missing=()
 for i in {1..$((BIND_TIMEOUT * 5))}; do
@@ -103,7 +109,7 @@ done
 
 gap=$(printf '%.1f' $((EPOCHREALTIME - down)))
 if (( ${#missing} == 0 )); then
-  print -r -- "restart: all ${#want} session(s) back, ${gap}s unbound"
+  print -r -- "restart: all ${#want} session(s) back, ${gap}s not accepting"
 else
   print -r -- "restart: ${gap}s elapsed, ${#missing} session(s) still unbound:" >&2
   for row in $missing; do print -r -- "  port ${row}" >&2; done

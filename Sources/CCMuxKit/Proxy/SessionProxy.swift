@@ -55,6 +55,8 @@ public final class SessionProxy {
     private let relay: UpstreamRelay
 
     public private(set) var port: UInt16 = 0
+    private var serving = 0
+    private let servingLock = NSLock()
 
     /// A specific port to re-bind, used when restoring a session that outlived the
     /// app: the port is baked into that session's ANTHROPIC_BASE_URL and cannot move.
@@ -135,9 +137,23 @@ public final class SessionProxy {
         listener = nil
     }
 
-    /// Requests being served right now. Never call this from the proxy's own queue.
+    /// Requests being served right now.
+    ///
+    /// A counter rather than a walk of `connections`, because the caller is the shutdown
+    /// drain on the main thread and this queue can be busy resolving a credential — a
+    /// blocking token refresh there would stall main for as long as the refresh takes,
+    /// past the deadline after which a restart gives up and sends SIGKILL.
     public func activeRequests() -> Int {
-        queue.sync { connections.values.reduce(0) { $0 + ($1.isServing ? 1 : 0) } }
+        servingLock.lock(); defer { servingLock.unlock() }
+        return serving
+    }
+
+    fileprivate func beganServing() {
+        servingLock.lock(); serving += 1; servingLock.unlock()
+    }
+
+    fileprivate func finishedServing() {
+        servingLock.lock(); serving = max(0, serving - 1); servingLock.unlock()
     }
 
     public enum ProxyError: Error, LocalizedError {
@@ -172,7 +188,9 @@ public final class SessionProxy {
         private var parser = HTTPRequestParser()
         private var pending: [HTTPRequestParser.Request] = []
         private var busy = false
-        fileprivate var isServing: Bool { busy }
+        /// Whether this handler holds a slot in the proxy's counter. Separate from
+        /// `busy` so a teardown that races the completion cannot release it twice.
+        private var counted = false
         private var peerClosed = false
         private var inFlight: URLSessionDataTask?
 
@@ -200,6 +218,7 @@ public final class SessionProxy {
         }
 
         private func teardown() {
+            endServing()
             if let inFlight {
                 self.inFlight = nil
                 proxy?.relay.cancel(inFlight)
@@ -240,9 +259,22 @@ public final class SessionProxy {
             }
         }
 
+        private func beginServing() {
+            guard !counted else { return }
+            counted = true
+            proxy?.beganServing()
+        }
+
+        private func endServing() {
+            guard counted else { return }
+            counted = false
+            proxy?.finishedServing()
+        }
+
         private func pump() {
             guard !busy, !pending.isEmpty, let proxy else { return }
             busy = true
+            beginServing()
             let request = pending.removeFirst()
             proxy.forward(request, on: connection,
                           onCancel: { [weak self] task in self?.inFlight = task }) {
@@ -250,6 +282,7 @@ public final class SessionProxy {
                 guard let self, let proxy = self.proxy else { return }
                 proxy.queue.async {
                     self.busy = false
+                    self.endServing()
                     self.inFlight = nil
                     // A queued request is served regardless; only an empty queue has to
                     // decide between waiting for more bytes and closing.

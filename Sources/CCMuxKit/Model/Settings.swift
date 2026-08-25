@@ -90,6 +90,9 @@ public struct Settings: Codable, Equatable {
     /// Start each account's 5-hour window as soon as it is idle, so the cycle keeps
     /// rolling while you are away and less of it is left to wait out when you return.
     public var keepWindowsRolling: Bool
+    /// Directories whose sessions must launch on a particular account. Launch only —
+    /// see `DirectoryBinding`.
+    public var directoryBindings: [DirectoryBinding]
 
     public init(warnThresholdPercent: Double = 3,
                 budgetWarnPercent: Double = 80,
@@ -100,7 +103,8 @@ public struct Settings: Codable, Equatable {
                 notifyOnAutoSwitch: Bool = true,
                 notifyOnReloginNeeded: Bool = true,
                 mutedAccountIDs: [String] = [],
-                keepWindowsRolling: Bool = true) {
+                keepWindowsRolling: Bool = true,
+                directoryBindings: [DirectoryBinding] = []) {
         self.warnThresholdPercent = warnThresholdPercent
         self.budgetWarnPercent = budgetWarnPercent
         self.upstreamProxy = upstreamProxy
@@ -111,6 +115,7 @@ public struct Settings: Codable, Equatable {
         self.notifyOnReloginNeeded = notifyOnReloginNeeded
         self.mutedAccountIDs = mutedAccountIDs
         self.keepWindowsRolling = keepWindowsRolling
+        self.directoryBindings = directoryBindings
     }
 
     /// See `Policy.init(from:)`: tolerant of keys an older build did not write, so an
@@ -140,6 +145,23 @@ public struct Settings: Codable, Equatable {
             ?? d.mutedAccountIDs
         keepWindowsRolling = try c.decodeIfPresent(Bool.self, forKey: .keepWindowsRolling)
             ?? d.keepWindowsRolling
+        directoryBindings = try c.decodeIfPresent([DirectoryBinding].self,
+                                                  forKey: .directoryBindings)
+            ?? d.directoryBindings
+    }
+
+    /// Replaces any rule for the same directory rather than letting two rules for one
+    /// path both sit in the file, where which one wins would come down to array order.
+    public mutating func bind(_ path: String, to accountID: String) {
+        let key = DirectoryBindings.components(path)
+        directoryBindings.removeAll { DirectoryBindings.components($0.path) == key }
+        directoryBindings.append(DirectoryBinding(path: path, accountID: accountID))
+        directoryBindings.sort { $0.path < $1.path }
+    }
+
+    public mutating func unbind(_ path: String) {
+        let key = DirectoryBindings.components(path)
+        directoryBindings.removeAll { DirectoryBindings.components($0.path) == key }
     }
 
     /// Adds or removes a watched window without letting duplicates into persisted

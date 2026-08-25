@@ -82,14 +82,20 @@ public enum Rebalance {
         // by itself, so a session on one is there because someone put it there.
         guard let current, current.isAutoAssignable else { return .skip(.manualAccount) }
 
+        guard let policy = settings.policy(named: record.policyName) else {
+            return .skip(.noCandidate)
+        }
+
         // Moving mid-turn drops the prompt cache mid-answer. The exception is a session
-        // whose account can no longer serve anything: it has no turn to protect, and it
-        // is the case that leaves a session parked for hours.
-        let stranded = !ModelRouting.canServe(nil, usage: usage[current.id])
+        // its account can no longer serve, which has no turn to protect and is the case
+        // that leaves a session parked for hours. Judged against the windows this
+        // session's own policy gates on: a spent Fable week strands a `cc-fable` session
+        // even though the account still answers everything else.
+        let stranded = PolicyEngine.headroom(for: current, usage: usage[current.id],
+                                             policy: policy) == nil
         if scope != .all, status == "busy", !stranded { return .skip(.busy) }
 
-        guard let policy = settings.policy(named: record.policyName),
-              let pick = PolicyEngine.pick(accounts: assignable, usage: usage,
+        guard let pick = PolicyEngine.pick(accounts: assignable, usage: usage,
                                            policy: policy, applyingLaunchFloors: true)
         else { return .skip(.noCandidate) }
         guard pick.accountID != current.id else { return .skip(.settled) }

@@ -104,14 +104,44 @@ public final class SessionManager: SessionRouting {
 
     /// The single place "which account should this session use" is decided, so a rule
     /// added here applies to launches and to auto-switches alike.
+    ///
+    /// `cwd` is what a directory binding is matched against, and it only ever narrows
+    /// the launch: once a session is running its account may rotate freely, because the
+    /// organization's connectors were already fetched and stay for the session's life.
     public func chooseAccount(policyName: String, excluding excluded: Set<String> = [],
-                              applyingLaunchFloors: Bool = false)
+                              applyingLaunchFloors: Bool = false, cwd: String? = nil)
         throws -> (choice: AccountRanking, warning: String?) {
-        guard let policy = store.currentSettings().policy(named: policyName) else {
+        let settings = store.currentSettings()
+        guard let policy = settings.policy(named: policyName) else {
             throw SessionError.unknownPolicy(policyName)
         }
         let accounts = store.accounts.all().filter(\.isAutoAssignable)
         let usage = store.allUsage()
+
+        switch DirectoryBindings.launch(
+            cwd: cwd, settings: settings,
+            accounts: DirectoryBindings.bindable(store.accounts.all()), usage: usage,
+            policy: policy, excluding: excluded,
+            applyingLaunchFloors: applyingLaunchFloors) {
+        case .use(let bound):
+            return (bound, nil)
+        case .organizationSpent(let org):
+            let elsewhere = try unboundChoice(policy: policy, accounts: accounts,
+                                              usage: usage, excluded: excluded,
+                                              applyingLaunchFloors: applyingLaunchFloors)
+            return (elsewhere.choice, "\(org) has nothing left, so this session started "
+                    + "outside it — connectors approved there will not be available")
+        case .unbound:
+            return try unboundChoice(policy: policy, accounts: accounts, usage: usage,
+                                     excluded: excluded,
+                                     applyingLaunchFloors: applyingLaunchFloors)
+        }
+    }
+
+    private func unboundChoice(policy: Policy, accounts: [Account],
+                               usage: [String: UsageSnapshot], excluded: Set<String>,
+                               applyingLaunchFloors: Bool)
+        throws -> (choice: AccountRanking, warning: String?) {
         if applyingLaunchFloors,
            let clears = PolicyEngine.pick(accounts: accounts, usage: usage, policy: policy,
                                           excluding: excluded, applyingLaunchFloors: true) {
@@ -121,11 +151,11 @@ public final class SessionManager: SessionRouting {
         // exist to pick a good account, not to refuse work when quota is tight.
         guard let fallback = PolicyEngine.rank(accounts: accounts, usage: usage,
                                                policy: policy, excluding: excluded).last else {
-            throw SessionError.noEligibleAccount(policy: policyName)
+            throw SessionError.noEligibleAccount(policy: policy.name)
         }
         let warning = applyingLaunchFloors
             ? String(format: "no account clears the %@ floor; best has %.0f%% left on %@",
-                     policyName, fallback.headroom, fallback.bindingWindow ?? "its limits")
+                     policy.name, fallback.headroom, fallback.bindingWindow ?? "its limits")
             : nil
         return (fallback, warning)
     }
@@ -142,7 +172,8 @@ public final class SessionManager: SessionRouting {
         if let requested {
             accountID = requested
         } else {
-            let chosen = try chooseAccount(policyName: policyName, applyingLaunchFloors: true)
+            let chosen = try chooseAccount(policyName: policyName,
+                                           applyingLaunchFloors: true, cwd: cwd)
             accountID = chosen.choice.accountID
             warning = chosen.warning
         }
@@ -200,8 +231,20 @@ public final class SessionManager: SessionRouting {
         Log.warn("no free port in \(ProxyPorts.range.lowerBound)–"
                  + "\(ProxyPorts.range.upperBound); falling back to an ephemeral one, "
                  + "which may not survive a restart")
-        let proxy = makeProxy(sessionID: sessionID, desiredPort: nil)
-        return (proxy, try proxy.start())
+        // A parked session's port is free right now by definition, and parked ports are
+        // exactly the ephemeral ones. Taking one would make that session unrecoverable,
+        // so a collision is rejected — and the loser is held open until we have a keeper
+        // so the kernel cannot hand back the same number.
+        var rejected: [SessionProxy] = []
+        defer { for proxy in rejected { proxy.stop() } }
+        for _ in 0..<8 {
+            let proxy = makeProxy(sessionID: sessionID, desiredPort: nil)
+            let port = try proxy.start()
+            guard taken.contains(port) else { return (proxy, port) }
+            rejected.append(proxy)
+        }
+        throw SessionError.seedFailed("every port offered is already claimed by another "
+                                      + "session; try again in a moment")
     }
 
     private func makeProxy(sessionID: String, desiredPort: UInt16?) -> SessionProxy {

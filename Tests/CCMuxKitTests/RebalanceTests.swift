@@ -145,4 +145,25 @@ struct RebalanceTests {
         #expect(Rebalance.report(moved: 2, failed: 1, skipped: ["a": .pinned])
             == "Moved 2 sessions. 1 could not be moved. Left alone: 1 auto-switch off.")
     }
+
+    /// The escape hatch that rescues a parked session has to be judged on the windows
+    /// the session's own policy gates on. A spent Fable week strands a `cc-fable`
+    /// session even though its account still answers everything else — and a parked
+    /// session reports `busy` while it retries, so without this it is skipped as
+    /// mid-turn exactly when it most needs moving.
+    @Test func aFableSessionStrandedByItsScopedWindowIsStillRescued() {
+        let accounts = [PolicyEngineTests.account("a"), PolicyEngineTests.account("b")]
+        let usage = ["a": PolicyEngineTests.snapshot(session: 0, weekly: 0, fable: 0),
+                     "b": PolicyEngineTests.snapshot(session: 0, weekly: 0, fable: 100)]
+        let records = [Self.session("s1", on: "b", policy: "fable")]
+        let busy = Self.live(1, "busy")
+
+        #expect(Self.plan(records, accounts, usage, scope: .idle, live: busy).moves
+                == [Rebalance.Move(sessionID: "s1", from: "b", to: "a")])
+        // An account that can still serve the policy is left alone while it is mid-turn.
+        let healthy = ["a": PolicyEngineTests.snapshot(session: 0, weekly: 0, fable: 0),
+                       "b": PolicyEngineTests.snapshot(session: 0, weekly: 0, fable: 40)]
+        #expect(Self.plan(records, accounts, healthy, scope: .idle, live: busy)
+            .skipped["s1"] == .busy)
+    }
 }

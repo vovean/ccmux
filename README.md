@@ -126,8 +126,44 @@ weekly-per-model when the plan has one) with the reset countdown.
 session's account from the picker and it takes effect on that session's next request.
 Sessions started as plain `claude` are listed too, marked as not managed.
 
-**Settings** — warning threshold, which windows it watches, auto-switch behaviour, and
-the Chrome profile each account's login page opens in.
+**Settings** — warning threshold, which windows it watches, auto-switch behaviour, the
+Chrome profile each account's login page opens in, and the project-to-account bindings
+below.
+
+The Sessions screen also has a **Reassign** menu, which re-picks accounts for sessions
+that are already running, as if they were launching now — either only the idle ones, or
+all of them including mid-turn. Nothing does this on a timer: a session moves when it is
+refused, or when you ask. It leaves alone any session whose auto-switch you turned off,
+and any session on an account ccmux would never choose by itself (an API key, or one
+held out of rotation), since those were put there deliberately.
+
+## Projects that need a particular account
+
+Connectors — the Slack, Drive and Jira integrations an administrator approves — belong
+to an Anthropic **organization**, not to you. Claude Code fetches the list once at
+startup, using the credential in its namespace. So the account a session *launches* on
+fixes its connector set for the session's whole life: reassigning it later cannot add
+them, and rotating it away cannot take them away.
+
+That last part is what makes this workable. Bind a directory to an account in
+Settings → **Project accounts**, and a session started anywhere under it launches in
+that organization — then rotates for quota exactly as any other session does, keeping
+the connectors it started with.
+
+    ~/work/acme      → the account whose organization approved Slack
+
+The deepest matching rule wins, so a subproject can override its parent, and matching is
+per path component: a rule on `~/work/acme` never captures `~/work/acme-legacy`. A
+binding names one account but means its whole organization, so a second seat in the same
+organization is an equally good launch and ranking picks between them as usual. If every
+account in that organization is spent, the session starts elsewhere rather than refusing
+to start, and says so.
+
+A binding reaches an account you have held **out of rotation** — "never pick this on
+your own, except here" is the point of pairing the two. It will not reach an API key:
+spending money stays a per-session decision.
+
+`ccmux run --account <id>` overrides any binding, for a one-off.
 
 ## Running out
 
@@ -222,4 +258,13 @@ hands out session tokens, so it is not a TCP port.
     swift build
     make test      # plain `swift test` fails on a CLT-only machine
     make app       # dist/ccmux.app
+    make restart   # restart without losing live sessions
+    make upgrade   # install, then that restart
     make icon      # re-renders Resources/AppIcon.icns from Sources/CCMuxKit/UI/IconArt.swift
+
+Restarting deserves the dedicated target. Every live session's proxy port is written into
+its `ANTHROPIC_BASE_URL` and cannot move, so a restart has to give each one its port
+back. `make restart` waits for the app to exit rather than sleeping, relaunches, and then
+verifies every session's port is listening again — and the app drains in-flight requests
+on SIGTERM instead of severing them. A port that is momentarily taken no longer ends the
+session: it is parked, retried every few seconds, and shown as such on its card.

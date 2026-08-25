@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct SettingsPage: View {
@@ -15,6 +16,7 @@ struct SettingsPage: View {
                 signInBrowser
                 upstreamProxySection
                 policies
+                directoryBindings
                 paths
             }
             .padding(14)
@@ -164,6 +166,83 @@ struct SettingsPage: View {
                     .foregroundStyle(.tertiary)
             }
         }
+    }
+
+    /// Connectors an admin approves live on an Anthropic organization, and Claude Code
+    /// reads the list once at startup from whichever account it launched on. Binding a
+    /// project to an account is what makes that come out right without a flag.
+    @ViewBuilder
+    private var directoryBindings: some View {
+        section("Project accounts") {
+            Text("A session started in one of these directories launches on the account "
+                 + "named here, or another account in the same organization. This applies "
+                 + "at launch only — the session still rotates for quota afterwards, and "
+                 + "keeps the connectors its organization approved when it does.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            ForEach(engine.settings.directoryBindings) { binding in
+                bindingRow(binding)
+            }
+            if engine.settings.directoryBindings.isEmpty {
+                Text("No directories bound. Every session launches on whichever account "
+                     + "its policy ranks first.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            HStack {
+                Spacer()
+                Button("Bind a directory…") { chooseDirectory() }
+                    .controlSize(.small)
+                    .disabled(DirectoryBindings.bindable(engine.accounts).isEmpty)
+            }
+        }
+    }
+
+    private func bindingRow(_ binding: DirectoryBinding) -> some View {
+        HStack(spacing: 8) {
+            Text(Format.shortenHome(binding.path))
+                .font(.caption.monospaced())
+                .lineLimit(1)
+                .truncationMode(.head)
+            Spacer(minLength: 12)
+            Picker("", selection: Binding(
+                get: { binding.accountID },
+                set: { engine.bindDirectory(binding.path, to: $0) })) {
+                // API keys are absent on purpose: a binding must not be a way to spend
+                // money on every session started in a directory.
+                ForEach(DirectoryBindings.bindable(engine.accounts)) { account in
+                    Text(account.organizationName ?? account.displayName).tag(account.id)
+                }
+                // A rule naming an account that has since been removed stays visible and
+                // selectable rather than silently snapping to a different organization.
+                if !engine.accounts.contains(where: { $0.id == binding.accountID }) {
+                    Text("removed account").tag(binding.accountID)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 190)
+            Button {
+                engine.unbindDirectory(binding.path)
+            } label: {
+                Image(systemName: "minus.circle")
+            }
+            .buttonStyle(.plain)
+            .help("Remove this binding")
+        }
+    }
+
+    private func chooseDirectory() {
+        guard let account = DirectoryBindings.bindable(engine.accounts).first else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Bind"
+        panel.message = "Sessions started in this directory launch on the account you pick."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        engine.bindDirectory(url.path, to: account.id)
     }
 
     @ViewBuilder

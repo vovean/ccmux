@@ -83,7 +83,11 @@ struct RestartSafetyTests {
 
         try #require(Self.waitUntil { proxy.activeRequests() == 1 })
         proxy.quiesce()
-        #expect(!Self.canConnect(port: port))
+        // `NWListener.cancel()` is asynchronous, so the port keeps accepting for a
+        // moment. That is harmless — a connection accepted in that window is counted by
+        // `activeRequests` and the drain waits for it too — but it means the cutoff has
+        // to be waited for rather than asserted on the next line.
+        #expect(Self.waitUntil { !Self.canConnect(port: port) })
 
         #expect(done.wait(timeout: .now() + 10) == .success)
         let body = received.get()

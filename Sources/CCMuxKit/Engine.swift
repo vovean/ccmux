@@ -626,9 +626,18 @@ public final class Engine: ObservableObject {
                          + "\(error.localizedDescription)")
             }
         }
-        banner = Banner(level: failed > 0 ? .warning : .info,
-                        text: Rebalance.report(moved: moved, failed: failed,
-                                               skipped: plan.skipped))
+        let report = Rebalance.report(moved: moved, failed: failed, skipped: plan.skipped)
+        // A plain info banner here would replace a blocked-session warning with one that
+        // carries no source, so `retractBanner` could never bring the warning back and
+        // the blocked session would go unannounced until its next refusal.
+        if let stuck = blocks.all.first {
+            banner = Banner(level: .warning,
+                            text: report + " \(displayName(stuck.accountID)) is still out "
+                                + "of headroom; \(sessionLabel(stuck.sessionID)) is blocked.",
+                            source: .blockedSession(stuck.sessionID))
+        } else {
+            banner = Banner(level: failed > 0 ? .warning : .info, text: report)
+        }
     }
 
     /// What a reassign would do right now, so the menu can name the number instead of
@@ -932,6 +941,16 @@ public final class Engine: ObservableObject {
         } catch {
             return "Proxy failed: \(error.localizedDescription)"
         }
+    }
+
+    /// Directories bound to an account, newest rules resolved the same way a launch
+    /// resolves them, so the screen lists exactly what a session would get.
+    public func bindDirectory(_ path: String, to accountID: String) {
+        updateSettings { $0.bind(path, to: accountID) }
+    }
+
+    public func unbindDirectory(_ path: String) {
+        updateSettings { $0.unbind(path) }
     }
 
     public func setInRotation(_ inRotation: Bool, for accountID: String) {
