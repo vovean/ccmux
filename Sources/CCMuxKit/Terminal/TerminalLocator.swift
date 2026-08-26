@@ -90,23 +90,39 @@ public enum TerminalLocator {
 
     /// Walks panes, not just tabs, so a session in a split is found and its pane is the
     /// one left selected.
+    ///
+    /// Two rules here are load-bearing, both learned by watching it pick the wrong tab:
+    ///
+    /// 1. Nothing is selected while the loops are running. `repeat with t in tabs of w`
+    ///    binds a *positional* reference — "tab 3 of window 2" — not a stable object, so
+    ///    any mutation mid-iteration re-points every remaining reference.
+    /// 2. The window is selected last. Raising a window renumbers `windows`, which
+    ///    invalidates the tab and pane references; done last there is nothing left to
+    ///    invalidate. Selecting only the pane is not enough — it does not change which
+    ///    tab is current.
     public static func script(for handle: Handle) -> String {
         """
         tell application "iTerm2"
+          set targetWindow to missing value
+          set targetTab to missing value
+          set targetSession to missing value
           repeat with w in windows
             repeat with t in tabs of w
               repeat with s in sessions of t
                 if (\(handle.property) of s) is "\(handle.value)" then
-                  select w
-                  select t
-                  select s
-                  activate
-                  return "opened"
+                  set targetWindow to w
+                  set targetTab to t
+                  set targetSession to s
                 end if
               end repeat
             end repeat
           end repeat
-          return "notfound"
+          if targetSession is missing value then return "notfound"
+          select targetTab
+          select targetSession
+          select targetWindow
+          activate
+          return "opened"
         end tell
         """
     }

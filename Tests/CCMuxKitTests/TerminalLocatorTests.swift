@@ -99,10 +99,29 @@ struct TerminalLocatorTests {
         }
     }
 
+    /// Regression: it selected the wrong tab whenever the target window was not already
+    /// frontmost. `repeat with t in tabs of w` binds "tab 3 of window 2", not a stable
+    /// object, so selecting the window mid-loop renumbered `windows` and every reference
+    /// after it pointed somewhere else. Discovery must finish before anything is
+    /// selected, and the window — the only step that renumbers — must come last.
+    @Test func nothingIsSelectedUntilTheSearchIsOver() throws {
+        let script = TerminalLocator.script(for: .tty("/dev/ttys003"))
+        let firstSelect = try #require(script.range(of: "select "))
+        let loopsEnd = try #require(script.range(of: "if targetSession is missing value"))
+        #expect(firstSelect.lowerBound > loopsEnd.lowerBound)
+
+        let tab = try #require(script.range(of: "select targetTab"))
+        let pane = try #require(script.range(of: "select targetSession"))
+        let window = try #require(script.range(of: "select targetWindow"))
+        #expect(tab.lowerBound < pane.lowerBound)
+        #expect(pane.lowerBound < window.lowerBound)
+    }
+
     @Test func theScriptComparesTheRightProperty() {
         let byID = TerminalLocator.script(for: .session("ABC12345-DEAD-BEEF"))
         #expect(byID.contains("(unique id of s) is \"ABC12345-DEAD-BEEF\""))
         #expect(byID.contains("sessions of t"))   // splits are walked, not just tabs
+        #expect(byID.contains("return \"notfound\""))
         #expect(byID.contains("activate"))
 
         let byTTY = TerminalLocator.script(for: .tty("/dev/ttys005"))

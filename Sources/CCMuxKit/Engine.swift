@@ -719,8 +719,10 @@ public final class Engine: ObservableObject {
         // Off the main thread on purpose. The first press raises the Automation consent
         // dialog, and `osascript` does not return until it is answered — on main that
         // freezes the whole window behind the very prompt asking to proceed.
+        let label = sessionLabel(forPID: pid)
         Task.detached {
             let outcome = TerminalOpener.open(pid: pid)
+            Log.info("reveal \(label) (pid \(pid)) -> \(outcome)")
             guard let message = outcome.message else { return }
             await MainActor.run { [weak self] in
                 self?.raise(message, level: .warning,
@@ -1074,6 +1076,14 @@ public final class Engine: ObservableObject {
 
     public func claudeSession(forPID pid: Int32) -> ClaudeSessionInfo? {
         claudeSessions.first { $0.pid == pid }
+    }
+
+    /// The name on the card for a pid, managed or not.
+    public func sessionLabel(forPID pid: Int32) -> String {
+        claudeSession(forPID: pid)?.name
+            ?? store.sessions.all().first { $0.pid == pid }
+                .map { Format.shortenHome($0.cwd) }
+            ?? "pid \(pid)"
     }
 
     /// How a session is named on its card, so every other mention of it — curtain row,
