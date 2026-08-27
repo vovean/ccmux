@@ -71,6 +71,11 @@ connection. Then:
 cd ccmuxd && docker compose up -d
 ```
 
+The compose file runs the container as whoever owns `data/`. That directory is 0700 and
+holds every refresh lineage, so the alternatives were chowning it to the image's own uid
+(needs root) or making it world-readable (defeats the sealing). Run the install script as
+an ordinary user, not root.
+
 The script prints the password **once** and the certificate fingerprint. Delete
 `data/auth` and rerun it to issue a new password.
 
@@ -140,7 +145,10 @@ Worth knowing before you rely on it.
 1. **The server is now a dependency.** If it is down, new sessions on delegated accounts
    cannot start, and running ones stop when their cached access token expires (about an
    hour). The client keeps the last token and its expiry, so a brief outage is invisible; a
-   long one is not.
+   long one is not. An unreachable server is treated as a *transient* failure and never
+   marks an account as needing re-login — and a delegated account will not fall back to a
+   local refresh grant, because its credential has no refresh token and the attempt would
+   fail permanently.
 2. **Refresh and inference come from different IPs.** Anthropic sees token refreshes from
    the server and inference from laptops, on the same account. On company accounts under a
    CISO's eye, that is the limitation to weigh hardest.
