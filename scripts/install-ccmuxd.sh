@@ -1,63 +1,93 @@
 #!/usr/bin/env bash
 # Prepares a host to run ccmuxd: a self-signed certificate covering however you reach the
-# box, a basic-auth credential, and a compose file to run it with.
+# box, a basic-auth credential, and either a compose file or a systemd unit.
 #
 # Host-agnostic on purpose — pass the names and addresses you will actually use:
 #   ./install-ccmuxd.sh --dns ccmux.example.com --ip 203.0.113.10
+#   ./install-ccmuxd.sh --mode systemd --binary ./ccmuxd --ip 10.9.0.1 --bind 10.9.0.1
 #
-# Run it on the server. It writes to ./ccmuxd by default and starts nothing.
+# Run it on the server. Docker mode writes to ./ccmuxd and starts nothing; systemd mode
+# needs root, installs system-wide, and enables the service.
 set -euo pipefail
 
+MODE=docker
 DNS_NAMES=()
 IP_ADDRS=()
 TARGET="$(pwd)/ccmuxd"
 PORT=8443
+BIND=0.0.0.0
 IMAGE=ccmuxd:latest
 USERNAME=ccmux
+BINARY=""
+# The box this was written for has 961 MB of RAM shared with the VPN machinery. A cap
+# means ccmuxd can never be the reason the OOM killer reaches for something else.
+MEMORY_MAX=192M
 
 usage() {
   cat <<'EOF'
 install-ccmuxd.sh — set up a ccmux account server
 
-  --dns NAME       DNS name clients will use (repeatable)
-  --ip ADDR        IP address clients will use (repeatable)
-  --dir PATH       where to write config and data (default ./ccmuxd)
-  --port N         port to publish (default 8443)
-  --image NAME     container image to run (default ccmuxd:latest)
-  --user NAME      basic-auth username (default ccmux)
+  --mode docker|systemd   how to run it (default docker)
+  --dns NAME              DNS name clients will use (repeatable)
+  --ip ADDR               IP address clients will use (repeatable)
+  --port N                port to listen on (default 8443)
+  --bind ADDR             address to bind (default 0.0.0.0; systemd mode only)
+  --user NAME             basic-auth username (default ccmux)
+
+docker mode:
+  --dir PATH              where to write config and data (default ./ccmuxd)
+  --image NAME            container image to run (default ccmuxd:latest)
+
+systemd mode (needs root):
+  --binary PATH           the ccmuxd binary to install
+  --memory-max SIZE       systemd MemoryMax (default 192M)
 
 At least one --dns or --ip is required: they become the certificate's SANs, and a
 client that reaches the server by a name the certificate does not cover will refuse
 the connection.
-
-Build the image first, from the repository root:
-  docker build -f server/Dockerfile -t ccmuxd .
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --mode) MODE="$2"; shift 2 ;;
     --dns) DNS_NAMES+=("$2"); shift 2 ;;
     --ip) IP_ADDRS+=("$2"); shift 2 ;;
     --dir) TARGET="$2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
+    --bind) BIND="$2"; shift 2 ;;
     --image) IMAGE="$2"; shift 2 ;;
     --user) USERNAME="$2"; shift 2 ;;
+    --binary) BINARY="$2"; shift 2 ;;
+    --memory-max) MEMORY_MAX="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "install-ccmuxd: unknown flag $1" >&2; usage >&2; exit 2 ;;
   esac
 done
 
+case "$MODE" in docker|systemd) ;; *)
+  echo "install-ccmuxd: --mode must be docker or systemd" >&2; exit 2 ;;
+esac
 if [[ ${#DNS_NAMES[@]} -eq 0 && ${#IP_ADDRS[@]} -eq 0 ]]; then
   echo "install-ccmuxd: pass at least one --dns or --ip" >&2
   exit 2
 fi
 command -v openssl >/dev/null || { echo "install-ccmuxd: openssl is required" >&2; exit 1; }
 
-CERTS="$TARGET/certs"
-DATA="$TARGET/data"
+if [[ "$MODE" == systemd ]]; then
+  [[ $EUID -eq 0 ]] || { echo "install-ccmuxd: systemd mode needs root" >&2; exit 1; }
+  [[ -n "$BINARY" && -f "$BINARY" ]] || {
+    echo "install-ccmuxd: --binary PATH is required in systemd mode" >&2; exit 1; }
+  CERTS=/etc/ccmuxd
+  DATA=/var/lib/ccmuxd
+else
+  CERTS="$TARGET/certs"
+  DATA="$TARGET/data"
+fi
+
 mkdir -p "$CERTS" "$DATA"
-chmod 700 "$TARGET" "$CERTS" "$DATA"
+[[ "$MODE" == docker ]] && chmod 700 "$TARGET"
+chmod 700 "$CERTS" "$DATA"
 
 # --- certificate -------------------------------------------------------------
 # Both spellings go in as SANs so one certificate serves the DNS name and the raw
@@ -92,18 +122,73 @@ else
   chmod 600 "$DATA/auth"
 fi
 
-# --- compose -----------------------------------------------------------------
-# The container runs as whoever owns these files, rather than the image's own user.
-# data/ is 0700 and holds every refresh lineage, so the alternative is either chowning it
-# to the image's uid (needs root) or loosening it to world-readable (defeats the point).
-RUN_UID="$(id -u)"
-RUN_GID="$(id -g)"
-if [[ "$RUN_UID" == "0" ]]; then
-  echo "install-ccmuxd: WARNING — run as an ordinary user, not root; the container would" >&2
-  echo "                run as root too. Re-run as a normal user for a smaller blast radius." >&2
-fi
+if [[ "$MODE" == systemd ]]; then
+  # --- systemd -----------------------------------------------------------------
+  id -u ccmuxd >/dev/null 2>&1 || \
+    useradd --system --no-create-home --shell /usr/sbin/nologin ccmuxd
+  install -m 0755 "$BINARY" /usr/local/bin/ccmuxd
+  chown -R ccmuxd:ccmuxd "$DATA"
+  chown ccmuxd:ccmuxd "$CERTS/key.pem"
 
-cat > "$TARGET/docker-compose.yml" <<EOF
+  cat > /etc/systemd/system/ccmuxd.service <<EOF
+[Unit]
+Description=ccmux account server
+Documentation=https://github.com/vovean/ccmux/blob/master/docs/server.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=ccmuxd
+Group=ccmuxd
+ExecStart=/usr/local/bin/ccmuxd --data-dir $DATA --cert $CERTS/cert.pem \\
+  --key $CERTS/key.pem --host $BIND --port $PORT
+Restart=on-failure
+RestartSec=5
+
+# It holds every refresh lineage, so it gets as little of the machine as it can work with.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=$DATA
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+
+# A hard ceiling, so ccmuxd can never be the reason the OOM killer reaches for whatever
+# else this box is running.
+MemoryMax=$MEMORY_MAX
+MemoryHigh=128M
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable --now ccmuxd >/dev/null 2>&1 || systemctl enable --now ccmuxd
+  sleep 2
+  systemctl --no-pager --lines=0 status ccmuxd | head -4 || true
+else
+  # --- compose -----------------------------------------------------------------
+  # The container runs as whoever owns these files, rather than the image's own user.
+  # data/ is 0700 and holds every refresh lineage, so the alternative is either chowning it
+  # to the image's uid (needs root) or loosening it to world-readable (defeats the point).
+  RUN_UID="$(id -u)"
+  RUN_GID="$(id -g)"
+  if [[ "$RUN_UID" == "0" ]]; then
+    echo "install-ccmuxd: WARNING — run as an ordinary user, not root; the container would" >&2
+    echo "                run as root too. Re-run as a normal user for a smaller blast radius." >&2
+  fi
+
+  cat > "$TARGET/docker-compose.yml" <<EOF
 services:
   ccmuxd:
     image: $IMAGE
@@ -116,15 +201,18 @@ services:
       - ./data:/var/lib/ccmuxd
       - ./certs:/etc/ccmuxd:ro
 EOF
+fi
 
 FINGERPRINT="$(openssl x509 -in "$CERTS/cert.pem" -noout -fingerprint -sha256 \
   | sed 's/.*=//')"
 
+echo
+if [[ "$MODE" == systemd ]]; then
+  echo "  Running as a systemd service:  systemctl status ccmuxd"
+else
+  echo "  Ready. From $TARGET:  docker compose up -d"
+fi
 cat <<EOF
-
-  Ready. From $TARGET:
-
-    docker compose up -d
 
   Point ccmux at it on each Mac — Settings → Account server:
 
