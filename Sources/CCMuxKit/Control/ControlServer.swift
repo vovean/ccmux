@@ -99,8 +99,19 @@ public final class ControlServer {
         }
     }
 
-    /// Whether something is actually accepting on this socket path.
-    private func isLive(path: String) -> Bool {
+    /// Whether another ccmux already owns the control socket.
+    ///
+    /// A far stronger interlock than asking LaunchServices whether a second copy of the
+    /// app is running: this is the resource that genuinely cannot be shared, and a
+    /// successful connect is proof rather than a report. A stale file left by a crash
+    /// accepts no connection and so does not count.
+    public static func anotherInstanceIsRunning() -> Bool {
+        isLive(path: Paths.controlSocket.path)
+    }
+
+    private func isLive(path: String) -> Bool { Self.isLive(path: path) }
+
+    private static func isLive(path: String) -> Bool {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return false }
         defer { close(fd) }

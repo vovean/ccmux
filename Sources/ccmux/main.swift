@@ -35,17 +35,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // A Dock-less .accessory app can be launched a second time rather than
         // reactivated. Hand the request to the instance that already owns the proxies
         // and control socket, and get out of the way.
-        if let bundleID = Bundle.main.bundleIdentifier {
-            let mine = ProcessInfo.processInfo.processIdentifier
-            let others = NSRunningApplication
-                .runningApplications(withBundleIdentifier: bundleID)
-                .filter { $0.processIdentifier != mine }
-            if !others.isEmpty {
-                DistributedNotificationCenter.default().postNotificationName(
-                    .ccmuxShowWindow, object: nil, userInfo: nil, deliverImmediately: true)
-                NSApp.terminate(nil)
-                return
-            }
+        //
+        // The control socket is asked as well as LaunchServices, and before anything
+        // else runs. LaunchServices has been seen not to report a running copy, and the
+        // second instance then got far enough to park every live session, spend the
+        // startup writing to shared state, and put an alarming banner on a window the
+        // user did not ask for. Connecting to the socket cannot be wrong about it: it is
+        // the one resource two instances genuinely cannot share, and a file left behind
+        // by a crash accepts no connection.
+        if isAnotherInstanceRunning() {
+            DistributedNotificationCenter.default().postNotificationName(
+                .ccmuxShowWindow, object: nil, userInfo: nil, deliverImmediately: true)
+            NSApp.terminate(nil)
+            return
         }
 
         DistributedNotificationCenter.default().addObserver(
@@ -68,6 +70,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             showWindow()
         }
         didFinishLaunching = true
+    }
+
+    private func isAnotherInstanceRunning() -> Bool {
+        if ControlServer.anotherInstanceIsRunning() { return true }
+        guard let bundleID = Bundle.main.bundleIdentifier else { return false }
+        let mine = ProcessInfo.processInfo.processIdentifier
+        return NSRunningApplication
+            .runningApplications(withBundleIdentifier: bundleID)
+            .contains { $0.processIdentifier != mine }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
