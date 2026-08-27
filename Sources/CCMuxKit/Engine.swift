@@ -681,9 +681,13 @@ public final class Engine: ObservableObject {
 
     private func handleRefreshFailure(_ accountID: String, _ error: OAuthError) {
         guard error.isPermanent else {
+            // A delegated account is renewed from ccmuxd, so blaming Anthropic would send
+            // you looking in the wrong place.
+            let upstream = settings.delegated.contains(accountID)
+                ? "the account server" : "Anthropic"
             banner = Banner(level: .warning,
-                            text: "Could not reach Anthropic for \(displayName(accountID)): "
-                                + error.localizedDescription)
+                            text: "Could not reach \(upstream) for "
+                                + "\(displayName(accountID)): \(error.localizedDescription)")
             return
         }
         guard store.accounts.get(accountID)?.health != .needsRelogin else { return }
