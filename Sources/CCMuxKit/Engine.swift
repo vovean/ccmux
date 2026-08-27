@@ -52,6 +52,10 @@ public final class Engine: ObservableObject {
     private let notifier = Notifier()
     var client = OAuthClient()
     lazy var sessionManager = SessionManager(store: store, vault: vault)
+    /// Held rather than rebuilt per call: a URLSession with a delegate retains it until
+    /// invalidated, so handing out a new client on every access leaked a session and a
+    /// pinning delegate each time. Rebuilt only when the connection settings change.
+    var serverClientCache: (connection: ServerConnection, client: ServerClient)?
     private var controlHandler: ControlHandler?
     private var controlServer: ControlServer?
     private var timers: [Timer] = []

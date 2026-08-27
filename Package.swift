@@ -13,6 +13,8 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "CCMuxCore", targets: ["CCMuxCore"]),
+        // Exposed for the server package's end-to-end test, which drives the real client.
+        .library(name: "CCMuxKit", targets: ["CCMuxKit"]),
     ],
     dependencies: [
         // Linux only: CryptoKit covers macOS, and building swift-crypto there would slow

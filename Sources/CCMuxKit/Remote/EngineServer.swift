@@ -13,11 +13,19 @@ public extension Engine {
     // MARK: - Connecting
 
     var serverClient: ServerClient? {
-        guard let connection = settings.server,
-              let url = URL(string: connection.url),
+        guard let connection = settings.server else {
+            serverClientCache = nil
+            return nil
+        }
+        if let cached = serverClientCache, cached.connection == connection {
+            return cached.client
+        }
+        guard let url = URL(string: connection.url),
               let password = (try? ServerPasswordStore.read()) ?? nil else { return nil }
-        return ServerClient(baseURL: url, username: connection.username,
-                            password: password, fingerprint: connection.fingerprint)
+        let client = ServerClient(baseURL: url, username: connection.username,
+                                  password: password, fingerprint: connection.fingerprint)
+        serverClientCache = (connection, client)
+        return client
     }
 
     var isConnectedToServer: Bool { settings.server != nil }
@@ -110,6 +118,7 @@ public extension Engine {
             $0.delegatedAccountIDs = []
         }
         try? ServerPasswordStore.write(nil)
+        serverClientCache = nil
         vault.setRemote(nil, delegated: [])
         delegationPlan = nil
         banner = stranded.isEmpty

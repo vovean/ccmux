@@ -4,7 +4,7 @@ SWIFT_TEST_FLAGS = --disable-xctest --enable-swift-testing \
 	-Xlinker -F -Xlinker $(FW) -Xlinker -rpath -Xlinker $(FW)
 
 .PHONY: build app icon test install run restart upgrade clean install-agent \
-	uninstall-agent release publish
+	uninstall-agent release publish test-server build-server ccmuxd-image
 
 build:
 	swift build
@@ -17,6 +17,19 @@ app:
 
 test:
 	swift test $(SWIFT_TEST_FLAGS)
+
+# The server is its own package: Hummingbird and NIO must not land in the app's build,
+# because `publish` guards on a zero-warning clean build and third-party warnings would
+# fail a release that has nothing to do with them.
+build-server:
+	cd server && swift build
+
+test-server:
+	cd server && swift test $(SWIFT_TEST_FLAGS)
+
+# Build context is the repo root — ccmuxd depends on CCMuxCore by path.
+ccmuxd-image:
+	docker build -f server/Dockerfile -t ccmuxd:latest .
 
 install: app
 	rm -rf /Applications/ccmux.app

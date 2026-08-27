@@ -1,7 +1,7 @@
 import CCMuxCore
 import Foundation
 
-public enum ServerClientError: Error, LocalizedError {
+public enum ServerClientError: Error, LocalizedError, Equatable {
     case unauthorized
     case certificateMismatch(expected: String, got: String)
     case http(Int, String)
@@ -99,7 +99,7 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
     // MARK: - Endpoints
 
     public func health() async throws -> HealthResponse {
-        let response: HealthResponse = try await get("health")
+        let response: HealthResponse = try await get(["health"])
         guard response.apiVersion == ServerAPI.version else {
             throw ServerClientError.incompatible(response.apiVersion)
         }
@@ -107,7 +107,7 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
     }
 
     public func accounts() async throws -> [RemoteAccount] {
-        let response: AccountListResponse = try await get("accounts")
+        let response: AccountListResponse = try await get(["accounts"])
         guard response.apiVersion == ServerAPI.version else {
             throw ServerClientError.incompatible(response.apiVersion)
         }
@@ -115,44 +115,49 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
     }
 
     public func grant(for accountID: String) async throws -> TokenGrant {
-        try await get("accounts/\(escaped(accountID))/token")
+        try await get(["accounts", accountID, "token"])
     }
 
     public func usage(for accountID: String) async throws -> RemoteUsage {
-        try await get("accounts/\(escaped(accountID))/usage")
+        try await get(["accounts", accountID, "usage"])
     }
 
     public func startLogin(_ body: LoginStartRequest) async throws -> LoginStartResponse {
-        try await post("login/start", body)
+        try await post(["login", "start"], body)
     }
 
     public func finishLogin(_ body: LoginFinishRequest) async throws -> RemoteAccount {
-        try await post("login/finish", body)
+        try await post(["login", "finish"], body)
     }
 
     public func adopt(_ body: AdoptRequest) async throws -> RemoteAccount {
-        try await post("accounts/adopt", body)
+        try await post(["accounts", "adopt"], body)
     }
 
     // MARK: - Transport
 
-    private func escaped(_ component: String) -> String {
-        component.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? component
+    /// Built one component at a time and left to Foundation to encode. Escaping them by
+    /// hand first meant `appendingPathComponent` encoded the `%` again, so an account id
+    /// arrived as `39220F76%252D23E7…` and every token request 404'd.
+    private func url(_ components: [String]) -> URL {
+        components.reduce(baseURL.appendingPathComponent("v1")) {
+            $0.appendingPathComponent($1)
+        }
     }
 
-    private func get<Response: Decodable>(_ path: String) async throws -> Response {
+    private func get<Response: Decodable>(_ path: [String]) async throws -> Response {
         try await send(request(path, method: "GET", body: nil))
     }
 
-    private func post<Body: Encodable, Response: Decodable>(_ path: String,
+    private func post<Body: Encodable, Response: Decodable>(_ path: [String],
                                                             _ body: Body) async throws
         -> Response {
         try await send(request(path, method: "POST",
                                body: try JSONStore.encoder.encode(body)))
     }
 
-    private func request(_ path: String, method: String, body: Data?) -> URLRequest {
-        var request = URLRequest(url: baseURL.appendingPathComponent("v1/\(path)"))
+    private func request(_ path: [String], method: String, body: Data?) -> URLRequest {
+        var request = URLRequest(url: url(path))
         request.httpMethod = method
         let basic = Data("\(username):\(password)".utf8).base64EncodedString()
         request.setValue("Basic \(basic)", forHTTPHeaderField: "Authorization")
@@ -180,7 +185,7 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
         if status == 401 { throw ServerClientError.unauthorized }
         guard (200..<300).contains(status) else {
             let message = (try? JSONStore.decoder.decode(ServerErrorResponse.self,
-                                                         from: data))?.error
+                                                         from: data))?.message
                 ?? String(decoding: data.prefix(300), as: UTF8.self)
             throw ServerClientError.http(status, message)
         }

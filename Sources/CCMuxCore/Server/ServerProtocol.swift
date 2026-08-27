@@ -196,9 +196,19 @@ public struct HealthResponse: Codable, Equatable, Sendable {
     }
 }
 
+/// The shape Hummingbird actually emits for an `HTTPError`: `{"error":{"message":"…"}}`.
+/// Measured against a running ccmuxd — a flat `{"error":"…"}` decodes to nothing and the
+/// client would show the raw JSON instead of the message.
 public struct ServerErrorResponse: Codable, Equatable, Sendable {
-    public var error: String
-    public init(error: String) { self.error = error }
+    public struct Detail: Codable, Equatable, Sendable {
+        public var message: String?
+        public init(message: String?) { self.message = message }
+    }
+    public var error: Detail
+
+    public init(message: String) { self.error = Detail(message: message) }
+
+    public var message: String? { error.message }
 }
 
 public extension String {

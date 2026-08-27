@@ -41,7 +41,15 @@ let package = Package(
         ),
         .testTarget(
             name: "ccmuxdTests",
-            dependencies: ["CCMuxDaemonKit", .product(name: "CCMuxCore", package: "CCMux")],
+            dependencies: [
+                "CCMuxDaemonKit",
+                .product(name: "CCMuxCore", package: "CCMux"),
+                // The real client, so one test can drive the actual pinning, basic-auth
+                // and JSON paths against a real server instead of approximating them.
+                .product(name: "CCMuxKit", package: "CCMux"),
+                .product(name: "HummingbirdTLS", package: "hummingbird"),
+                .product(name: "NIOSSL", package: "swift-nio-ssl"),
+            ],
             path: "Tests/ccmuxdTests",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),

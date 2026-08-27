@@ -32,6 +32,15 @@ private struct ForbiddenTransport: HTTPTransport {
     }
 }
 
+/// A canned token response. Deliberately not `StubURLProtocol`: that registers a single
+/// process-wide responder, so two suites using it run into each other's answers.
+private struct CannedTransport: HTTPTransport {
+    let body: String
+    func send(_ spec: HTTPRequestSpec) async throws -> HTTPReply {
+        HTTPReply(status: 200, body: Data(body.utf8))
+    }
+}
+
 @Suite("Delegated vault", .serialized)
 struct DelegatedVaultTests {
     /// The failure this prevents: a delegated credential carries no refresh token, so a
@@ -67,10 +76,9 @@ struct DelegatedVaultTests {
             Issue.record("the server was asked about an account that was never delegated")
             return TokenGrant(accountID: "x", kind: .subscription)
         }
-        let transport = StubURLProtocol.session {
-            #"{"access_token":"rotated-locally","expires_in":28800,"refresh_token":"r2"}"#
-        }
-        let vault = TokenVault(client: OAuthClient(transport: URLSessionTransport(session: transport)),
+        let transport = CannedTransport(
+            body: #"{"access_token":"rotated-locally","expires_in":28800,"refresh_token":"r2"}"#)
+        let vault = TokenVault(client: OAuthClient(transport: transport),
                                secrets: InMemorySecretStore())
         vault.store(OAuthCredential(accessToken: "old", refreshToken: "r1",
                                     expiresAt: Date().addingTimeInterval(-60)),
