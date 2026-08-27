@@ -71,10 +71,12 @@ public struct ServerConfig {
 public enum ServerError: Error, LocalizedError {
     case usage(String)
     case startup(String)
+    /// A request the server refused. Routed to 400 or 404, never to an exit code.
+    case rejected(String)
 
     public var errorDescription: String? {
         switch self {
-        case .usage(let s), .startup(let s): return s
+        case .usage(let s), .startup(let s), .rejected(let s): return s
         }
     }
 }

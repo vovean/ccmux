@@ -55,21 +55,25 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
     private let password: String
     private let pinnedFingerprint: String
     private let pin: PinnedTrust
-    private lazy var session: URLSession = {
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 20
-        config.httpAdditionalHeaders = ["Accept": "application/json"]
-        return URLSession(configuration: config, delegate: pin, delegateQueue: nil)
-    }()
+    private let session: URLSession
 
     public init(baseURL: URL, username: String, password: String, fingerprint: String) {
         self.baseURL = baseURL
         self.username = username
         self.password = password
         self.pinnedFingerprint = fingerprint.lowercased()
-        self.pin = PinnedTrust(expected: fingerprint.lowercased())
+        let pin = PinnedTrust(expected: fingerprint.lowercased())
+        self.pin = pin
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 20
+        config.httpAdditionalHeaders = ["Accept": "application/json"]
+        self.session = URLSession(configuration: config, delegate: pin, delegateQueue: nil)
         super.init()
     }
+
+    /// A session holds its delegate until invalidated, so a discarded client would leak
+    /// both. Clients are discarded routinely — every failed connect attempt makes one.
+    deinit { session.invalidateAndCancel() }
 
     // MARK: - Trust on first use
 

@@ -141,6 +141,9 @@ public extension Engine {
         var delegated = settings.delegated
         var pushed = 0, took = 0, imported = 0
         var problems: [String] = []
+        // Fetched once. Doing it per importable account was one full round trip each.
+        let catalogue = Dictionary(
+            uniqueKeysWithValues: ((try? await client.accounts()) ?? []).map { ($0.id, $0) })
 
         for entry in plan.entries {
             switch entry.disposition {
@@ -169,7 +172,11 @@ public extension Engine {
                 }
 
             case .importable:
-                if await importAccount(entry, client: client, delegated: &delegated) {
+                guard let remote = catalogue[entry.id] else {
+                    problems.append(entry.displayName)
+                    continue
+                }
+                if await importAccount(remote, client: client, delegated: &delegated) {
                     imported += 1
                 } else {
                     problems.append(entry.displayName)
@@ -243,10 +250,8 @@ public extension Engine {
         return try? await client.adopt(request).id
     }
 
-    private func importAccount(_ entry: Delegation.Entry, client: ServerClient,
+    private func importAccount(_ remote: RemoteAccount, client: ServerClient,
                                delegated: inout Set<String>) async -> Bool {
-        guard let remote = try? await client.accounts().first(where: { $0.id == entry.id })
-        else { return false }
         var account = store.accounts.get(remote.id)
             ?? Account(id: remote.id, label: remote.label, kind: remote.kind)
         account.label = remote.label
@@ -324,10 +329,7 @@ public extension Engine {
                                    state: items["state"]))
 
             var delegated = settings.delegated
-            var entry = Delegation.Entry(id: account.id, displayName: account.displayName,
-                                         disposition: .importable, kind: account.kind)
-            entry.remoteID = account.id
-            _ = await importAccount(entry, client: client, delegated: &delegated)
+            _ = await importAccount(account, client: client, delegated: &delegated)
             updateSettings { $0.delegatedAccountIDs = delegated.sorted() }
             applyRemoteToVault()
             banner = Banner(level: .info, text: "Signed in as \(account.displayName).")
@@ -344,8 +346,14 @@ public extension Engine {
     /// same numbers.
     func pollDelegatedUsage() async {
         guard let client = serverClient else { return }
+        let now = Date()
         for accountID in settings.delegatedAccountIDs {
             guard store.accounts.get(accountID)?.kind == .subscription else { continue }
+            // The housekeeping tick is every 20s, which is far more often than these
+            // numbers move. `serveTTL` is the same floor the app already applies to a
+            // locally held snapshot.
+            if let fetched = store.usage(for: accountID)?.fetchedAt,
+               now.timeIntervalSince(fetched) < PollPolicy.serveTTL { continue }
             guard let remote = try? await client.usage(for: accountID),
                   !remote.windows.isEmpty else { continue }
             record(.success(remote.windows), for: accountID)

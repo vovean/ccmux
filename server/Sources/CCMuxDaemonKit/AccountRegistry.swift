@@ -149,10 +149,10 @@ public actor AccountRegistry {
     public func finishLogin(_ request: LoginFinishRequest) async throws -> RemoteAccount {
         pruneExpiredLogins()
         guard let pending = pendingLogins.removeValue(forKey: request.loginID) else {
-            throw ServerError.startup("no login in flight for that id — it may have expired")
+            throw ServerError.rejected("no login in flight for that id — it may have expired")
         }
         if let state = request.state, state != pending.pkce.state {
-            throw ServerError.startup("sign-in state did not match; nothing was stored")
+            throw ServerError.rejected("sign-in state did not match; nothing was stored")
         }
         let credential = try await client.exchange(code: request.code, pkce: pending.pkce,
                                                    port: pending.port)
@@ -172,7 +172,7 @@ public actor AccountRegistry {
         }
         guard let json = request.credentialJSON,
               let credential = OAuthCredential(json: json) else {
-            throw ServerError.startup("adopt needs either credentialJSON or apiKey")
+            throw ServerError.rejected("adopt needs either credentialJSON or apiKey")
         }
         return try await adopt(credential: credential, label: request.label)
     }
@@ -229,7 +229,7 @@ public actor AccountRegistry {
 
     public func remove(_ accountID: String) throws {
         guard let account = accounts.removeValue(forKey: accountID) else {
-            throw ServerError.startup("no account \(accountID)")
+            throw ServerError.rejected("no account \(accountID)")
         }
         if account.kind == .apiKey {
             try? apiKeys.delete(accountID)
