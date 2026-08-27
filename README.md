@@ -171,6 +171,32 @@ spending money stays a per-session decision.
 
 `ccmux run --account <id>` overrides any binding, for a one-off.
 
+## Setting up a second Mac
+
+Settings → **Another Mac** → Export writes a JSON file with your accounts, their order,
+rotation and budgets, which Chrome profile each one belongs to, and optionally your
+policies and thresholds. `ccmux export <file> [--with-secrets]` does the same from a
+shell.
+
+**Subscription sign-ins are never in that file, and cannot be.** Several sign-in
+lineages for one account coexist happily, but two machines holding the *same* lineage do
+not: whichever refreshes first invalidates the other, and that account dies on the loser
+with nothing to explain why. So each Mac signs in for itself. An API key is the opposite
+— a static secret, safe on as many machines as you like — so it travels whole with
+`--with-secrets`, which writes it in plain text into a file you should delete once it has
+been imported.
+
+Import on the other Mac walks what is missing, one account at a time: it picks or creates
+a Chrome profile, opens the sign-in there with the address pre-filled, and moves on.
+Accounts already set up there are listed and left completely alone. Chrome profiles get
+their names at the end, and only with Chrome quit — Chrome rewrites its profile list when
+it exits, so a name set under a running Chrome is simply lost. ccmux backs that file up
+first, refuses the write if the rewritten list no longer holds every profile that was in
+it, and will not name a profile Chrome has not actually created.
+
+Project bindings and the outbound proxy are not exported: bindings name absolute paths
+that may not exist there, and the proxy is per-network.
+
 ## Running out
 
 At the threshold (3% headroom by default) you get a notification. When a window is

@@ -11,6 +11,7 @@ public enum ControlRequest: Codable, Equatable {
     case status
     /// Adopts the credential Claude Code is already logged in with.
     case importGlobalLogin
+    case export(includePolicies: Bool, includeSecrets: Bool)
 }
 
 public struct ControlSessionInfo: Codable, Equatable {
@@ -73,5 +74,6 @@ public enum ControlResponse: Codable, Equatable {
     case ok
     case session(ControlSessionInfo)
     case status(ControlStatus)
+    case exported(String)
     case failure(String)
 }
