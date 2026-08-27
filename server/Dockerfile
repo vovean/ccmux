@@ -27,6 +27,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Never root: the sealed secret store and the master key beside it are the whole prize.
+# install-ccmuxd.sh overrides this with `user:` in the compose file, set to whoever owns
+# the 0700 data directory — chowning it to this uid would need root, and loosening it to
+# world-readable would defeat the point of sealing it.
 RUN useradd --system --create-home --uid 10001 ccmuxd
 COPY --from=build /usr/local/bin/ccmuxd /usr/local/bin/ccmuxd
 

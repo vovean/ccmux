@@ -11,7 +11,7 @@ let package = Package(
     name: "ccmuxd",
     platforms: [.macOS(.v14)],
     dependencies: [
-        .package(path: ".."),
+        .package(name: "CCMux", path: ".."),
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.6.0"),
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.23.0"),
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.27.0"),

@@ -207,27 +207,31 @@ public extension Engine {
                           delegated: inout Set<String>) async -> Bool {
         guard let grant = try? await client.grant(for: remoteID) else { return false }
 
-        if remoteID != localID {
-            // Only an API-key account can differ, and its local id is meaningless. Move
-            // the record onto the server's id so one id identifies it everywhere.
-            renumberAPIKeyAccount(from: localID, to: remoteID)
-        }
-        delegated.insert(remoteID)
-        // Set before storing: the vault must know not to attempt a local refresh grant on
-        // a credential that no longer carries a refresh token.
-        vault.setRemote(client, delegated: delegated)
-
+        // Everything the grant must contain is checked before a single local byte is
+        // touched. Renumbering deletes the old API key, so a guard failing after it would
+        // leave the account with no credential on this Mac at all.
+        var replacement: OAuthCredential?
         switch grant.kind {
         case .apiKey:
             guard let key = grant.apiKey, !key.isEmpty else { return false }
+            if remoteID != localID { renumberAPIKeyAccount(from: localID, to: remoteID) }
+            delegated.insert(remoteID)
             try? APIKeyStore.write(key, for: remoteID)
         case .subscription:
             guard let credential = grant.credential() else { return false }
+            delegated.insert(remoteID)
+            replacement = credential
+        }
+
+        // Set before storing: the vault must know not to attempt a local refresh grant on
+        // a credential that no longer carries a refresh token.
+        vault.setRemote(client, delegated: delegated)
+        if let replacement {
             // Overwrites the local credential, which is how the local refresh token stops
             // existing. The lineage it belonged to is simply never refreshed again and
             // expires on its own — harmless, because lineages are independent.
-            vault.store(credential, for: remoteID)
-            sessionManager.reseedNamespaces(accountID: remoteID, credential: credential)
+            vault.store(replacement, for: remoteID)
+            sessionManager.reseedNamespaces(accountID: remoteID, credential: replacement)
         }
         store.accounts.mutate(remoteID) { $0.health = .ok; $0.healthDetail = nil }
         return true

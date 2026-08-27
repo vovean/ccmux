@@ -93,11 +93,22 @@ else
 fi
 
 # --- compose -----------------------------------------------------------------
+# The container runs as whoever owns these files, rather than the image's own user.
+# data/ is 0700 and holds every refresh lineage, so the alternative is either chowning it
+# to the image's uid (needs root) or loosening it to world-readable (defeats the point).
+RUN_UID="$(id -u)"
+RUN_GID="$(id -g)"
+if [[ "$RUN_UID" == "0" ]]; then
+  echo "install-ccmuxd: WARNING — run as an ordinary user, not root; the container would" >&2
+  echo "                run as root too. Re-run as a normal user for a smaller blast radius." >&2
+fi
+
 cat > "$TARGET/docker-compose.yml" <<EOF
 services:
   ccmuxd:
     image: $IMAGE
     restart: unless-stopped
+    user: "$RUN_UID:$RUN_GID"
     command: ["--port", "8443"]
     ports:
       - "$PORT:8443"
