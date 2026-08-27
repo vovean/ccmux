@@ -108,6 +108,18 @@ public extension Engine {
                         })
     }
 
+    /// Records a delegation and makes it live, in that order.
+    ///
+    /// Persisted per account rather than once at the end of `applyDelegation`: the local
+    /// refresh token is stripped inside that loop, so a crash between stripping it and
+    /// writing settings would come back with a credential that cannot be refreshed and no
+    /// record that it is the server's job now — which presents as a healthy account
+    /// suddenly needing re-login.
+    private func commitDelegation(_ delegated: Set<String>, client: ServerClient) {
+        updateSettings { $0.delegatedAccountIDs = delegated.sorted() }
+        vault.setRemote(client, delegated: delegated)
+    }
+
     /// Hands the vault the current server and the set of accounts it should renew there.
     func applyRemoteToVault() {
         vault.setRemote(serverClient, delegated: settings.delegated)
@@ -176,7 +188,7 @@ public extension Engine {
                 // is logged out for good. Committing here means a failed token fetch below
                 // costs a retry, not an account.
                 delegated.insert(remoteID)
-                vault.setRemote(client, delegated: delegated)
+                commitDelegation(delegated, client: client)
                 surrenderLocalLineage(entry.id)
                 if await handOver(remoteID, localID: entry.id, client: client,
                                   delegated: &delegated) {
@@ -201,8 +213,7 @@ public extension Engine {
             }
         }
 
-        updateSettings { $0.delegatedAccountIDs = delegated.sorted() }
-        applyRemoteToVault()
+        commitDelegation(delegated, client: client)
         delegationPlan = nil
 
         var parts: [String] = []
@@ -259,7 +270,7 @@ public extension Engine {
 
         // Set before storing: the vault must know not to attempt a local refresh grant on
         // a credential that no longer carries a refresh token.
-        vault.setRemote(client, delegated: delegated)
+        commitDelegation(delegated, client: client)
         if let replacement {
             // Overwrites the local credential, which is how the local refresh token stops
             // existing. The lineage it belonged to is simply never refreshed again and
@@ -406,8 +417,7 @@ public extension Engine {
 
             var delegated = settings.delegated
             _ = await importAccount(account, client: client, delegated: &delegated)
-            updateSettings { $0.delegatedAccountIDs = delegated.sorted() }
-            applyRemoteToVault()
+            commitDelegation(delegated, client: client)
             banner = Banner(level: .info, text: "Signed in as \(account.displayName).")
         } catch {
             banner = Banner(level: .warning, text: error.localizedDescription)
