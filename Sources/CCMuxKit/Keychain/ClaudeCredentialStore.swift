@@ -90,3 +90,22 @@ public enum ProxyPasswordStore {
         try Keychain.write(service: service, account: account, value: password)
     }
 }
+
+/// The ccmuxd basic-auth password. Its own service, and out of settings.json for the same
+/// reason as the proxy password: that file is plaintext on disk.
+public enum ServerPasswordStore {
+    static let service = "ccmux-server"
+    static let account = "basic-auth"
+
+    public static func read() throws -> String? {
+        try Keychain.read(service: service, account: account)
+    }
+
+    public static func write(_ password: String?) throws {
+        guard let password, !password.isEmpty else {
+            try? Keychain.delete(service: service, account: account)
+            return
+        }
+        try Keychain.write(service: service, account: account, value: password)
+    }
+}
