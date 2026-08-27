@@ -63,7 +63,13 @@ public final class TokenVault {
     public func setRemote(_ remote: RemoteTokenSource?, delegated ids: Set<String>) {
         lock.lock()
         self.remote = remote
-        self.delegated = remote == nil ? [] : ids
+        // `ids` is stored as given even when `remote` is nil. Clearing it here would let a
+        // delegated account fall through to a local refresh grant, and a delegated
+        // credential carries no refresh token — so the grant fails permanently and a
+        // perfectly healthy account is marked as needing re-login. Reachable from nothing
+        // worse than a Keychain read hiccup at launch. Disconnecting passes an empty set
+        // explicitly, which is the only way to stop delegating.
+        self.delegated = ids
         lock.unlock()
     }
 
@@ -75,6 +81,11 @@ public final class TokenVault {
     private func remoteSource(for accountID: String) -> RemoteTokenSource? {
         lock.lock(); defer { lock.unlock() }
         return delegated.contains(accountID) ? remote : nil
+    }
+
+    /// Whether a delegated account currently has somewhere to renew from.
+    public func hasRemote(for accountID: String) -> Bool {
+        remoteSource(for: accountID) != nil
     }
 
     public func load(accountIDs: [String]) {
@@ -190,7 +201,17 @@ public final class TokenVault {
         let id = nextRefreshID
         let task = Task<OAuthCredential?, Never> { [weak self] in
             guard let self else { return nil }
-            if let remote = self.remoteSource(for: accountID) {
+            if self.isDelegated(accountID) {
+                guard let remote = self.remoteSource(for: accountID) else {
+                    // Deliberately not falling back to a local grant: see `setRemote`.
+                    // Transient, so the account is not marked as needing re-login for what
+                    // is only an unreachable server.
+                    let error = OAuthError.transient(
+                        "the account server is unreachable, so \(accountID) cannot be renewed")
+                    Log.warn(error.localizedDescription)
+                    self.onRefreshFailure?(accountID, error)
+                    return nil
+                }
                 return await self.renewFromServer(accountID, remote)
             }
             guard let existing = self.credential(for: accountID) else { return nil }

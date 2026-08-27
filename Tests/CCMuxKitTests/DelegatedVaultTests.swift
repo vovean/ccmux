@@ -90,6 +90,39 @@ struct DelegatedVaultTests {
         #expect(remote.asked.isEmpty)
     }
 
+    /// The credential-loss path this closes: if the server client cannot be built — a
+    /// Keychain read hiccup at launch is enough — a delegated account must NOT fall back
+    /// to a local refresh grant. Its credential carries no refresh token, so the grant
+    /// would fail permanently and mark a perfectly healthy account as needing re-login.
+    @Test func aDelegatedAccountWithNoReachableServerFailsTransiently() async throws {
+        let upstreamCalls = Locked(0)
+        let failures = Locked<[OAuthError]>([])
+        let vault = TokenVault(
+            client: OAuthClient(transport: ForbiddenTransport {
+                upstreamCalls.set(upstreamCalls.get() + 1)
+            }),
+            secrets: InMemorySecretStore())
+        vault.onRefreshFailure = { _, error in
+            failures.set(failures.get() + [error])
+        }
+        // A delegated credential: an access token and deliberately no refresh token.
+        vault.store(OAuthCredential(accessToken: "cached", refreshToken: nil,
+                                    expiresAt: Date().addingTimeInterval(-60)),
+                    for: "acct-1")
+        // Delegated, but the server could not be constructed.
+        vault.setRemote(nil, delegated: ["acct-1"])
+
+        #expect(await vault.refresh("acct-1") == nil)
+        #expect(upstreamCalls.get() == 0, "a local refresh grant must never be attempted")
+        #expect(vault.isDelegated("acct-1"), "delegation must survive an unreachable server")
+        #expect(!vault.hasRemote(for: "acct-1"))
+        // Transient, never permanent: `Engine.handleRefreshFailure` only marks an account
+        // as needing re-login for a permanent failure.
+        #expect(failures.get().count == 1)
+        #expect(failures.get().first?.isPermanent == false)
+        #expect(vault.credential(for: "acct-1")?.accessToken == "cached")
+    }
+
     /// Disconnecting has to actually stop the delegation, or the vault would keep asking
     /// a server it is no longer configured for.
     @Test func clearingTheRemoteEndsDelegation() {
@@ -98,7 +131,8 @@ struct DelegatedVaultTests {
         vault.setRemote(StubRemote { _ in TokenGrant(accountID: "a", kind: .subscription) },
                         delegated: ["a"])
         #expect(vault.isDelegated("a"))
-        vault.setRemote(nil, delegated: ["a"])
+        // Disconnecting passes an empty set explicitly — the only way to stop delegating.
+        vault.setRemote(nil, delegated: [])
         #expect(!vault.isDelegated("a"))
     }
 
