@@ -140,6 +140,7 @@ struct ServerSection: View {
         let taking = plan.entries(.delegate)
         let importing = plan.entries(.importable)
         let pushable = plan.entries(.pushCandidate)
+        let stranded = plan.entries(.serverNeedsRelogin)
 
         VStack(alignment: .leading, spacing: 6) {
             if !taking.isEmpty {
@@ -149,6 +150,12 @@ struct ServerSection: View {
             if !importing.isEmpty {
                 row("Import from the server", importing.map(\.displayName),
                     "Not on this Mac yet.")
+            }
+            if !stranded.isEmpty {
+                row("The server needs signing in again for these",
+                    stranded.map(\.displayName),
+                    "Left alone — handing over to a dead lineage would trade a working "
+                        + "credential for a broken one. Sign them in from any connected Mac.")
             }
             if !pushable.isEmpty {
                 Text("Not on the server yet").font(.caption.weight(.semibold))

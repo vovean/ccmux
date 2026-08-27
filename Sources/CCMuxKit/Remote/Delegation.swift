@@ -15,6 +15,10 @@ public enum Delegation {
         case pushCandidate
         /// Held only by the server. Import the metadata; tokens come on demand.
         case importable
+        /// The server has it but says it needs signing in again. Handing over to a dead
+        /// lineage would trade a working local credential for a broken remote one, so it
+        /// is left alone and reported.
+        case serverNeedsRelogin
     }
 
     public struct Entry: Equatable, Identifiable, Sendable {
@@ -66,6 +70,8 @@ public enum Delegation {
             let disposition: Disposition
             if match == nil {
                 disposition = .pushCandidate
+            } else if match?.health == .needsRelogin, !delegated.contains(account.id) {
+                disposition = .serverNeedsRelogin
             } else if delegated.contains(account.id) {
                 disposition = .alreadyDelegated
             } else {
@@ -78,7 +84,9 @@ public enum Delegation {
 
         for account in remote where !matchedRemoteIDs.contains(account.id) {
             entries.append(Entry(id: account.id, displayName: account.displayName,
-                                 disposition: .importable, kind: account.kind))
+                                 disposition: account.health == .needsRelogin
+                                     ? .serverNeedsRelogin : .importable,
+                                 kind: account.kind))
         }
         return Plan(entries: entries)
     }

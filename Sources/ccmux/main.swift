@@ -239,6 +239,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 }
 
 let arguments = ProcessInfo.processInfo.arguments
+// Before anything else can log. `Log` writes to a file only once told where, and both the
+// app and the shim want the same one — the path Settings shows and the README documents.
+Log.configure(fileURL: Paths.logFile)
+
 if CLI.isCLIInvocation(arguments) {
     CLI.main(arguments)
 }

@@ -126,6 +126,15 @@ struct ServerURLTests {
         #expect(Engine.normalizeServerURL("   ") == nil)
         #expect(Engine.normalizeServerURL("https://") == nil)
     }
+
+    /// settings.json is plaintext on disk and is the one place the design keeps the
+    /// password out of — but pasting https://user:pass@host into an address field is a
+    /// natural thing to try, and the string is stored verbatim.
+    @Test func embeddedCredentialsAreStripped() {
+        let url = Engine.normalizeServerURL("https://ccmux:hunter2@ccmux.example.com:8443")
+        #expect(url?.absoluteString == "https://ccmux.example.com:8443")
+        #expect(url?.absoluteString.contains("hunter2") == false)
+    }
 }
 
 @Suite("Fingerprint display")
@@ -140,5 +149,78 @@ struct FingerprintTests {
     @Test func theShortFormIsTruncated() {
         let short = ServerFingerprint.short(String(repeating: "cd", count: 32))
         #expect(short == "CD:CD:CD:CD:CD:CD…")
+    }
+}
+
+@Suite("Grant usability")
+struct GrantUsabilityTests {
+    /// The credential-loss path this closes: the server returns whatever it holds even
+    /// when its own refresh failed, so a grant can carry a token that expired minutes ago.
+    /// Handing over on one of those overwrites the Mac's working refresh token with a dead
+    /// access token, and the account is unrecoverable without a browser re-login.
+    @Test func anExpiredGrantIsNotUsable() {
+        let dead = TokenGrant(accountID: "a", kind: .subscription, accessToken: "stale",
+                              expiresIn: 0)
+        #expect(!dead.isUsable)
+        #expect(!TokenGrant(accountID: "a", kind: .subscription, accessToken: "stale",
+                            expiresIn: -30).isUsable)
+    }
+
+    @Test func aLiveGrantIsUsable() {
+        #expect(TokenGrant(accountID: "a", kind: .subscription, accessToken: "fresh",
+                           expiresIn: 3600).isUsable)
+    }
+
+    /// A server that did not state an expiry leaves the question to normal expiry
+    /// handling rather than to this check.
+    @Test func anUnstatedExpiryIsAccepted() {
+        #expect(TokenGrant(accountID: "a", kind: .subscription, accessToken: "t").isUsable)
+    }
+
+    @Test func aGrantWithNoTokenAtAllIsNotUsable() {
+        #expect(!TokenGrant(accountID: "a", kind: .subscription, expiresIn: 3600).isUsable)
+        #expect(!TokenGrant(accountID: "a", kind: .subscription, accessToken: "",
+                            expiresIn: 3600).isUsable)
+    }
+
+    /// An API key has no expiry — only presence matters.
+    @Test func anAPIKeyGrantOnlyNeedsAKey() {
+        #expect(TokenGrant(accountID: "a", kind: .apiKey, apiKey: "sk-ant-x").isUsable)
+        #expect(!TokenGrant(accountID: "a", kind: .apiKey).isUsable)
+        #expect(!TokenGrant(accountID: "a", kind: .apiKey, apiKey: "").isUsable)
+    }
+}
+
+@Suite("Delegating to a dead server lineage")
+struct ServerHealthPlanningTests {
+    /// Handing an account over to a lineage the server says is dead trades a working local
+    /// credential for a broken remote one.
+    @Test func anAccountTheServerCannotServeIsNotDelegated() {
+        let plan = Delegation.plan(
+            local: [Account(id: "acct-1", label: "Mine")],
+            remote: [RemoteAccount(id: "acct-1", label: "Mine", health: .needsRelogin)],
+            delegated: [], apiKeyFingerprint: { _ in nil })
+        #expect(plan.entries.first?.disposition == .serverNeedsRelogin)
+        #expect(plan.entries(.delegate).isEmpty)
+    }
+
+    /// Nor is one worth importing sight unseen.
+    @Test func aDeadServerOnlyAccountIsNotOfferedForImport() {
+        let plan = Delegation.plan(
+            local: [], remote: [RemoteAccount(id: "acct-9", label: "Dead",
+                                              health: .needsRelogin)],
+            delegated: [], apiKeyFingerprint: { _ in nil })
+        #expect(plan.entries(.importable).isEmpty)
+        #expect(plan.entries(.serverNeedsRelogin).map(\.id) == ["acct-9"])
+    }
+
+    /// An account already handed over stays delegated even while the server needs signing
+    /// in again — this Mac has no refresh token for it, so there is nothing to reclaim.
+    @Test func anAlreadyDelegatedAccountIsNotClawedBack() {
+        let plan = Delegation.plan(
+            local: [Account(id: "acct-1", label: "Mine")],
+            remote: [RemoteAccount(id: "acct-1", label: "Mine", health: .needsRelogin)],
+            delegated: ["acct-1"], apiKeyFingerprint: { _ in nil })
+        #expect(plan.entries.first?.disposition == .alreadyDelegated)
     }
 }

@@ -57,16 +57,23 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
     private let pin: PinnedTrust
     private let session: URLSession
 
-    public init(baseURL: URL, username: String, password: String, fingerprint: String) {
+    /// `proxy` follows the same rule as every other outbound path in ccmux: routing only
+    /// some calls through it looks like the setting worked while the rest go direct, and
+    /// on a machine that needs the proxy those are exactly the calls that fail.
+    public init(baseURL: URL, username: String, password: String, fingerprint: String,
+                proxy: UpstreamProxy? = nil, proxyPassword: String? = nil) {
         self.baseURL = baseURL
         self.username = username
         self.password = password
         self.pinnedFingerprint = fingerprint.lowercased()
-        let pin = PinnedTrust(expected: fingerprint.lowercased())
+        let pin = PinnedTrust(expected: fingerprint.lowercased(),
+                              proxyCredential: ProxyTransport.credential(
+                                  for: proxy, password: proxyPassword))
         self.pin = pin
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 20
         config.httpAdditionalHeaders = ["Accept": "application/json"]
+        ProxyTransport.apply(proxy, to: config)
         self.session = URLSession(configuration: config, delegate: pin, delegateQueue: nil)
         super.init()
     }
@@ -83,10 +90,14 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
     /// Sends no credentials — the whole point is that the peer is unverified at this
     /// moment, and a 401 back is a perfectly good outcome. Nothing here is written down;
     /// the caller stores the pin only after the user agrees to it.
-    public static func probeFingerprint(baseURL: URL) async throws -> String {
-        let collector = PinnedTrust(expected: nil)
+    public static func probeFingerprint(baseURL: URL, proxy: UpstreamProxy? = nil,
+                                        proxyPassword: String? = nil) async throws -> String {
+        let collector = PinnedTrust(expected: nil,
+                                    proxyCredential: ProxyTransport.credential(
+                                        for: proxy, password: proxyPassword))
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 15
+        ProxyTransport.apply(proxy, to: config)
         let session = URLSession(configuration: config, delegate: collector, delegateQueue: nil)
         defer { session.invalidateAndCancel() }
 
@@ -206,6 +217,7 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
 /// standing between the client and any host that answers on that address.
 private final class PinnedTrust: NSObject, URLSessionDelegate, @unchecked Sendable {
     private let expected: String?
+    private let proxyCredential: URLCredential?
     private let lock = NSLock()
     private var _observed: String?
     private var _mismatch: String?
@@ -215,13 +227,22 @@ private final class PinnedTrust: NSObject, URLSessionDelegate, @unchecked Sendab
 
     /// `expected: nil` accepts any certificate and only records what it saw. That is the
     /// first-connect probe and nothing else — it never carries credentials.
-    init(expected: String?) {
+    init(expected: String?, proxyCredential: URLCredential? = nil) {
         self.expected = expected
+        self.proxyCredential = proxyCredential
     }
 
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping (URLSession.AuthChallengeDisposition,
                                                   URLCredential?) -> Void) {
+        // A proxy in front of us asks first, and with its own scheme. Answering that here
+        // is not optional: the server-trust branch below would otherwise cancel it.
+        if challenge.protectionSpace.isProxy() {
+            let (disposition, credential) = ProxyTransport.respond(to: challenge,
+                                                                   credential: proxyCredential)
+            completionHandler(disposition, credential)
+            return
+        }
         guard challenge.protectionSpace.authenticationMethod
                 == NSURLAuthenticationMethodServerTrust,
               let trust = challenge.protectionSpace.serverTrust,

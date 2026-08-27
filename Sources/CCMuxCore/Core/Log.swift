@@ -18,20 +18,18 @@ public enum Log {
     /// True on the server, where journald collects stdout and there is no os_log.
     private static var echoToStandardOutput = false
 
+    // Immutable: `emit` reads this from whatever thread called it, so a var reassigned by
+    // `configure` would be a genuine data race on a Swift static.
     #if canImport(os)
-    private static var logger = Logger(subsystem: "io.vovean.ccmux", category: "ccmux")
+    private static let logger = Logger(subsystem: "io.vovean.ccmux", category: "ccmux")
     #endif
 
     /// Points logging at a file, and on the server at stdout. Call once at startup;
     /// lines emitted before it are not written to disk.
-    public static func configure(fileURL url: URL?, subsystem: String = "io.vovean.ccmux",
-                                 echoToStandardOutput echo: Bool = false) {
+    public static func configure(fileURL url: URL?, echoToStandardOutput echo: Bool = false) {
         queue.sync {
             fileURL = url
             echoToStandardOutput = echo
-            #if canImport(os)
-            logger = Logger(subsystem: subsystem, category: "ccmux")
-            #endif
         }
     }
 

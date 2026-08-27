@@ -23,7 +23,9 @@ public extension Engine {
         guard let url = URL(string: connection.url),
               let password = (try? ServerPasswordStore.read()) ?? nil else { return nil }
         let client = ServerClient(baseURL: url, username: connection.username,
-                                  password: password, fingerprint: connection.fingerprint)
+                                  password: password, fingerprint: connection.fingerprint,
+                                  proxy: settings.upstreamProxy,
+                                  proxyPassword: try? ProxyPasswordStore.read())
         serverClientCache = (connection, client)
         return client
     }
@@ -39,7 +41,9 @@ public extension Engine {
         serverBusy = true
         defer { serverBusy = false }
         do {
-            return .success(try await ServerClient.probeFingerprint(baseURL: url))
+            return .success(try await ServerClient.probeFingerprint(
+                baseURL: url, proxy: settings.upstreamProxy,
+                proxyPassword: try? ProxyPasswordStore.read()))
         } catch {
             return .failure(error)
         }
@@ -55,7 +59,8 @@ public extension Engine {
         defer { serverBusy = false }
 
         let client = ServerClient(baseURL: url, username: username, password: password,
-                                  fingerprint: fingerprint)
+                                  fingerprint: fingerprint, proxy: settings.upstreamProxy,
+                                  proxyPassword: try? ProxyPasswordStore.read())
         let remote: [RemoteAccount]
         do {
             _ = try await client.health()
@@ -141,6 +146,7 @@ public extension Engine {
         var delegated = settings.delegated
         var pushed = 0, took = 0, imported = 0
         var problems: [String] = []
+        var strandedOnServer: [String] = []
         // Fetched once. Doing it per importable account was one full round trip each.
         let catalogue = Dictionary(
             uniqueKeysWithValues: ((try? await client.accounts()) ?? []).map { ($0.id, $0) })
@@ -164,12 +170,23 @@ public extension Engine {
                     problems.append(entry.displayName)
                     continue
                 }
+                // The adopt succeeded, so the server is now a holder of this lineage. This
+                // Mac must stop refreshing it *before* anything else can fail — otherwise
+                // both sides refresh it, and whichever loses is told `invalid_grant` and
+                // is logged out for good. Committing here means a failed token fetch below
+                // costs a retry, not an account.
+                delegated.insert(remoteID)
+                vault.setRemote(client, delegated: delegated)
+                surrenderLocalLineage(entry.id)
                 if await handOver(remoteID, localID: entry.id, client: client,
                                   delegated: &delegated) {
                     pushed += 1
                 } else {
                     problems.append(entry.displayName)
                 }
+
+            case .serverNeedsRelogin:
+                strandedOnServer.append(entry.displayName)
 
             case .importable:
                 guard let remote = catalogue[entry.id] else {
@@ -193,11 +210,19 @@ public extension Engine {
         if pushed > 0 { parts.append("\(pushed) pushed up") }
         if imported > 0 { parts.append("\(imported) imported") }
         let summary = parts.isEmpty ? "Nothing changed" : parts.joined(separator: ", ")
-        banner = problems.isEmpty
+        var trailer = ""
+        if !problems.isEmpty {
+            trailer += " Left alone: " + problems.joined(separator: ", ")
+                + " — they still work from this Mac."
+        }
+        if !strandedOnServer.isEmpty {
+            trailer += " The server needs signing in again for "
+                + strandedOnServer.joined(separator: ", ")
+                + ", so those were not handed over."
+        }
+        banner = trailer.isEmpty
             ? Banner(level: .info, text: summary + ".")
-            : Banner(level: .warning,
-                     text: summary + ". Left alone: " + problems.joined(separator: ", ")
-                         + " — they still work from this Mac.")
+            : Banner(level: .warning, text: summary + "." + trailer)
     }
 
     /// Mint, then delete. Asking the server for a token first is what makes this safe: a
@@ -205,7 +230,13 @@ public extension Engine {
     /// the account with no working credential on either side.
     private func handOver(_ remoteID: String, localID: String, client: ServerClient,
                           delegated: inout Set<String>) async -> Bool {
-        guard let grant = try? await client.grant(for: remoteID) else { return false }
+        // `isUsable`, not merely non-nil: the server returns what it holds even when its
+        // own refresh failed, so a grant can carry a token that expired minutes ago.
+        // Overwriting a working local credential with one of those destroys the only
+        // refresh token this Mac has.
+        guard let grant = try? await client.grant(for: remoteID), grant.isUsable else {
+            return false
+        }
 
         // Everything the grant must contain is checked before a single local byte is
         // touched. Renumbering deletes the old API key, so a guard failing after it would
@@ -214,9 +245,12 @@ public extension Engine {
         switch grant.kind {
         case .apiKey:
             guard let key = grant.apiKey, !key.isEmpty else { return false }
+            // Written before the renumber deletes the old item, and checked rather than
+            // swallowed: reporting success with no key in the Keychain leaves every
+            // session launch on this account failing with `noCredential`.
+            guard writeAPIKey(key, for: remoteID) else { return false }
             if remoteID != localID { renumberAPIKeyAccount(from: localID, to: remoteID) }
             delegated.insert(remoteID)
-            try? APIKeyStore.write(key, for: remoteID)
         case .subscription:
             guard let credential = grant.credential() else { return false }
             delegated.insert(remoteID)
@@ -235,6 +269,34 @@ public extension Engine {
         }
         store.accounts.mutate(remoteID) { $0.health = .ok; $0.healthDetail = nil }
         return true
+    }
+
+    /// Drops this Mac's refresh token for an account the server has taken over, keeping
+    /// the access token so live sessions carry on until the first renewal.
+    private func surrenderLocalLineage(_ accountID: String) {
+        guard let credential = vault.credential(for: accountID),
+              credential.refreshToken != nil else { return }
+        var surrendered = credential
+        surrendered.refreshToken = nil
+        surrendered.refreshTokenExpiresAt = nil
+        vault.store(surrendered, for: accountID)
+    }
+
+    /// One retry, for the same reason `TokenVault.store` has one: the usual cause is a
+    /// transient `security` timeout under contention, and losing this costs a credential.
+    private func writeAPIKey(_ key: String, for accountID: String) -> Bool {
+        do {
+            try APIKeyStore.write(key, for: accountID)
+            return true
+        } catch {
+            do {
+                try APIKeyStore.write(key, for: accountID)
+                return true
+            } catch {
+                Log.error("could not store the API key for \(accountID): \(error)")
+                return false
+            }
+        }
     }
 
     private func push(_ entry: Delegation.Entry, client: ServerClient) async -> String? {
@@ -295,7 +357,17 @@ public extension Engine {
     /// this Mac never holds one.
     func beginServerLogin(accountID: String?, chromeProfileDirectory: String?,
                           loginHint: String?) async {
-        guard let client = serverClient else { return }
+        guard let client = serverClient else {
+            // The button is the only affordance for a delegated account that needs
+            // signing in again; returning quietly makes it look broken.
+            banner = Banner(level: .warning,
+                            text: settings.server == nil
+                                ? "This account is delegated but no account server is "
+                                    + "configured. Connect one in Settings."
+                                : "Could not reach the account server's saved password in "
+                                    + "the Keychain. Reconnect it in Settings.")
+            return
+        }
         guard !loginInProgress else { return }
         loginInProgress = true
         defer { loginInProgress = false }
@@ -360,7 +432,11 @@ public extension Engine {
                now.timeIntervalSince(fetched) < PollPolicy.serveTTL { continue }
             guard let remote = try? await client.usage(for: accountID),
                   !remote.windows.isEmpty else { continue }
-            record(.success(remote.windows), for: accountID)
+            // Dated by the server's own age, not by when it arrived here. Stamping it now
+            // would let a rate-limited server's 20-minute-old numbers look current, and
+            // ranking would keep choosing an account that is already exhausted.
+            record(.success(remote.windows), for: accountID,
+                   fetchedAt: Date().addingTimeInterval(-max(0, remote.ageSeconds)))
         }
     }
 
@@ -370,6 +446,11 @@ public extension Engine {
         if !text.contains("://") { text = "https://" + text }
         guard var components = URLComponents(string: text), let host = components.host,
               !host.isEmpty else { return nil }
+        // A pasted https://user:pass@host is a natural thing to try, and this string is
+        // written verbatim into settings.json — the one file the password is deliberately
+        // kept out of.
+        components.user = nil
+        components.password = nil
         if components.port == nil { components.port = 8443 }
         // Trailing path would end up doubled by appendingPathComponent.
         components.path = ""

@@ -309,7 +309,8 @@ public final class Engine: ObservableObject {
         }
     }
 
-    func record(_ result: Result<[UsageWindow], Error>, for accountID: String) {
+    func record(_ result: Result<[UsageWindow], Error>, for accountID: String,
+                fetchedAt: Date = Date()) {
         let previous = store.usage(for: accountID)
         var snapshot: UsageSnapshot
         var rateLimited = false
@@ -952,6 +953,10 @@ public final class Engine: ObservableObject {
         let proxied = OAuthClient.proxied(proxy, password: password)
         client = proxied
         vault.setClient(proxied)
+        // The cached ServerClient is keyed on the connection, which has not changed — but
+        // its URLSession fixed the proxy at construction, so it has to be rebuilt too.
+        serverClientCache = nil
+        applyRemoteToVault()
         if let proxy {
             Log.info("outbound requests now go through \(proxy.displayString)")
         }
@@ -1042,6 +1047,13 @@ public final class Engine: ObservableObject {
         // Leaving the key behind would keep a working credential in the Keychain for an
         // account the user believes they deleted.
         try? APIKeyStore.delete(accountID)
+        // Leaving it delegated would route a later re-added account to the server, whose
+        // 404 is transient by design — so the fresh local lineage would never be refreshed
+        // and the account would quietly stop working when its access token expired.
+        if settings.delegated.contains(accountID) {
+            updateSettings { $0.delegatedAccountIDs.removeAll { $0 == accountID } }
+            applyRemoteToVault()
+        }
         store.removeAccount(accountID)
     }
 

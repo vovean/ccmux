@@ -65,6 +65,12 @@ public actor AccountRegistry {
         vault.onCredentialChanged = { [weak self] accountID, _ in
             Task { await self?.markHealthy(accountID) }
         }
+        // A rotation live on Anthropic's side but not on disk means the next restart comes
+        // back holding a dead refresh token. Recorded on the account so it reaches every
+        // client, not just this process's stdout.
+        vault.onPersistFailure = { [weak self] accountID, error in
+            Task { await self?.recordPersistFailure(accountID, error) }
+        }
 
         // The sealed store is the authority on what we can actually serve. An account in
         // the file with no credential behind it would otherwise 500 on every token
@@ -108,6 +114,14 @@ public actor AccountRegistry {
             // A failed refresh still yields the old token: the API may honour it inside
             // its own grace period, and a nil here parks a live session for certain.
             credential = await vault.refresh(accountID) ?? credential
+        }
+        // A token still inside its lifetime is worth returning even when the refresh
+        // failed — the API may honour it, and nil parks a live session for certain. One
+        // that is already expired is not: the client would overwrite its own working
+        // credential with it, so this refuses exactly as a missing credential does.
+        if let expiresAt = credential.expiresAt, expiresAt.timeIntervalSinceNow <= 0 {
+            Log.warn("\(accountID) has no live access token and could not be refreshed")
+            return nil
         }
         let life = credential.expiresAt.map { max(0, $0.timeIntervalSinceNow) }
             ?? Self.unknownTokenLife
@@ -305,6 +319,14 @@ public actor AccountRegistry {
         accounts[accountID]?.healthDetail = error.localizedDescription
         persist()
         Log.warn("\(accountID) needs re-login: \(error.localizedDescription)")
+    }
+
+    private func recordPersistFailure(_ accountID: String, _ error: Error) {
+        accounts[accountID]?.healthDetail =
+            "a rotated credential could not be saved: \(error.localizedDescription)"
+        persist()
+        Log.error("could not persist the rotated credential for \(accountID) — a restart "
+                  + "will come back with a dead refresh token: \(error)")
     }
 
     private func markHealthy(_ accountID: String) {

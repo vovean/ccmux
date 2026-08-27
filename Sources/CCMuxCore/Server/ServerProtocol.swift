@@ -81,6 +81,24 @@ public struct TokenGrant: Codable, Equatable, Sendable {
         self.scopes = scopes
     }
 
+    /// Whether this grant can actually serve a request.
+    ///
+    /// A non-nil access token is not enough. The server returns what it holds even when a
+    /// refresh failed, so a grant can carry a token that expired minutes ago — and a
+    /// client that overwrote its own working credential with one of those would destroy
+    /// the only refresh token it had.
+    public var isUsable: Bool {
+        switch kind {
+        case .apiKey:
+            return !(apiKey ?? "").isEmpty
+        case .subscription:
+            guard let accessToken, !accessToken.isEmpty else { return false }
+            // A server that did not say leaves it to expiry handling, not to this.
+            guard let expiresIn else { return true }
+            return expiresIn > 0
+        }
+    }
+
     /// Rebuilt as the credential shape the rest of ccmux already speaks. No refresh token
     /// by construction — the server did not send one, and `neuteredForSession` would strip
     /// it anyway.
