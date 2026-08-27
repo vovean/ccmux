@@ -1,3 +1,4 @@
+import CCMuxCore
 import Foundation
 
 /// An HTTP proxy every outbound ccmux request is sent through.

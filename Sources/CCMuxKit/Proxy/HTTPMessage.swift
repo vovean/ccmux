@@ -1,3 +1,4 @@
+import CCMuxCore
 import Foundation
 
 /// Incremental HTTP/1.1 request parser for the proxy's inbound leg.

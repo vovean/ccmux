@@ -1,3 +1,4 @@
+import CCMuxCore
 import Foundation
 
 /// Ties a directory to the account a session started there should launch on.

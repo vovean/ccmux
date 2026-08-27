@@ -1,4 +1,4 @@
-import CryptoKit
+import CCMuxCore
 import Foundation
 
 /// Reads and writes the Keychain items Claude Code itself uses.
@@ -13,7 +13,7 @@ public enum ClaudeCredentialStore {
 
     public static func service(forNamespace dir: URL) -> String {
         let path = dir.path.precomposedStringWithCanonicalMapping
-        let hex = Data(SHA256.hash(data: Data(path.utf8))).hexEncoded()
+        let hex = CryptoShim.sha256Hex(Data(path.utf8))
         return "\(globalService)-\(hex.prefix(8))"
     }
 

@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+@testable import CCMuxCore
 @testable import CCMuxKit
 
 @Suite("Rebalancing running sessions")

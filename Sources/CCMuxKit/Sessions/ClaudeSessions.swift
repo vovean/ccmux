@@ -1,3 +1,4 @@
+import CCMuxCore
 import Foundation
 
 /// Enumerates live Claude Code sessions from ~/.claude/sessions/<pid>.json, the same

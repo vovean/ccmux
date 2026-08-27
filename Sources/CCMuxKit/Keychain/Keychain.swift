@@ -1,3 +1,4 @@
+import CCMuxCore
 import Foundation
 
 public enum KeychainError: Error, LocalizedError {
@@ -113,14 +114,5 @@ public enum Keychain {
                       stdout: String(decoding: outData, as: UTF8.self),
                       stderr: String(decoding: errData, as: UTF8.self)
                           .trimmingCharacters(in: .whitespacesAndNewlines))
-    }
-}
-
-
-extension Data {
-    /// The encoding that decides which Keychain item is read and what value is written,
-    /// so it exists once.
-    func hexEncoded() -> String {
-        map { String(format: "%02x", $0) }.joined()
     }
 }

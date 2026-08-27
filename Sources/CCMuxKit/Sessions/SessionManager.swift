@@ -1,3 +1,4 @@
+import CCMuxCore
 import Foundation
 
 public enum SessionError: Error, LocalizedError {

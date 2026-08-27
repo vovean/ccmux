@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 
 public enum OAuthError: Error, LocalizedError {
@@ -48,6 +47,17 @@ public struct AccountIdentity: Equatable {
     public var subscriptionType: String?
     public var rateLimitTier: String?
 
+    public init(uuid: String, email: String? = nil, organizationUUID: String? = nil,
+                organizationName: String? = nil, subscriptionType: String? = nil,
+                rateLimitTier: String? = nil) {
+        self.uuid = uuid
+        self.email = email
+        self.organizationUUID = organizationUUID
+        self.organizationName = organizationName
+        self.subscriptionType = subscriptionType
+        self.rateLimitTier = rateLimitTier
+    }
+
     /// "claude_team" -> "team". Unprefixed values pass through unchanged.
     public static func planName(fromOrganizationType raw: String?) -> String? {
         guard let raw, !raw.isEmpty else { return nil }
@@ -72,45 +82,41 @@ public struct OAuthClient {
                                        "user:sessions:claude_code", "user:mcp_servers",
                                        "user:file_upload"]
 
-    let session: URLSession
+    let transport: HTTPTransport
 
-    public init(session: URLSession = .shared) {
-        self.session = session
+    public init(transport: HTTPTransport) {
+        self.transport = transport
     }
 
-    /// A client whose refresh, profile, usage and probe calls all go through the proxy.
-    /// Routing only the relay would look like the setting worked while token refreshes
-    /// still went direct — and on a machine that needs the proxy, those are exactly the
-    /// calls that would fail.
-    public static func proxied(_ proxy: UpstreamProxy?, password: String?) -> OAuthClient {
-        guard proxy != nil else { return OAuthClient() }
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 30
-        ProxyTransport.apply(proxy, to: config)
-        let auth = ProxyAuthenticator(
-            credential: ProxyTransport.credential(for: proxy, password: password))
-        return OAuthClient(session: URLSession(configuration: config, delegate: auth,
-                                               delegateQueue: nil))
+    #if canImport(Darwin)
+    public init() {
+        self.transport = URLSessionTransport()
     }
+    #endif
 
     // MARK: - Login
 
-    public struct PKCE {
+    public struct PKCE: Sendable {
         public let verifier: String
         public let challenge: String
         public let state: String
 
         public init() {
             verifier = PKCE.randomURLSafe(64)
-            let digest = SHA256.hash(data: Data(verifier.utf8))
-            challenge = Data(digest).base64URLEncodedString()
+            challenge = CryptoShim.sha256(Data(verifier.utf8)).base64URLEncodedString()
             state = PKCE.randomURLSafe(32)
         }
 
+        /// Rebuilt from a stored verifier. The server keeps the verifier across the two
+        /// halves of a login and has to derive the same challenge it already sent.
+        public init(verifier: String, state: String) {
+            self.verifier = verifier
+            self.challenge = CryptoShim.sha256(Data(verifier.utf8)).base64URLEncodedString()
+            self.state = state
+        }
+
         static func randomURLSafe(_ bytes: Int) -> String {
-            var buffer = [UInt8](repeating: 0, count: bytes)
-            _ = SecRandomCopyBytes(kSecRandomDefault, bytes, &buffer)
-            return Data(buffer).base64URLEncodedString()
+            CryptoShim.randomBytes(bytes).base64URLEncodedString()
         }
     }
 
@@ -132,6 +138,10 @@ public struct OAuthClient {
         return components.url!
     }
 
+    /// Always loopback, even when the credential is destined for a remote server: the
+    /// browser doing the sign-in runs on the client, so the code lands there and is
+    /// relayed. Measured on 2026-08-27 — `claude.com/cai/oauth/authorize` rewrites
+    /// `127.0.0.1` to `localhost`, so the spelling here is the one that survives.
     public static func redirectURI(port: UInt16) -> String {
         "http://localhost:\(port)/callback"
     }
@@ -196,11 +206,11 @@ public struct OAuthClient {
     // MARK: - Identity
 
     public func profile(accessToken: String) async throws -> AccountIdentity {
-        var request = URLRequest(url: URL(string: "\(Self.apiBase)/api/oauth/profile")!)
-        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 15
-        let json = try await send(request)
+        let json = try await send(HTTPRequestSpec(
+            url: URL(string: "\(Self.apiBase)/api/oauth/profile")!,
+            headers: ["Authorization": "Bearer \(accessToken)",
+                      "Content-Type": "application/json"],
+            timeout: 15))
         guard let account = json["account"] as? [String: Any],
               let uuid = (account["uuid"] as? String)?
                   .trimmingCharacters(in: .whitespaces), !uuid.isEmpty
@@ -219,11 +229,11 @@ public struct OAuthClient {
     // MARK: - Usage
 
     public func usage(accessToken: String) async throws -> [UsageWindow] {
-        var request = URLRequest(url: URL(string: "\(Self.apiBase)/api/oauth/usage")!)
-        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue(Self.betaHeader, forHTTPHeaderField: "anthropic-beta")
-        request.timeoutInterval = 15
-        let json = try await send(request)
+        let json = try await send(HTTPRequestSpec(
+            url: URL(string: "\(Self.apiBase)/api/oauth/usage")!,
+            headers: ["Authorization": "Bearer \(accessToken)",
+                      "anthropic-beta": Self.betaHeader],
+            timeout: 15))
         return UsageParser.windows(from: json)
     }
 
@@ -241,71 +251,62 @@ public struct OAuthClient {
     /// Claude Code's because the API refuses OAuth-token requests that do not look like
     /// it — a bare request gets a 429 with no rate-limit headers at all.
     public func startUsageWindow(accessToken: String) async throws {
-        var request = URLRequest(url: URL(string: "\(Self.apiBase)/v1/messages?beta=true")!)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("claude-code-20250219,\(Self.betaHeader)",
-                         forHTTPHeaderField: "anthropic-beta")
-        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("cli", forHTTPHeaderField: "x-app")
-        request.setValue("claude-cli/2.1.238 (external, cli)", forHTTPHeaderField: "User-Agent")
-        request.timeoutInterval = 30
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
+        let body = try JSONSerialization.data(withJSONObject: [
             "model": Self.probeModel,
             "max_tokens": 1,
             "system": [["type": "text",
                         "text": "You are Claude Code, Anthropic's official CLI for Claude."]],
             "messages": [["role": "user", "content": "."]],
         ])
-        _ = try await send(request)
+        _ = try await send(HTTPRequestSpec(
+            url: URL(string: "\(Self.apiBase)/v1/messages?beta=true")!,
+            method: "POST",
+            headers: ["Authorization": "Bearer \(accessToken)",
+                      "anthropic-beta": "claude-code-20250219,\(Self.betaHeader)",
+                      "anthropic-version": "2023-06-01",
+                      "Content-Type": "application/json",
+                      "x-app": "cli",
+                      "User-Agent": "claude-cli/2.1.238 (external, cli)"],
+            body: body,
+            timeout: 30))
     }
 
     // MARK: - Transport
 
     private func postJSON(url: URL, body: [String: Any]) async throws -> [String: Any] {
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        request.timeoutInterval = 30
-        return try await send(request)
+        try await send(HTTPRequestSpec(
+            url: url,
+            method: "POST",
+            headers: ["Content-Type": "application/json"],
+            body: try JSONSerialization.data(withJSONObject: body),
+            timeout: 30))
     }
 
-
-
-    private func send(_ request: URLRequest) async throws -> [String: Any] {
-        let data: Data, response: URLResponse
+    private func send(_ spec: HTTPRequestSpec) async throws -> [String: Any] {
+        let reply: HTTPReply
         do {
-            (data, response) = try await session.data(for: request)
+            reply = try await transport.send(spec)
+        } catch let error as HTTPTransportError {
+            switch error {
+            case .network(let message): throw OAuthError.transient("network: \(message)")
+            case .notHTTP: throw OAuthError.badResponse("not an HTTP response")
+            }
         } catch {
             throw OAuthError.transient("network: \(error.localizedDescription)")
         }
-        guard let http = response as? HTTPURLResponse else {
-            throw OAuthError.badResponse("not an HTTP response")
-        }
-        if http.statusCode != 200 {
-            let text = String(decoding: data.prefix(600), as: UTF8.self)
-            if [400, 401, 403].contains(http.statusCode),
+        if reply.status != 200 {
+            let text = String(decoding: reply.body.prefix(600), as: UTF8.self)
+            if [400, 401, 403].contains(reply.status),
                text.contains("invalid_grant") || text.contains("invalid_client") {
                 throw OAuthError.invalidGrant(text)
             }
-            throw OAuthError.transient("HTTP \(http.statusCode): \(text)",
-                                       status: http.statusCode)
+            throw OAuthError.transient("HTTP \(reply.status): \(text)", status: reply.status)
         }
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        guard let json = try? JSONSerialization.jsonObject(with: reply.body)
+            as? [String: Any] else {
             throw OAuthError.badResponse("body was not a JSON object")
         }
         return json
-    }
-}
-
-extension Data {
-    func base64URLEncodedString() -> String {
-        base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
     }
 }
 
@@ -314,19 +315,22 @@ public extension OAuthClient {
     /// answers 401 cleanly on a bad key, which makes it the right probe: verifying by
     /// sending a message would bill the user to find out they typed it wrong.
     func validateAPIKey(_ key: String) async throws -> [String] {
-        var request = URLRequest(url: URL(string: "\(Self.apiBase)/v1/models")!)
-        request.setValue(key, forHTTPHeaderField: "x-api-key")
-        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        request.timeoutInterval = 20
-        let (data, response) = try await session.data(for: request)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard status == 200 else {
-            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let reply: HTTPReply
+        do {
+            reply = try await transport.send(HTTPRequestSpec(
+                url: URL(string: "\(Self.apiBase)/v1/models")!,
+                headers: ["x-api-key": key, "anthropic-version": "2023-06-01"],
+                timeout: 20))
+        } catch {
+            throw OAuthError.transient("network: \(error.localizedDescription)")
+        }
+        guard reply.status == 200 else {
+            let json = try? JSONSerialization.jsonObject(with: reply.body) as? [String: Any]
             let message = ((json?["error"] as? [String: Any])?["message"] as? String)
-                ?? "HTTP \(status)"
+                ?? "HTTP \(reply.status)"
             throw OAuthError.badResponse(message)
         }
-        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let json = try JSONSerialization.jsonObject(with: reply.body) as? [String: Any]
         let models = (json?["data"] as? [[String: Any]])?.compactMap { $0["id"] as? String }
         return models ?? []
     }

@@ -1,3 +1,4 @@
+import CCMuxCore
 import Foundation
 
 /// Finding the iTerm tab a session is running in.

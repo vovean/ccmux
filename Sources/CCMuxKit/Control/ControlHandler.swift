@@ -1,3 +1,4 @@
+import CCMuxCore
 import Foundation
 
 /// Serves the control socket. Deliberately not part of `Engine`.
