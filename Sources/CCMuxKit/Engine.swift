@@ -150,17 +150,6 @@ public final class Engine: ObservableObject {
             guard let self else { return "ccmux is shutting down" }
             return await self.importGlobalLogin()
         }
-        handler.exportBundle = { [weak self] includePolicies, includeSecrets -> ControlResponse in
-            guard let self else { return .failure("ccmux is shutting down") }
-            return await MainActor.run { () -> ControlResponse in
-                let bundle = self.exportBundle(includePolicies: includePolicies,
-                                               includeSecrets: includeSecrets)
-                guard let data = try? bundle.encoded() else {
-                    return .failure("could not encode the export")
-                }
-                return .exported(String(decoding: data, as: UTF8.self))
-            }
-        }
         controlHandler = handler
         let server = ControlServer { [weak handler] request in
             handler?.handle(request) ?? .failure("ccmux is shutting down")
@@ -237,12 +226,12 @@ public final class Engine: ObservableObject {
 
     /// Chrome's `Local State` changes when a profile is added, which is close to never,
     /// so it is only re-read when the file's timestamp moves.
-    private func refreshChromeProfiles(force: Bool = false) {
+    private func refreshChromeProfiles() {
         let stamp = try? FileManager.default
             .attributesOfItem(atPath: ChromeProfileReader.localStateURL.path)[.modificationDate]
             as? Date
         let resolved = stamp ?? nil
-        guard force || resolved != chromeStateStamp || chromeProfiles.isEmpty else { return }
+        guard resolved != chromeStateStamp || chromeProfiles.isEmpty else { return }
         chromeStateStamp = resolved
         chromeProfiles = ChromeProfileReader.load()
     }
@@ -1054,176 +1043,6 @@ public final class Engine: ObservableObject {
 
     public func sessionCount(forAccount accountID: String) -> Int {
         sessions.reduce(0) { $0 + ($1.accountID == accountID ? 1 : 0) }
-    }
-
-    // MARK: - Transfer to another Mac
-
-    /// Chrome profile directories created during an import, with the name each should
-    /// get. Naming waits until the end: Chrome only writes a profile into `Local State`
-    /// once it has launched into it, and the name can only be set while Chrome is quit.
-    private var profilesToName: [(directory: String, name: String)] = []
-
-    public func exportBundle(includePolicies: Bool, includeSecrets: Bool) -> AccountBundle {
-        AccountTransfer.bundle(
-            accounts: store.accounts.all(), settings: settings,
-            profiles: chromeProfiles, includePolicies: includePolicies,
-            apiKey: { id in
-                guard includeSecrets else { return nil }
-                return (try? APIKeyStore.read(id)).flatMap { $0.isEmpty ? nil : $0 }
-            })
-    }
-
-    /// 0600 because with secrets the file is a live credential, and the user is about to
-    /// move it between machines.
-    public func write(_ bundle: AccountBundle, to url: URL) throws {
-        // Created 0600 rather than written and then chmod-ed: with secrets the contents
-        // are a live credential, and the gap in between is a window where they sit at
-        // whatever the umask allows. Written beside the target and moved into place, so
-        // a failure cannot destroy an export that was already there.
-        let data = try bundle.encoded()
-        let staging = url.deletingLastPathComponent()
-            .appendingPathComponent(".\(url.lastPathComponent).ccmux-partial")
-        try? FileManager.default.removeItem(at: staging)
-        guard FileManager.default.createFile(atPath: staging.path, contents: data,
-                                             attributes: [.posixPermissions: 0o600])
-        else { throw CocoaError(.fileWriteUnknown) }
-        do {
-            _ = try FileManager.default.replaceItemAt(url, withItemAt: staging)
-        } catch {
-            try? FileManager.default.removeItem(at: staging)
-            throw error
-        }
-    }
-
-    public func readBundle(from url: URL) throws -> AccountBundle {
-        try AccountBundle.decoded(from: Data(contentsOf: url))
-    }
-
-    public func importPlan(_ bundle: AccountBundle) -> AccountTransfer.Plan {
-        AccountTransfer.plan(bundle, existing: store.accounts.all())
-    }
-
-    /// Signs in one account from the bundle, in its own Chrome profile.
-    public func importSignIn(_ entry: AccountBundle.Entry) async -> Bool {
-        let before = Set(store.accounts.all().map(\.id))
-        let directory = chromeProfile(forImporting: entry)
-        await beginLogin(chromeProfileDirectory: directory, label: entry.label,
-                         loginHint: entry.chromeProfileEmail ?? entry.email)
-        // Chrome writes a new profile into Local State only once it commits, so the list
-        // this came from is stale the moment it is used.
-        refreshChromeProfiles(force: true)
-        if store.accounts.get(entry.id) != nil {
-            importedIDs[entry.id] = entry.id
-            apply(entry, to: entry.id, chromeProfileDirectory: directory)
-            return true
-        }
-        // Nothing arrived, or a different Google identity was chosen in the browser —
-        // in which case that account is signed in and stored, just not this entry.
-        if let other = store.accounts.all().first(where: { !before.contains($0.id) }) {
-            banner = Banner(level: .warning,
-                            text: "Signed in as \(other.displayName), which is not "
-                                + "\(entry.displayName). That account was added; "
-                                + "\(entry.displayName) still needs a sign-in.")
-        }
-        if let directory { profilesToName.removeAll { $0.directory == directory } }
-        return false
-    }
-
-    public func importAPIKey(_ entry: AccountBundle.Entry, key: String) async -> Bool {
-        // The id is generated locally, so the imported entry's id never matches and the
-        // account has to be identified by what appeared. Matching on the label instead
-        // finds the *oldest* account with that label — an existing one the user already
-        // had — and rewrites its priority, rotation and budget.
-        let before = Set(store.accounts.all().map(\.id))
-        guard await addAPIKeyAccount(key: key, label: entry.label) else { return false }
-        guard let added = store.accounts.all().first(where: { !before.contains($0.id) })
-        else { return true }
-        importedIDs[entry.id] = added.id
-        apply(entry, to: added.id, chromeProfileDirectory: nil)
-        return true
-    }
-
-    /// Bundle entry id to the account it produced here, so a row that has been done can
-    /// say so even when the account it created has an id of its own.
-    @Published public private(set) var importedIDs: [String: String] = [:]
-
-    private func apply(_ entry: AccountBundle.Entry, to accountID: String,
-                       chromeProfileDirectory: String?) {
-        store.accounts.mutate(accountID) {
-            if !entry.label.isEmpty { $0.label = entry.label }
-            $0.priority = entry.priority
-            $0.inRotation = entry.inRotation
-            $0.monthlyBudgetUSD = entry.monthlyBudgetUSD
-            if $0.chromeProfileDirectory == nil {
-                $0.chromeProfileDirectory = chromeProfileDirectory
-            }
-        }
-        reload()
-    }
-
-    /// Reuses the profile already signed into that Google account when there is one —
-    /// signing a second account into it is exactly the mess separate profiles avoid.
-    private func chromeProfile(forImporting entry: AccountBundle.Entry) -> String? {
-        if let email = entry.chromeProfileEmail?.lowercased(), !email.isEmpty,
-           let match = chromeProfiles.first(where: { $0.email?.lowercased() == email }) {
-            return match.directory
-        }
-        // A name match only counts when the profile is not already somebody else's.
-        // Chrome's default names are generic — "Person 2", or the directory itself when
-        // it has no name — so matching on one can drive the sign-in straight into the
-        // user's own unrelated profile and record it there permanently.
-        if let name = entry.chromeProfileName,
-           !ChromeProfileWriter.isGenericName(name),
-           let match = chromeProfiles.first(where: { $0.name == name }),
-           match.email == nil || match.email?.lowercased()
-               == entry.chromeProfileEmail?.lowercased() {
-            return match.directory
-        }
-        guard let name = entry.chromeProfileName ?? entry.email else { return nil }
-        let directory = ChromeProfileWriter.nextFreeDirectory(
-            existing: chromeProfiles, alsoTaken: profilesToName.map(\.directory))
-        profilesToName.append((directory, name))
-        return directory
-    }
-
-
-    public var pendingProfileNames: [String] { profilesToName.map(\.name) }
-
-    /// Run once the sign-ins are done and Chrome has been quit — see `profilesToName`.
-    public func nameImportedProfiles() -> String {
-        guard !profilesToName.isEmpty else { return "No profiles are waiting for a name." }
-        guard !ChromeProfileWriter.isChromeRunning else {
-            return "Quit Chrome first — it rewrites its profile list on exit, so a name "
-                + "set now would be lost."
-        }
-        var named = 0
-        var failed: [String] = []
-        var stillPending: [(directory: String, name: String)] = []
-        for (index, pending) in profilesToName.enumerated() {
-            switch ChromeProfileWriter.name(directory: pending.directory, to: pending.name,
-                                            backingUp: index == 0) {
-            case .named:
-                named += 1
-            case .skippedChromeRunning:
-                stillPending.append(pending)
-                failed.append(pending.name)
-            case .failed(let reason):
-                stillPending.append(pending)
-                failed.append("\(pending.name) (\(reason))")
-            }
-        }
-        profilesToName = stillPending
-        refreshChromeProfiles()
-        if failed.isEmpty { return "Named \(named) Chrome profile(s)." }
-        return "Named \(named); could not name: \(failed.joined(separator: ", "))."
-    }
-
-    public func applyImportedSettings(_ bundle: AccountBundle) {
-        guard bundle.policies != nil || bundle.thresholds != nil else { return }
-        updateSettings { current in
-            if let policies = bundle.policies { current.policies = policies }
-            bundle.thresholds?.apply(to: &current)
-        }
     }
 
     // MARK: - Sessions

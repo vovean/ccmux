@@ -6,8 +6,6 @@ struct SettingsPage: View {
     @State private var proxyText = ""
     @State private var proxyTesting = false
     @State private var proxyResult: String?
-    @State private var exporting = false
-    @State private var importing = false
 
     var body: some View {
         ScrollView {
@@ -19,37 +17,9 @@ struct SettingsPage: View {
                 upstreamProxySection
                 policies
                 directoryBindings
-                transfer
                 paths
             }
             .padding(14)
-        }
-        .sheet(isPresented: $exporting) {
-            ExportSheet(engine: engine) { exporting = false }
-        }
-        .sheet(isPresented: $importing) {
-            ImportSheet(engine: engine) { importing = false }
-        }
-    }
-
-    /// Setting up a second Mac. The sign-ins cannot travel — see `AccountBundle` — so
-    /// this carries everything else and walks the rest.
-    @ViewBuilder
-    private var transfer: some View {
-        section("Another Mac") {
-            Text("Export what this Mac knows — accounts, their order, their Chrome "
-                 + "profiles — and import it there. Subscription sign-ins are not "
-                 + "included: each Mac needs its own, and the import walks you through "
-                 + "them, skipping any account already set up.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            HStack {
-                Button("Export…") { exporting = true }
-                Button("Import…") { importing = true }
-                Spacer()
-            }
-            .controlSize(.small)
         }
     }
 

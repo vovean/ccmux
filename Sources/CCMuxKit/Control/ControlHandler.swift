@@ -14,9 +14,6 @@ public final class ControlHandler {
     /// The one operation that genuinely needs the main actor. Returns nil on success or
     /// a message on failure.
     public var importGlobalLogin: (() async -> String?)?
-    /// Reads the Keychain for API keys and the profile list from Chrome, both of which
-    /// live behind the main actor, so it is a hook like the login above.
-    public var exportBundle: ((Bool, Bool) async -> ControlResponse)?
 
     public init(store: Store, sessions: SessionManager) {
         self.store = store
@@ -47,19 +44,6 @@ public final class ControlHandler {
             } catch {
                 return .failure(error.localizedDescription)
             }
-
-        case .export(let includePolicies, let includeSecrets):
-            guard let exportBundle else { return .failure("ccmux is still starting up") }
-            let semaphore = DispatchSemaphore(value: 0)
-            var outcome = ControlResponse.failure("export did not finish")
-            Task {
-                outcome = await exportBundle(includePolicies, includeSecrets)
-                semaphore.signal()
-            }
-            guard semaphore.wait(timeout: .now() + 30) == .success else {
-                return .failure("export timed out")
-            }
-            return outcome
 
         case .importGlobalLogin:
             guard let importGlobalLogin else { return .failure("ccmux is still starting up") }

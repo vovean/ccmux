@@ -19,7 +19,6 @@ enum CLI {
         Command(name: "assign", usage: "assign <session-id> <account-id>", run: assign),
         Command(name: "end", usage: "end <session-id>", run: end),
         Command(name: "import", usage: "import", run: { _ in importLogin() }),
-        Command(name: "export", usage: "export <file.json> [--with-secrets]", run: export),
         Command(name: "shell-init", usage: "shell-init", run: { _ in shellInit() }),
         Command(name: "install-agent", usage: "install-agent",
                 run: { _ in installAgent() }),
@@ -208,45 +207,6 @@ enum CLI {
     static func end(_ arguments: [String]) -> Never {
         guard arguments.count == 1 else { fail("usage: ccmux end <session-id>") }
         send(.endSession(sessionID: arguments[0]), success: "ended")
-    }
-
-    /// Writes what another Mac needs. Subscription sign-ins are deliberately absent —
-    /// see `AccountBundle` — so without `--with-secrets` the file holds no credentials
-    /// at all.
-    static func export(_ arguments: [String]) -> Never {
-        var path: String?
-        var withSecrets = false
-        var includePolicies = true
-        for argument in arguments {
-            switch argument {
-            case "--with-secrets": withSecrets = true
-            case "--accounts-only": includePolicies = false
-            default:
-                guard !argument.hasPrefix("-") else { fail("unknown flag \(argument)") }
-                guard path == nil else { fail("give one file, not several") }
-                path = argument
-            }
-        }
-        guard let path else { fail("usage: ccmux export <file.json> [--with-secrets]") }
-        guard let response = try? ControlClient.send(
-                .export(includePolicies: includePolicies, includeSecrets: withSecrets))
-        else { fail("ccmux is not running") }
-        guard case .exported(let json) = response else {
-            if case .failure(let reason) = response { fail(reason) }
-            fail("unexpected reply")
-        }
-        let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
-        // Created 0600 rather than written and then chmod-ed: with secrets the file is a
-        // live credential, and between the two it would sit at whatever the umask allows.
-        try? FileManager.default.removeItem(at: url)
-        guard FileManager.default.createFile(atPath: url.path, contents: Data(json.utf8),
-                                             attributes: [.posixPermissions: 0o600])
-        else { fail("could not write \(url.path)") }
-        print("wrote \(url.path)")
-        if withSecrets {
-            print("This file contains an API key in plain text. Delete it once imported.")
-        }
-        exit(0)
     }
 
     static func importLogin() -> Never {
