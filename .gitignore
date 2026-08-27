@@ -4,3 +4,4 @@ dist/
 .DS_Store
 ai/
 CLAUDE.md
+server/.build/

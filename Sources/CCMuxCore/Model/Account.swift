@@ -1,6 +1,6 @@
 import Foundation
 
-public enum AccountHealth: String, Codable, Equatable {
+public enum AccountHealth: String, Codable, Equatable, Sendable {
     case ok
     case needsRelogin
     case unknown
@@ -8,7 +8,7 @@ public enum AccountHealth: String, Codable, Equatable {
 
 /// What ccmux authenticates as. Subscriptions have quota and no per-request cost;
 /// an API key has the inverse, so almost every policy decision branches on this.
-public enum AccountKind: String, Codable, Equatable {
+public enum AccountKind: String, Codable, Equatable, Sendable {
     case subscription
     case apiKey
 }

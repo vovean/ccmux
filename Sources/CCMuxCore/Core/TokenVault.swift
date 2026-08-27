@@ -1,4 +1,3 @@
-import CCMuxCore
 import Foundation
 
 /// Owns every account's credential and hands the proxy a usable bearer token.
@@ -36,25 +35,60 @@ public final class TokenVault {
     /// Swappable so an upstream-proxy change reaches token refresh too, which is the one
     /// call that must not keep going direct on a machine that needs the proxy.
     private var client: OAuthClient
+    /// Keychain on a Mac, a sealed file on the server. The coalescing below is the part
+    /// that must not be reimplemented per platform, which is why this is a parameter.
+    private let secrets: SecretStore
+    /// Set when this Mac has handed its accounts to a ccmuxd. Delegated accounts are
+    /// renewed by asking the server for a fresh access token rather than by running a
+    /// refresh grant, because the server is the sole holder of the lineage.
+    private var remote: RemoteTokenSource?
+    private var delegated: Set<String> = []
 
     /// Refresh this far ahead of expiry so a request rarely has to wait on one.
     private static let refreshLead: TimeInterval = 10 * 60
     private static let blockingRefreshTimeout: TimeInterval = 20
 
-    public init(client: OAuthClient = OAuthClient()) {
+    public init(client: OAuthClient, secrets: SecretStore) {
         self.client = client
+        self.secrets = secrets
     }
 
     public func setClient(_ client: OAuthClient) {
         lock.lock(); self.client = client; lock.unlock()
     }
 
+    /// Points delegated accounts at a server. Everything else — coalescing, persistence,
+    /// the failure callbacks — is unchanged, which is the reason this lives here rather
+    /// than in a parallel implementation.
+    public func setRemote(_ remote: RemoteTokenSource?, delegated ids: Set<String>) {
+        lock.lock()
+        self.remote = remote
+        self.delegated = remote == nil ? [] : ids
+        lock.unlock()
+    }
+
+    public func isDelegated(_ accountID: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return delegated.contains(accountID)
+    }
+
+    private func remoteSource(for accountID: String) -> RemoteTokenSource? {
+        lock.lock(); defer { lock.unlock() }
+        return delegated.contains(accountID) ? remote : nil
+    }
+
     public func load(accountIDs: [String]) {
         for id in accountIDs {
-            if let credential = try? AccountCredentialStore.read(id) {
+            if let raw = try? secrets.read(id), let credential = OAuthCredential(json: raw) {
                 lock.lock(); credentials[id] = credential; lock.unlock()
             }
         }
+    }
+
+    /// Every account the secret store holds a credential for, whatever the accounts file
+    /// happens to say.
+    public func storedAccountIDs() -> [String] {
+        (try? secrets.keys()) ?? []
     }
 
     public func credential(for accountID: String) -> OAuthCredential? {
@@ -67,12 +101,12 @@ public final class TokenVault {
         credentials[accountID] = credential
         lock.unlock()
         do {
-            try AccountCredentialStore.write(credential, for: accountID)
+            try secrets.write(credential.jsonString(), for: accountID)
         } catch {
             // One retry: the usual cause is a transient `security` timeout under
             // contention, and losing a rotation costs a re-login.
             do {
-                try AccountCredentialStore.write(credential, for: accountID)
+                try secrets.write(credential.jsonString(), for: accountID)
             } catch {
                 Log.error("could not persist credential for \(accountID): \(error)")
                 onPersistFailure?(accountID, error)
@@ -86,7 +120,7 @@ public final class TokenVault {
         credentials.removeValue(forKey: accountID)
         inFlight.removeValue(forKey: accountID)?.task.cancel()
         lock.unlock()
-        try? AccountCredentialStore.delete(accountID)
+        try? secrets.delete(accountID)
     }
 
     /// The token to put on the wire right now. Called off the main thread by the proxy.
@@ -155,7 +189,11 @@ public final class TokenVault {
         nextRefreshID += 1
         let id = nextRefreshID
         let task = Task<OAuthCredential?, Never> { [weak self] in
-            guard let self, let existing = self.credential(for: accountID) else { return nil }
+            guard let self else { return nil }
+            if let remote = self.remoteSource(for: accountID) {
+                return await self.renewFromServer(accountID, remote)
+            }
+            guard let existing = self.credential(for: accountID) else { return nil }
             do {
                 let rotated = try await self.client.refresh(existing)
                 self.store(rotated, for: accountID)
@@ -174,6 +212,31 @@ public final class TokenVault {
         }
         inFlight[accountID] = (id, task)
         return (id, task)
+    }
+
+    /// Asks the server for a fresh access token. The grant carries no refresh token, so
+    /// what lands in the store cannot rotate anything — which is exactly the property
+    /// that makes delegating safe.
+    private func renewFromServer(_ accountID: String,
+                                 _ remote: RemoteTokenSource) async -> OAuthCredential? {
+        do {
+            let grant = try await remote.grant(for: accountID)
+            guard let credential = grant.credential() else {
+                throw OAuthError.badResponse("server returned no access token")
+            }
+            store(credential, for: accountID)
+            onRefreshed?(accountID, credential)
+            Log.info("renewed \(accountID) from ccmuxd")
+            return credential
+        } catch let error as OAuthError {
+            Log.warn("ccmuxd could not renew \(accountID): " + error.localizedDescription)
+            onRefreshFailure?(accountID, error)
+            return nil
+        } catch {
+            Log.warn("ccmuxd could not renew \(accountID): \(error)")
+            onRefreshFailure?(accountID, OAuthError.transient("\(error)"))
+            return nil
+        }
     }
 
     /// Only the caller that created the entry may clear it, or a finishing refresh could

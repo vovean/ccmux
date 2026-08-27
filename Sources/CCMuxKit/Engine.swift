@@ -42,7 +42,9 @@ public final class Engine: ObservableObject {
     }
 
     private let store = Store()
-    private let vault = TokenVault()
+    private let vault = TokenVault(client: OAuthClient(),
+                                   secrets: KeychainSecretStore(
+                                       service: AccountCredentialStore.service))
     private let notifier = Notifier()
     private var client = OAuthClient()
     private lazy var sessionManager = SessionManager(store: store, vault: vault)

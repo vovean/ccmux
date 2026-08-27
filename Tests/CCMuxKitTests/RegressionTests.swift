@@ -181,7 +181,8 @@ struct RefreshCoalescingTests {
             Thread.sleep(forTimeInterval: 0.2)
             grants.leave()
             return #"{"access_token":"rotated","expires_in":28800,"refresh_token":"r2"}"#
-        })))
+        })),
+                               secrets: InMemorySecretStore())
         let id = "acct-overlap"
         vault.store(OAuthCredential(accessToken: "old", refreshToken: "r1",
                                     expiresAt: Date().addingTimeInterval(-60)), for: id)
@@ -208,7 +209,8 @@ struct RefreshCoalescingTests {
             grants.enter()
             grants.leave()
             return #"{"access_token":"rotated","expires_in":28800}"#
-        })))
+        })),
+                               secrets: InMemorySecretStore())
         let id = "acct-sequential"
         vault.store(OAuthCredential(accessToken: "old", refreshToken: "r1",
                                     expiresAt: Date().addingTimeInterval(-60)), for: id)
