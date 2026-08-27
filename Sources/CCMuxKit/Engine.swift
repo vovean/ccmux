@@ -317,8 +317,8 @@ public final class Engine: ObservableObject {
 
         switch result {
         case .success(let windows):
-            snapshot = UsageSnapshot(windows: windows, fetchedAt: Date(),
-                                     lastEndpointFetchAt: Date())
+            snapshot = UsageSnapshot(windows: windows, fetchedAt: fetchedAt,
+                                     lastEndpointFetchAt: fetchedAt)
             markHealthy(accountID)
         case .failure(let error):
             snapshot = UsageSnapshot(windows: previous?.windows ?? [],

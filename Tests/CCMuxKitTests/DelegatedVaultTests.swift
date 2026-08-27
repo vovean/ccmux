@@ -177,3 +177,65 @@ struct DelegatedVaultTests {
         #expect(expiresAt < before.addingTimeInterval(3700))
     }
 }
+
+@Suite("A server that cannot serve an account", .serialized)
+struct DeadServerLineageTests {
+    /// The failure this closes: when the server's own lineage dies, every token request
+    /// 404s. Reported as transient, the account stayed green, the cached token went on
+    /// answering 401 in every session, and the "sign in again" button — the only thing
+    /// that could repair the server — never appeared, because it is drawn only for
+    /// `needsRelogin`.
+    @Test func aServerWithNoUsableCredentialIsAPermanentFailure() async throws {
+        let failures = Locked<[OAuthError]>([])
+        let remote = StubRemote { _ in
+            throw RemoteTokenError.noUsableCredential("no usable credential for acct-1")
+        }
+        let vault = TokenVault(client: OAuthClient(transport: ForbiddenTransport { }),
+                               secrets: InMemorySecretStore())
+        vault.onRefreshFailure = { _, error in failures.set(failures.get() + [error]) }
+        vault.store(OAuthCredential(accessToken: "stale", refreshToken: nil,
+                                    expiresAt: Date().addingTimeInterval(-60)),
+                    for: "acct-1")
+        vault.setRemote(remote, delegated: ["acct-1"])
+
+        #expect(await vault.refresh("acct-1") == nil)
+        #expect(failures.get().count == 1)
+        // Permanent is what makes Engine.handleRefreshFailure flag the account.
+        #expect(failures.get().first?.isPermanent == true)
+    }
+
+    /// An unreachable server is still transient — the two must not be conflated, or a
+    /// flaky network would mark every delegated account as needing a browser re-login.
+    @Test func anUnreachableServerStaysTransient() async throws {
+        let failures = Locked<[OAuthError]>([])
+        let remote = StubRemote { _ in throw ServerClientError.transport("timed out") }
+        let vault = TokenVault(client: OAuthClient(transport: ForbiddenTransport { }),
+                               secrets: InMemorySecretStore())
+        vault.onRefreshFailure = { _, error in failures.set(failures.get() + [error]) }
+        vault.store(OAuthCredential(accessToken: "stale", refreshToken: nil,
+                                    expiresAt: Date().addingTimeInterval(-60)),
+                    for: "acct-1")
+        vault.setRemote(remote, delegated: ["acct-1"])
+
+        #expect(await vault.refresh("acct-1") == nil)
+        #expect(failures.get().first?.isPermanent == false)
+    }
+
+    /// The routine renewal path got the same `isUsable` gate `handOver` has: a grant
+    /// carrying a token that expired before it arrived must not replace what we hold.
+    @Test func anExpiredGrantIsNotStoredOverTheCachedOne() async throws {
+        let remote = StubRemote { id in
+            TokenGrant(accountID: id, kind: .subscription, accessToken: "arrived-dead",
+                       expiresIn: 0)
+        }
+        let vault = TokenVault(client: OAuthClient(transport: ForbiddenTransport { }),
+                               secrets: InMemorySecretStore())
+        vault.store(OAuthCredential(accessToken: "kept", refreshToken: nil,
+                                    expiresAt: Date().addingTimeInterval(-1)),
+                    for: "acct-1")
+        vault.setRemote(remote, delegated: ["acct-1"])
+
+        #expect(await vault.refresh("acct-1") == nil)
+        #expect(vault.credential(for: "acct-1")?.accessToken == "kept")
+    }
+}

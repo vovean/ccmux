@@ -214,7 +214,10 @@ public actor AccountRegistry {
         accounts[account.id] = account
         vault.store(credential, for: account.id)
         persist()
-        await poll(account.id)
+        // Usage is fetched afterwards, not inline. `profile` above already cost up to 15s
+        // and a usage call costs another; a client that gives up at 20s while the server
+        // has already stored the refresh token leaves both sides holding one lineage.
+        Task { await poll(account.id) }
         Log.info("adopted \(account.displayName) (\(account.id))")
         return account
     }

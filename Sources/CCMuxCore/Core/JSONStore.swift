@@ -41,7 +41,13 @@ public struct JSONStore {
             if FileManager.default.fileExists(atPath: url.path) {
                 _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp)
             } else {
-                try FileManager.default.moveItem(at: tmp, to: url)
+                // The target can appear between the check and the move, so the move is
+                // not the last word — falling back beats losing the write.
+                do {
+                    try FileManager.default.moveItem(at: tmp, to: url)
+                } catch {
+                    _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp)
+                }
             }
         } catch {
             try? FileManager.default.removeItem(at: tmp)

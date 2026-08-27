@@ -182,13 +182,24 @@ struct EndToEndTests {
     /// `{"error":{"message":…}}`; a client decoding a flat string shows raw JSON instead.
     @Test func aServerErrorArrivesAsAReadableMessage() async throws {
         try await Self.withServer { harness in
+            // `usage` still surfaces the raw HTTP error, so it exercises the envelope.
             do {
-                _ = try await harness.client.grant(for: "no-such-account")
+                _ = try await harness.client.usage(for: "no-such-account")
                 Issue.record("expected the request to fail")
             } catch let error as ServerClientError {
                 let text = error.localizedDescription
-                #expect(text.contains("no usable credential"))
+                #expect(text.contains("no usage recorded"))
                 #expect(!text.contains("{"))
+            }
+
+            // `grant` deliberately reclassifies a 404: it means the server holds no
+            // working credential, which has to reach the vault as permanent so the
+            // account is flagged and the sign-in-again button appears.
+            do {
+                _ = try await harness.client.grant(for: "no-such-account")
+                Issue.record("expected the request to fail")
+            } catch let error as RemoteTokenError {
+                #expect(error.localizedDescription.contains("no usable credential"))
             }
         }
     }

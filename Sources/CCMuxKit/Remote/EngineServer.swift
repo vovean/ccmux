@@ -159,6 +159,7 @@ public extension Engine {
         var pushed = 0, took = 0, imported = 0
         var problems: [String] = []
         var strandedOnServer: [String] = []
+        var handedOverPendingToken: [String] = []
         // Fetched once. Doing it per importable account was one full round trip each.
         let catalogue = Dictionary(
             uniqueKeysWithValues: ((try? await client.accounts()) ?? []).map { ($0.id, $0) })
@@ -194,11 +195,22 @@ public extension Engine {
                                   delegated: &delegated) {
                     pushed += 1
                 } else {
-                    problems.append(entry.displayName)
+                    // Not "left alone": it is on the server and delegated, and this Mac
+                    // has already given up its refresh token. Only the first token fetch
+                    // failed, and the next renewal retries it.
+                    handedOverPendingToken.append(entry.displayName)
                 }
 
             case .serverNeedsRelogin:
                 strandedOnServer.append(entry.displayName)
+                // A server-only one gets a local row anyway, marked as needing re-login
+                // and delegated. Without it there is no Accounts entry, so no sign-in
+                // button, so no way to repair the server's lineage from anywhere.
+                if store.accounts.get(entry.id) == nil, let remote = catalogue[entry.id] {
+                    adoptRemoteRecord(remote)
+                    delegated.insert(remote.id)
+                    commitDelegation(delegated, client: client)
+                }
 
             case .importable:
                 guard let remote = catalogue[entry.id] else {
@@ -226,10 +238,15 @@ public extension Engine {
             trailer += " Left alone: " + problems.joined(separator: ", ")
                 + " — they still work from this Mac."
         }
+        if !handedOverPendingToken.isEmpty {
+            trailer += " Handed over but no token yet for "
+                + handedOverPendingToken.joined(separator: ", ")
+                + " — the server has them and the next renewal retries."
+        }
         if !strandedOnServer.isEmpty {
             trailer += " The server needs signing in again for "
                 + strandedOnServer.joined(separator: ", ")
-                + ", so those were not handed over."
+                + "."
         }
         banner = trailer.isEmpty
             ? Banner(level: .info, text: summary + ".")
@@ -324,11 +341,41 @@ public extension Engine {
             request = AdoptRequest(credentialJSON: credential.jsonString(),
                                    label: entry.displayName)
         }
-        return try? await client.adopt(request).id
+        if let adopted = try? await client.adopt(request) { return adopted.id }
+        // The adopt may well have succeeded and only its answer been lost — the client
+        // gives up at 20s and the server can take longer. Assuming failure is the one
+        // reading that leaves both sides holding the lineage, so the server is asked
+        // what it actually has before that conclusion is drawn.
+        return await alreadyOnServer(entry, client: client)
+    }
+
+    /// Whether the server holds this account after all, matched the same way the planner
+    /// matches: by account UUID for a subscription, by key fingerprint for an API key.
+    private func alreadyOnServer(_ entry: Delegation.Entry,
+                                 client: ServerClient) async -> String? {
+        guard let remote = try? await client.accounts() else { return nil }
+        switch entry.kind {
+        case .subscription:
+            return remote.first { $0.id == entry.id && $0.kind == .subscription }?.id
+        case .apiKey:
+            guard let key = (try? APIKeyStore.read(entry.id)) ?? nil, !key.isEmpty else {
+                return nil
+            }
+            let fingerprint = key.apiKeyFingerprint
+            return remote.first { $0.apiKeyFingerprint == fingerprint && $0.kind == .apiKey }?.id
+        }
     }
 
     private func importAccount(_ remote: RemoteAccount, client: ServerClient,
                                delegated: inout Set<String>) async -> Bool {
+        adoptRemoteRecord(remote)
+        return await handOver(remote.id, localID: remote.id, client: client,
+                              delegated: &delegated)
+    }
+
+    /// Mirrors the server's metadata into a local account record, creating one if needed.
+    /// Carries no credential — that is `handOver`'s job.
+    private func adoptRemoteRecord(_ remote: RemoteAccount) {
         var account = store.accounts.get(remote.id)
             ?? Account(id: remote.id, label: remote.label, kind: remote.kind)
         account.label = remote.label
@@ -344,8 +391,6 @@ public extension Engine {
             account.priority = (store.accounts.all().map(\.priority).max() ?? 0) + 1
         }
         store.accounts.upsert(account)
-        return await handOver(remote.id, localID: remote.id, client: client,
-                              delegated: &delegated)
     }
 
     /// An API-key account's id is generated by whichever Mac added it. When the server

@@ -130,7 +130,14 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
     }
 
     public func grant(for accountID: String) async throws -> TokenGrant {
-        try await get(["accounts", accountID, "token"])
+        do {
+            return try await get(["accounts", accountID, "token"])
+        } catch ServerClientError.http(404, let message) {
+            // Not a transient failure: the server is answering, and its answer is that it
+            // cannot serve this account. Reported as such so the account is flagged and
+            // the sign-in-again button appears.
+            throw RemoteTokenError.noUsableCredential(message)
+        }
     }
 
     public func usage(for accountID: String) async throws -> RemoteUsage {

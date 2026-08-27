@@ -242,13 +242,22 @@ public final class TokenVault {
                                  _ remote: RemoteTokenSource) async -> OAuthCredential? {
         do {
             let grant = try await remote.grant(for: accountID)
-            guard let credential = grant.credential() else {
-                throw OAuthError.badResponse("server returned no access token")
+            // `isUsable`, not merely non-nil: a grant can carry a token that expired
+            // before it arrived, and storing that over what we hold gains nothing.
+            guard grant.isUsable, let credential = grant.credential() else {
+                throw OAuthError.badResponse("the server returned no usable access token")
             }
             store(credential, for: accountID)
             onRefreshed?(accountID, credential)
             Log.info("renewed \(accountID) from ccmuxd")
             return credential
+        } catch let error as RemoteTokenError {
+            // Permanent on purpose: the server holds no working credential, so only a
+            // fresh sign-in recovers it. Reporting this as transient would leave the
+            // account looking healthy while every request on it answered 401.
+            Log.warn("ccmuxd cannot serve \(accountID): " + error.localizedDescription)
+            onRefreshFailure?(accountID, .invalidGrant(error.localizedDescription))
+            return nil
         } catch let error as OAuthError {
             Log.warn("ccmuxd could not renew \(accountID): " + error.localizedDescription)
             onRefreshFailure?(accountID, error)
