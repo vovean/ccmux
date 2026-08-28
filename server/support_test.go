@@ -768,3 +768,186 @@ func TestWaitingForGrantsGivesUp(t *testing.T) {
 	}
 	close(release)
 }
+
+// gatedStore parks inside a Write so a test can hold a rotation mid-flight.
+type gatedStore struct {
+	*MemoryStore
+	beforeWrite func()
+}
+
+func (g *gatedStore) Write(key, value string) error {
+	if g.beforeWrite != nil {
+		g.beforeWrite()
+	}
+	return g.MemoryStore.Write(key, value)
+}
+
+// A rotation and a removal must be mutually exclusive.
+//
+// Round two found that `run` checked the credential was still present, released the lock,
+// then called Store. A Forget landing in that gap deleted the maps and the secret first,
+// and the store put a live refresh token back for an account that no longer exists —
+// invisible to every client, never loaded again, orphaned for good.
+//
+// What this asserts is the invariant the fix rests on: while a rotation is writing, Forget
+// cannot begin. The exact old interleaving cannot be forced from outside — the gap sat
+// between two lock acquisitions inside the vault — so this pins the contract rather than
+// replaying the bug, and the stress loop below covers the coarse case.
+func TestARotationAndARemovalAreMutuallyExclusive(t *testing.T) {
+	inWrite := make(chan struct{})
+	release := make(chan struct{})
+	base := NewMemoryStore()
+	secrets := &gatedStore{MemoryStore: base}
+
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return jsonResponse(200,
+			`{"access_token":"rotated","expires_in":28800,"refresh_token":"r2"}`), nil
+	})
+	vault := NewVault(&OAuthClient{HTTP: &http.Client{Transport: transport}}, secrets)
+	vault.Store("acct", Credential{AccessToken: "old", RefreshToken: "r1",
+		ExpiresAt: time.Now().Add(-time.Minute)})
+
+	var once sync.Once
+	secrets.beforeWrite = func() {
+		once.Do(func() { close(inWrite); <-release })
+	}
+
+	done := make(chan struct{})
+	go func() { vault.Refresh(context.Background(), "acct"); close(done) }()
+	<-inWrite
+
+	forgotten := make(chan struct{})
+	go func() { vault.Forget("acct"); close(forgotten) }()
+	select {
+	case <-forgotten:
+		t.Fatal("Forget ran while a rotation was mid-write; they are not exclusive")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	<-done
+	<-forgotten
+
+	if _, ok := vault.Credential("acct"); ok {
+		t.Fatal("the deleted account came back in memory")
+	}
+	if value, ok, _ := base.Read("acct"); ok {
+		t.Fatalf("a live refresh token was orphaned in the store: %s", value)
+	}
+}
+
+// The coarse case, run hot: whatever the interleaving, an account that has been forgotten
+// must not be left with a credential in the store.
+func TestForgettingDuringARefreshLeavesNothingBehind(t *testing.T) {
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return jsonResponse(200,
+			`{"access_token":"rotated","expires_in":28800,"refresh_token":"r2"}`), nil
+	})
+	for round := 0; round < 400; round++ {
+		secrets := NewMemoryStore()
+		vault := NewVault(&OAuthClient{HTTP: &http.Client{Transport: transport}}, secrets)
+		vault.Store("acct", Credential{AccessToken: "old", RefreshToken: "r1",
+			ExpiresAt: time.Now().Add(-time.Minute)})
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); vault.Refresh(context.Background(), "acct") }()
+		go func() { defer wg.Done(); vault.Forget("acct") }()
+		wg.Wait()
+
+		_, inStore, _ := secrets.Read("acct")
+		_, inMemory := vault.Credential("acct")
+		if inStore && !inMemory {
+			t.Fatalf("round %d: the store holds a credential the vault does not — "+
+				"a rotation landed after the removal", round)
+		}
+	}
+}
+
+// Identity, not presence: an account re-adopted mid-grant holds a different lineage, and
+// the older rotation must not silently overwrite the one the user just created.
+func TestARotationDoesNotOverwriteALineageAdoptedMeanwhile(t *testing.T) {
+	vault := NewVault(&OAuthClient{HTTP: &http.Client{Transport: newStub(nil)}},
+		NewMemoryStore())
+	vault.Store("acct", Credential{AccessToken: "fresh", RefreshToken: "brand-new"})
+
+	// A rotation of the lineage that was there *before* the re-adopt.
+	stored := vault.storeRotation("acct",
+		Credential{AccessToken: "old", RefreshToken: "the-old-lineage"},
+		Credential{AccessToken: "stale-rotation", RefreshToken: "old-r2"})
+	if stored {
+		t.Fatal("an older lineage's rotation overwrote the newly adopted one")
+	}
+	current, _ := vault.Credential("acct")
+	if current.RefreshToken != "brand-new" {
+		t.Fatalf("the adopted lineage was clobbered: %q", current.RefreshToken)
+	}
+}
+
+// Clearing the inFlight entry on Forget would let a re-adopt inside that window start a
+// second grant on the same refresh token — the one failure the coalescing exists to stop.
+func TestDeletingAnAccountDoesNotUncoalesceAnInFlightGrant(t *testing.T) {
+	var concurrent, peak int32
+	var mu sync.Mutex
+	started := make(chan struct{})
+	var once sync.Once
+
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		current := atomic.AddInt32(&concurrent, 1)
+		mu.Lock()
+		if current > peak {
+			peak = current
+		}
+		mu.Unlock()
+		once.Do(func() { close(started) })
+		time.Sleep(150 * time.Millisecond)
+		atomic.AddInt32(&concurrent, -1)
+		return jsonResponse(200,
+			`{"access_token":"rotated","expires_in":28800,"refresh_token":"r2"}`), nil
+	})
+	vault := NewVault(&OAuthClient{HTTP: &http.Client{Transport: transport}}, NewMemoryStore())
+	vault.Store("acct", Credential{AccessToken: "old", RefreshToken: "r1"})
+
+	first := make(chan struct{})
+	go func() { vault.Refresh(context.Background(), "acct"); close(first) }()
+	<-started
+
+	vault.Forget("acct")
+	// Re-adopted with the same lineage — the copied-credentials-file case.
+	vault.Store("acct", Credential{AccessToken: "old", RefreshToken: "r1"})
+
+	second := make(chan struct{})
+	go func() { vault.Refresh(context.Background(), "acct"); close(second) }()
+	<-first
+	<-second
+
+	mu.Lock()
+	observed := peak
+	mu.Unlock()
+	if observed > 1 {
+		t.Fatalf("two grants ran on one refresh token: peak concurrency %d", observed)
+	}
+}
+
+// Shutdown must not be able to panic the process. A WaitGroup panics if Add lands while
+// Wait is unblocking, and Shutdown returns after its own deadline with handlers still
+// running, so a late Refresh can do exactly that.
+func TestDrainingToleratesAGrantStartingAsItCompletes(t *testing.T) {
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return jsonResponse(200, `{"access_token":"x","expires_in":28800}`), nil
+	})
+	vault := NewVault(&OAuthClient{HTTP: &http.Client{Transport: transport}}, NewMemoryStore())
+
+	var wg sync.WaitGroup
+	for i := 0; i < 300; i++ {
+		id := "acct" + string(rune('a'+i%26))
+		vault.Store(id, Credential{AccessToken: "old", RefreshToken: "r1"})
+		wg.Add(2)
+		go func() { defer wg.Done(); vault.Refresh(context.Background(), id) }()
+		go func() { defer wg.Done(); vault.WaitForGrants(50 * time.Millisecond) }()
+	}
+	wg.Wait()
+	// Getting here without a panic is the assertion.
+	if !vault.WaitForGrants(5 * time.Second) {
+		t.Fatal("grants did not drain")
+	}
+}

@@ -341,7 +341,12 @@ func (c *OAuthClient) send(ctx context.Context, spec request) (map[string]any, e
 			} `json:"error"`
 		}
 		if json.Unmarshal(raw, &envelope) == nil && envelope.Error.Message != "" {
+			// Truncated like `text`: this reaches a 400 body and snapshot.LastError, and
+			// the cap above applies to the raw body, not to what we pull out of it.
 			message = envelope.Error.Message
+			if len(message) > 600 {
+				message = message[:600]
+			}
 		}
 		return nil, &OAuthError{Message: message, Status: resp.StatusCode}
 	}

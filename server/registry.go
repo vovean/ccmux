@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -90,6 +91,11 @@ func NewRegistry(client *OAuthClient, secrets SecretStore, accountsFile string) 
 }
 
 func (r *Registry) Bootstrap() {
+	// A crash between the write and the rename leaves a temp behind, and unique names
+	// mean they accumulate rather than being reused. Swept here because startup is the
+	// one moment no save of ours is in flight.
+	sweepStaleTempFiles(r.accountsFile)
+
 	stored := loadAccountsFile(r.accountsFile)
 	subscriptionIDs := []string{}
 	r.mu.Lock()
@@ -617,6 +623,18 @@ func APIKeyFingerprint(key string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func sweepStaleTempFiles(path string) {
+	matches, err := filepath.Glob(path + ".*.tmp")
+	if err != nil {
+		return
+	}
+	for _, stale := range matches {
+		if err := os.Remove(stale); err == nil {
+			logInfo("removed a leftover temp file: %s", filepath.Base(stale))
+		}
+	}
+}
+
 func loadAccountsFile(path string) []RemoteAccount {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -640,7 +658,9 @@ func saveAccountsFile(path string, accounts []RemoteAccount) {
 	// with O_TRUNC and interleave, and the result is an accounts.json that parses as
 	// nothing on the next restart. persist() serialises our own writers; this covers
 	// anything else that ever calls in.
-	tmp := fmt.Sprintf("%s.%d.tmp", path, os.Getpid()^int(atomicNextTemp()))
+	// pid and counter as separate components: xor-ing them collides across processes
+	// (100^3 == 101^2), and two ccmuxd sharing a data directory would race the temp file.
+	tmp := fmt.Sprintf("%s.%d.%d.tmp", path, os.Getpid(), atomicNextTemp())
 	if err := os.WriteFile(tmp, encoded, 0o600); err != nil {
 		os.Remove(tmp)
 		logError("could not write %s: %v", tmp, err)

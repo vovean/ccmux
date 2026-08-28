@@ -25,10 +25,15 @@ type Vault struct {
 	credentials map[string]Credential
 	inFlight    map[string]*refreshCall
 	nextID      uint64
-	// Counts grants actually in flight, so shutdown can wait for them. Detaching the
-	// context stops a cancelled caller killing a rotation; it does not stop the process
-	// exiting out from under one.
-	grants sync.WaitGroup
+	// Grants actually in flight, so shutdown can wait for them. Detaching the context
+	// stops a cancelled caller killing a rotation; it does not stop the process exiting
+	// out from under one.
+	//
+	// A plain counter, not a sync.WaitGroup: Shutdown returns after its own deadline with
+	// handlers still running, so a late Refresh can call Add while Wait is unblocking —
+	// which panics, aborts the process, and kills every other grant in flight.
+	activeGrants int
+	drainWaiters []chan struct{}
 
 	// Called when a refresh fails. Permanent failures are the re-login signal.
 	OnRefreshFailure func(accountID string, err error)
@@ -49,8 +54,9 @@ type refreshCall struct {
 // Refresh this far ahead of expiry so a request rarely has to wait on one.
 const vaultRefreshLead = 10 * time.Minute
 
-// A cap on a detached grant, so a wedged upstream cannot leave one running forever.
-const refreshGrantTimeout = 60 * time.Second
+// A backstop above the OAuth client's own 30s request timeout, which is what actually
+// governs a grant. Sitting below it would make this the real cap and cut rotations short.
+const refreshGrantTimeout = 35 * time.Second
 
 func NewVault(client *OAuthClient, secrets SecretStore) *Vault {
 	return &Vault{
@@ -92,19 +98,60 @@ func (v *Vault) Credential(accountID string) (Credential, bool) {
 	return c, ok
 }
 
+// Store writes unconditionally — adopt and sign-in, where the caller means to replace
+// whatever is there. The map update and the secret write share one critical section for
+// the same reason storeRotation does.
 func (v *Vault) Store(accountID string, c Credential) {
 	v.mu.Lock()
 	v.credentials[accountID] = c
+	err := v.writeSecretLocked(accountID, c)
+	v.mu.Unlock()
+	v.reportWrite(accountID, c, err)
+}
+
+// storeRotation replaces the credential only if the lineage we just refreshed is still
+// the one on file.
+//
+// The test and the write are one critical section, and Forget deletes under the same
+// lock. Checking first and storing after left a window where a DELETE could land between
+// them, and the write would put a live refresh token back into the sealed file for an
+// account that no longer exists — invisible to every client, never loaded again, orphaned
+// for good.
+//
+// Identity, not mere presence: an account re-adopted mid-grant (a second Mac's adopt, or
+// a browser sign-in completing) holds a *different* lineage, and overwriting it with this
+// older rotation would silently discard the one the user just created.
+func (v *Vault) storeRotation(accountID string, previous, rotated Credential) bool {
+	v.mu.Lock()
+	current, ok := v.credentials[accountID]
+	if !ok || current.RefreshToken != previous.RefreshToken {
+		v.mu.Unlock()
+		return false
+	}
+	v.credentials[accountID] = rotated
+	err := v.writeSecretLocked(accountID, rotated)
 	v.mu.Unlock()
 
+	// Callbacks outside the lock: they reach back into the registry, which takes its own.
+	v.reportWrite(accountID, rotated, err)
+	return true
+}
+
+// writeSecretLocked persists a credential. Caller holds v.mu. One retry, because the
+// usual cause is transient and losing a rotation costs a re-login.
+func (v *Vault) writeSecretLocked(accountID string, c Credential) error {
 	err := v.secrets.Write(accountID, c.JSONString())
 	if err != nil {
-		// One retry: the usual cause is transient, and losing a rotation costs a re-login.
-		if err = v.secrets.Write(accountID, c.JSONString()); err != nil {
-			logError("could not persist credential for %s: %v", accountID, err)
-			if v.OnPersistFailure != nil {
-				v.OnPersistFailure(accountID, err)
-			}
+		err = v.secrets.Write(accountID, c.JSONString())
+	}
+	return err
+}
+
+func (v *Vault) reportWrite(accountID string, c Credential, err error) {
+	if err != nil {
+		logError("could not persist credential for %s: %v", accountID, err)
+		if v.OnPersistFailure != nil {
+			v.OnPersistFailure(accountID, err)
 		}
 	}
 	if v.OnCredentialSet != nil {
@@ -113,12 +160,15 @@ func (v *Vault) Store(accountID string, c Credential) {
 }
 
 func (v *Vault) Forget(accountID string) {
+	// The secret delete happens under the same lock as the map delete, so a rotation
+	// finishing concurrently cannot slip its write in afterwards. The inFlight entry is
+	// deliberately left alone: clearing it would let a re-adopt inside this window start
+	// a second grant on the same refresh token, which is the one failure the coalescing
+	// exists to prevent. release() clears it when the grant finishes.
 	v.mu.Lock()
 	delete(v.credentials, accountID)
-	// Cleared so a later re-adopt claims a fresh slot rather than joining the doomed one.
-	delete(v.inFlight, accountID)
-	v.mu.Unlock()
 	_ = v.secrets.Delete(accountID)
+	v.mu.Unlock()
 }
 
 // RefreshExpiring refreshes ahead of expiry so a token request rarely has to wait.
@@ -160,12 +210,12 @@ func (v *Vault) claim(accountID string) (*refreshCall, bool) {
 	v.nextID++
 	call := &refreshCall{id: v.nextID, done: make(chan struct{})}
 	v.inFlight[accountID] = call
-	v.grants.Add(1)
+	v.activeGrants++
 	return call, true
 }
 
 func (v *Vault) run(ctx context.Context, accountID string, call *refreshCall) {
-	defer v.grants.Done()
+	defer v.grantFinished()
 	defer close(call.done)
 
 	existing, ok := v.Credential(accountID)
@@ -190,15 +240,11 @@ func (v *Vault) run(ctx context.Context, accountID string, call *refreshCall) {
 		}
 		return
 	}
-	// Forgotten while the grant was in flight — a DELETE racing a refresh. Storing now
-	// would write the rotated credential back into the sealed file after the account was
-	// removed, leaving a live refresh token orphaned there indefinitely.
-	if _, still := v.Credential(accountID); !still {
-		logWarn("%s was removed while its refresh was in flight; discarding the result",
+	if !v.storeRotation(accountID, existing, rotated) {
+		logWarn("%s changed while its refresh was in flight; discarding the result",
 			accountID)
 		return
 	}
-	v.Store(accountID, rotated)
 	logInfo("refreshed credential for account %s", accountID)
 	call.result, call.ok = rotated, true
 }
@@ -208,16 +254,33 @@ func (v *Vault) run(ctx context.Context, accountID string, call *refreshCall) {
 // they process it, so exiting mid-flight loses the rotation and the next refresh is told
 // invalid_grant — a `systemctl restart` is enough to kill a lineage.
 func (v *Vault) WaitForGrants(timeout time.Duration) bool {
-	done := make(chan struct{})
-	go func() {
-		v.grants.Wait()
-		close(done)
-	}()
+	v.mu.Lock()
+	if v.activeGrants == 0 {
+		v.mu.Unlock()
+		return true
+	}
+	waiter := make(chan struct{})
+	v.drainWaiters = append(v.drainWaiters, waiter)
+	v.mu.Unlock()
+
 	select {
-	case <-done:
+	case <-waiter:
 		return true
 	case <-time.After(timeout):
 		return false
+	}
+}
+
+func (v *Vault) grantFinished() {
+	v.mu.Lock()
+	v.activeGrants--
+	var waiters []chan struct{}
+	if v.activeGrants == 0 {
+		waiters, v.drainWaiters = v.drainWaiters, nil
+	}
+	v.mu.Unlock()
+	for _, waiter := range waiters {
+		close(waiter)
 	}
 }
 

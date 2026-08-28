@@ -19,9 +19,10 @@ import (
 // stays governed by PollPolicy rather than by this loop.
 const tickInterval = 20 * time.Second
 
-// How long shutdown waits for an in-flight refresh grant. Comfortably over the 60s cap on
-// a single grant would block a restart; this is the compromise.
-const refreshDrainDeadline = 20 * time.Second
+// How long shutdown waits for an in-flight refresh grant. Above refreshGrantTimeout, so a
+// slow-but-successful rotation is not abandoned at the last moment — the whole point of
+// the drain.
+const refreshDrainDeadline = 40 * time.Second
 
 var logger = log.New(os.Stdout, "", 0)
 
