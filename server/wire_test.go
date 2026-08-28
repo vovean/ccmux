@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"regexp"
 	"strings"
@@ -256,5 +257,66 @@ func TestTimeRoundTripsAndAcceptsBothSpellings(t *testing.T) {
 	var rubbish Time
 	if err := json.Unmarshal([]byte(`"not a date"`), &rubbish); err == nil {
 		t.Fatal("rubbish should fail to decode")
+	}
+}
+
+// Go marshals a nil slice as `null`; Swift decodes these as non-optional arrays and
+// throws on null. Three places can produce one, and all three are on paths a fresh server
+// hits immediately: an account list before anything is adopted, a grant for an API-key
+// account (no scopes), and usage with no windows recorded.
+func TestEmptySlicesAreEmptyArraysNotNull(t *testing.T) {
+	cases := map[string]any{
+		"account list": AccountListResponse{APIVersion: apiVersion,
+			Accounts: []RemoteAccount{}},
+		"api key grant":    TokenGrant{AccountID: "a", Kind: KindAPIKey, APIKey: ptr("k"), Scopes: []string{}},
+		"usage no windows": RemoteUsage{AccountID: "a", Windows: []UsageWindow{}},
+	}
+	for name, value := range cases {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if strings.Contains(string(encoded), "null") {
+			t.Errorf("%s emitted null where Swift expects an array: %s", name, encoded)
+		}
+	}
+}
+
+// And the paths that build them must not reintroduce a nil. This is the guard that
+// actually matters, because the structs above are only as safe as their constructors.
+func TestServerBuiltResponsesNeverCarryNullSlices(t *testing.T) {
+	stub := newStub(map[string]stubReply{"/v1/models": {200, `{"data":[]}`}})
+	registry, _ := newTestRegistry(t, stub)
+
+	// An empty account list, straight after bootstrap.
+	encoded, _ := json.Marshal(AccountListResponse{APIVersion: apiVersion,
+		Accounts: registry.List()})
+	if strings.Contains(string(encoded), `"accounts":null`) {
+		t.Fatalf("empty account list marshalled as null: %s", encoded)
+	}
+
+	// An API-key grant, which has no scopes.
+	account, err := registry.Adopt(context.Background(), AdoptRequest{APIKey: ptr("sk-ant-nil")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant, ok := registry.Token(context.Background(), account.ID)
+	if !ok {
+		t.Fatal("expected a grant")
+	}
+	encodedGrant, _ := json.Marshal(grant)
+	if strings.Contains(string(encodedGrant), `"scopes":null`) {
+		t.Fatalf("grant scopes marshalled as null: %s", encodedGrant)
+	}
+
+	// Usage recorded with no windows at all.
+	registry.record(account.ID, nil, nil)
+	usage, ok := registry.Usage(account.ID)
+	if !ok {
+		t.Fatal("expected usage")
+	}
+	encodedUsage, _ := json.Marshal(usage)
+	if strings.Contains(string(encodedUsage), `"windows":null`) {
+		t.Fatalf("usage windows marshalled as null: %s", encodedUsage)
 	}
 }
