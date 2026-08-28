@@ -127,8 +127,18 @@ if [[ "$MODE" == systemd ]]; then
   id -u ccmuxd >/dev/null 2>&1 || \
     useradd --system --no-create-home --shell /usr/sbin/nologin ccmuxd
   install -m 0755 "$BINARY" /usr/local/bin/ccmuxd
+
+  # The service runs as ccmuxd, so it needs to traverse the certificate directory to open
+  # the key — a 0700 root-owned directory would fail to start with a bare "permission
+  # denied" and nothing pointing at the directory rather than the file.
+  chown root:ccmuxd "$CERTS"
+  chmod 750 "$CERTS"
+  chown root:ccmuxd "$CERTS/key.pem"
+  chmod 640 "$CERTS/key.pem"
+  # The sealed store and the master key are the whole prize: owned by the service, 0700,
+  # readable by nothing else.
   chown -R ccmuxd:ccmuxd "$DATA"
-  chown ccmuxd:ccmuxd "$CERTS/key.pem"
+  chmod 700 "$DATA"
 
   cat > /etc/systemd/system/ccmuxd.service <<EOF
 [Unit]
