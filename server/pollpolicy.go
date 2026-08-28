@@ -14,7 +14,6 @@ import (
 // requests/hour and leave room for manual refreshes. Measured by claude-swap
 // (poll_policy.py, 2026-07-11); re-measure before loosening any of them.
 const (
-	pollServeTTL         = 180 * time.Second
 	pollMinInterval      = 180 * time.Second
 	pollUrgentInterval   = 60 * time.Second
 	pollActiveMax        = 300 * time.Second

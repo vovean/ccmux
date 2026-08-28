@@ -220,3 +220,41 @@ func TestCredentialWithoutAnAccessTokenIsRejected(t *testing.T) {
 		}
 	}
 }
+
+// The custom Time exists to *emit* second-precision RFC 3339, but it must also read back
+// what it writes — and tolerate the fractional form Anthropic sends, since the same type
+// is what a future decode path would use.
+func TestTimeRoundTripsAndAcceptsBothSpellings(t *testing.T) {
+	original := Time{time.Date(2026, 8, 28, 15, 4, 5, 0, time.UTC)}
+	encoded, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded Time
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !decoded.Equal(original.Time) {
+		t.Fatalf("round trip changed the instant: %v -> %v", original.Time, decoded.Time)
+	}
+
+	// Fractional seconds, as the usage endpoint sends them.
+	var fractional Time
+	if err := json.Unmarshal([]byte(`"2026-08-28T15:04:05.987Z"`), &fractional); err != nil {
+		t.Fatalf("should accept fractional seconds: %v", err)
+	}
+	if fractional.Second() != 5 {
+		t.Fatalf("parsed wrong: %v", fractional.Time)
+	}
+
+	// And null must land as the zero value rather than an error.
+	var empty Time
+	if err := json.Unmarshal([]byte(`null`), &empty); err != nil || !empty.IsZero() {
+		t.Fatalf("null should decode to zero, got %v %v", empty.Time, err)
+	}
+
+	var rubbish Time
+	if err := json.Unmarshal([]byte(`"not a date"`), &rubbish); err == nil {
+		t.Fatal("rubbish should fail to decode")
+	}
+}

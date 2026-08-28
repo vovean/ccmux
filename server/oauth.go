@@ -25,9 +25,6 @@ const (
 	oauthTokenURL     = "https://platform.claude.com/v1/oauth/token"
 	anthropicAPIBase  = "https://api.anthropic.com"
 	anthropicBeta     = "oauth-2025-04-20"
-	// Cheapest model on the account. The 5-hour window is account-wide, so any model
-	// starts it, and Haiku leaves the Fable and Opus weekly windows alone.
-	probeModel = "claude-haiku-4-5-20251001"
 )
 
 var (
@@ -266,41 +263,6 @@ func (c *OAuthClient) ValidateAPIKey(ctx context.Context, key string) error {
 			"anthropic-version": "2023-06-01",
 		},
 		timeout: 20 * time.Second,
-	})
-	return err
-}
-
-// StartUsageWindow sends the smallest possible real request, purely to start the
-// account's 5-hour window. The headers mirror Claude Code's because the API refuses
-// OAuth-token requests that do not look like it — a bare request gets a 429 with no
-// rate-limit headers at all.
-func (c *OAuthClient) StartUsageWindow(ctx context.Context, accessToken string) error {
-	body := map[string]any{
-		"model":      probeModel,
-		"max_tokens": 1,
-		"system": []any{map[string]any{
-			"type": "text",
-			"text": "You are Claude Code, Anthropic's official CLI for Claude.",
-		}},
-		"messages": []any{map[string]any{"role": "user", "content": "."}},
-	}
-	encoded, err := json.Marshal(body)
-	if err != nil {
-		return err
-	}
-	_, err = c.send(ctx, request{
-		method: http.MethodPost,
-		url:    anthropicAPIBase + "/v1/messages?beta=true",
-		headers: map[string]string{
-			"Authorization":     "Bearer " + accessToken,
-			"anthropic-beta":    "claude-code-20250219," + anthropicBeta,
-			"anthropic-version": "2023-06-01",
-			"Content-Type":      "application/json",
-			"x-app":             "cli",
-			"User-Agent":        "claude-cli/2.1.238 (external, cli)",
-		},
-		body:    encoded,
-		timeout: 30 * time.Second,
 	})
 	return err
 }
