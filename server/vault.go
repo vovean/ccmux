@@ -25,6 +25,10 @@ type Vault struct {
 	credentials map[string]Credential
 	inFlight    map[string]*refreshCall
 	nextID      uint64
+	// Counts grants actually in flight, so shutdown can wait for them. Detaching the
+	// context stops a cancelled caller killing a rotation; it does not stop the process
+	// exiting out from under one.
+	grants sync.WaitGroup
 
 	// Called when a refresh fails. Permanent failures are the re-login signal.
 	OnRefreshFailure func(accountID string, err error)
@@ -156,10 +160,12 @@ func (v *Vault) claim(accountID string) (*refreshCall, bool) {
 	v.nextID++
 	call := &refreshCall{id: v.nextID, done: make(chan struct{})}
 	v.inFlight[accountID] = call
+	v.grants.Add(1)
 	return call, true
 }
 
 func (v *Vault) run(ctx context.Context, accountID string, call *refreshCall) {
+	defer v.grants.Done()
 	defer close(call.done)
 
 	existing, ok := v.Credential(accountID)
@@ -195,6 +201,24 @@ func (v *Vault) run(ctx context.Context, accountID string, call *refreshCall) {
 	v.Store(accountID, rotated)
 	logInfo("refreshed credential for account %s", accountID)
 	call.result, call.ok = rotated, true
+}
+
+// WaitForGrants blocks until every in-flight refresh has finished, or the deadline
+// passes. Called on shutdown: a grant rotates the token on Anthropic's side the moment
+// they process it, so exiting mid-flight loses the rotation and the next refresh is told
+// invalid_grant — a `systemctl restart` is enough to kill a lineage.
+func (v *Vault) WaitForGrants(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		v.grants.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 // Only the caller that created the entry may clear it, or a finishing refresh could

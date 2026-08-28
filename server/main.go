@@ -19,6 +19,10 @@ import (
 // stays governed by PollPolicy rather than by this loop.
 const tickInterval = 20 * time.Second
 
+// How long shutdown waits for an in-flight refresh grant. Comfortably over the 60s cap on
+// a single grant would block a restart; this is the compromise.
+const refreshDrainDeadline = 20 * time.Second
+
 var logger = log.New(os.Stdout, "", 0)
 
 func stamp() string { return time.Now().UTC().Format("2006-01-02T15:04:05Z") }
@@ -134,6 +138,14 @@ func run() error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
+		// Shutdown waits for HTTP handlers, not for the housekeeping tick's grants. A
+		// refresh abandoned by process exit is a rotation Anthropic has already made and
+		// we never stored — the account is then permanently logged out, and a
+		// `systemctl restart` is enough to cause it.
+		if !registry.WaitForRefreshes(refreshDrainDeadline) {
+			logWarn("a refresh was still in flight after %s; exiting anyway",
+				refreshDrainDeadline)
+		}
 	}
 	return nil
 }

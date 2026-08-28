@@ -127,6 +127,11 @@ func (r *Registry) Bootstrap() {
 	logInfo("loaded %d account(s)", count)
 }
 
+// WaitForRefreshes blocks until no refresh grant is in flight, or the deadline passes.
+func (r *Registry) WaitForRefreshes(timeout time.Duration) bool {
+	return r.vault.WaitForGrants(timeout)
+}
+
 func (r *Registry) Health() HealthResponse {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -637,6 +642,7 @@ func saveAccountsFile(path string, accounts []RemoteAccount) {
 	// anything else that ever calls in.
 	tmp := fmt.Sprintf("%s.%d.tmp", path, os.Getpid()^int(atomicNextTemp()))
 	if err := os.WriteFile(tmp, encoded, 0o600); err != nil {
+		os.Remove(tmp)
 		logError("could not write %s: %v", tmp, err)
 		return
 	}

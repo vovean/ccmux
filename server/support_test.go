@@ -707,3 +707,64 @@ func TestARemovalDuringARefreshDiscardsTheResult(t *testing.T) {
 		t.Fatal("a live refresh token was left orphaned in the store after removal")
 	}
 }
+
+// Detaching the grant's context stops a cancelled *caller* killing a rotation. It does
+// not stop the process exiting out from under one — and `systemctl restart` is enough.
+// Shutdown therefore waits for in-flight grants.
+func TestShutdownWaitsForAnInFlightRotation(t *testing.T) {
+	started := make(chan struct{})
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		close(started)
+		time.Sleep(250 * time.Millisecond)
+		return jsonResponse(200,
+			`{"access_token":"rotated","expires_in":28800,"refresh_token":"r2"}`), nil
+	})
+	vault := NewVault(&OAuthClient{HTTP: &http.Client{Transport: transport}}, NewMemoryStore())
+	vault.Store("acct", Credential{AccessToken: "old", RefreshToken: "r1",
+		ExpiresAt: time.Now().Add(-time.Minute)})
+
+	go vault.Refresh(context.Background(), "acct")
+	<-started
+
+	if !vault.WaitForGrants(5 * time.Second) {
+		t.Fatal("the wait timed out while a grant was in flight")
+	}
+	// Having waited, the rotation must be on disk — that is the whole point.
+	stored, _ := vault.Credential("acct")
+	if stored.RefreshToken != "r2" {
+		t.Fatalf("shutdown returned before the rotation was stored: %q", stored.RefreshToken)
+	}
+}
+
+// And it must not block when there is nothing to wait for.
+func TestWaitingForGrantsReturnsImmediatelyWhenIdle(t *testing.T) {
+	vault := NewVault(&OAuthClient{HTTP: &http.Client{Transport: newStub(nil)}},
+		NewMemoryStore())
+	start := time.Now()
+	if !vault.WaitForGrants(2 * time.Second) {
+		t.Fatal("an idle vault should not time out")
+	}
+	if time.Since(start) > time.Second {
+		t.Fatalf("waited %v with nothing in flight", time.Since(start))
+	}
+}
+
+// A grant that never finishes must not hold the process open forever.
+func TestWaitingForGrantsGivesUp(t *testing.T) {
+	release := make(chan struct{})
+	started := make(chan struct{})
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		close(started)
+		<-release
+		return jsonResponse(200, `{"access_token":"x","expires_in":1}`), nil
+	})
+	vault := NewVault(&OAuthClient{HTTP: &http.Client{Transport: transport}}, NewMemoryStore())
+	vault.Store("acct", Credential{AccessToken: "old", RefreshToken: "r1"})
+	go vault.Refresh(context.Background(), "acct")
+	<-started
+
+	if vault.WaitForGrants(200 * time.Millisecond) {
+		t.Fatal("should have given up on a grant that never finishes")
+	}
+	close(release)
+}
