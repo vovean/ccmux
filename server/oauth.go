@@ -332,10 +332,18 @@ func (c *OAuthClient) send(ctx context.Context, spec request) (map[string]any, e
 				}
 			}
 		}
-		return nil, &OAuthError{
-			Message: fmt.Sprintf("HTTP %d: %s", resp.StatusCode, text),
-			Status:  resp.StatusCode,
+		// Prefer the API's own message: this text reaches the user in the adopt failure
+		// toast, and a raw response body is not an explanation. Swift extracted it too.
+		message := fmt.Sprintf("HTTP %d: %s", resp.StatusCode, text)
+		var envelope struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
 		}
+		if json.Unmarshal(raw, &envelope) == nil && envelope.Error.Message != "" {
+			message = envelope.Error.Message
+		}
+		return nil, &OAuthError{Message: message, Status: resp.StatusCode}
 	}
 
 	var payload map[string]any

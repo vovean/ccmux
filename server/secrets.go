@@ -254,12 +254,3 @@ func (m *MemoryStore) Keys() ([]string, error) {
 	sort.Strings(keys)
 	return keys, nil
 }
-
-// readFileString is a small helper used by tests that assert on sealed-file contents.
-func readFileString(path string) (string, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	return string(raw), nil
-}

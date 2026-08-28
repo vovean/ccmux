@@ -45,6 +45,9 @@ type refreshCall struct {
 // Refresh this far ahead of expiry so a request rarely has to wait on one.
 const vaultRefreshLead = 10 * time.Minute
 
+// A cap on a detached grant, so a wedged upstream cannot leave one running forever.
+const refreshGrantTimeout = 60 * time.Second
+
 func NewVault(client *OAuthClient, secrets SecretStore) *Vault {
 	return &Vault{
 		client:      client,
@@ -108,6 +111,8 @@ func (v *Vault) Store(accountID string, c Credential) {
 func (v *Vault) Forget(accountID string) {
 	v.mu.Lock()
 	delete(v.credentials, accountID)
+	// Cleared so a later re-adopt claims a fresh slot rather than joining the doomed one.
+	delete(v.inFlight, accountID)
 	v.mu.Unlock()
 	_ = v.secrets.Delete(accountID)
 }
@@ -161,12 +166,30 @@ func (v *Vault) run(ctx context.Context, accountID string, call *refreshCall) {
 	if !ok {
 		return
 	}
-	rotated, err := v.client.Refresh(ctx, existing)
+	// Detached from the caller's context on purpose. A refresh grant rotates the token on
+	// Anthropic's side the moment they process it; if the caller's context is cancelled
+	// mid-flight — a client that hung up, its 20s timeout, a SIGTERM during a
+	// housekeeping tick — the rotated credential is never read or stored, the next
+	// refresh is told invalid_grant, and the account is permanently logged out. The Swift
+	// original was immune by accident: it ran the grant in an unstructured Task, which
+	// outlives the awaiting one.
+	grantCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshGrantTimeout)
+	defer cancel()
+
+	rotated, err := v.client.Refresh(grantCtx, existing)
 	if err != nil {
 		logWarn("refresh failed for account %s: %v", accountID, err)
 		if v.OnRefreshFailure != nil {
 			v.OnRefreshFailure(accountID, err)
 		}
+		return
+	}
+	// Forgotten while the grant was in flight — a DELETE racing a refresh. Storing now
+	// would write the rotated credential back into the sealed file after the account was
+	// removed, leaving a live refresh token orphaned there indefinitely.
+	if _, still := v.Credential(accountID); !still {
+		logWarn("%s was removed while its refresh was in flight; discarding the result",
+			accountID)
 		return
 	}
 	v.Store(accountID, rotated)

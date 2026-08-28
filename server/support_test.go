@@ -576,3 +576,134 @@ func TestAFailedRefreshKeepsTheStoredCredential(t *testing.T) {
 		t.Fatalf("credential was damaged: %q", c.AccessToken)
 	}
 }
+
+// readFileString is used by the suites that assert on sealed-file contents.
+func readFileString(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+// The message a user actually reads when adopt fails. Swift extracted `error.message`;
+// the raw body is not an explanation.
+func TestUpstreamErrorsSurfaceTheAPIMessage(t *testing.T) {
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return jsonResponse(401,
+			`{"type":"error","error":{"type":"authentication_error",`+
+				`"message":"invalid x-api-key"}}`), nil
+	})
+	client := &OAuthClient{HTTP: &http.Client{Transport: transport}}
+	err := client.ValidateAPIKey(context.Background(), "sk-ant-bogus")
+	if err == nil {
+		t.Fatal("expected a failure")
+	}
+	if err.Error() != "invalid x-api-key" {
+		t.Fatalf("expected the API's own message, got %q", err.Error())
+	}
+	// A 401 without invalid_grant is still transient — only a dead lineage is permanent.
+	if IsPermanent(err) {
+		t.Fatal("a rejected API key is not a dead OAuth lineage")
+	}
+}
+
+// A first poll that fails must not report an age of two thousand years.
+func TestAFailedFirstPollDoesNotReportAnAbsurdAge(t *testing.T) {
+	stub := newStub(map[string]stubReply{
+		"/api/oauth/profile": {200, profileJSON},
+		"/api/oauth/usage":   {503, "upstream is having a day"},
+	})
+	registry, _ := newTestRegistry(t, stub)
+	if _, err := registry.Adopt(context.Background(), AdoptRequest{
+		CredentialJSON: ptr(credentialJSON("a", "r1", time.Now().Add(time.Hour)))}); err != nil {
+		t.Fatal(err)
+	}
+	registry.record("acct-1", nil, transientError("upstream is having a day"))
+	usage, ok := registry.Usage("acct-1")
+	if !ok {
+		t.Fatal("expected a snapshot")
+	}
+	if usage.AgeSeconds > 60 {
+		t.Fatalf("age should be stamped at now, got %v seconds", usage.AgeSeconds)
+	}
+}
+
+// A refresh grant rotates the token on Anthropic's side the moment they process it. If the
+// caller's context is cancelled mid-flight — a Mac that hung up, its 20s URLSession
+// timeout, a SIGTERM during a housekeeping tick — and the grant is abandoned, the rotated
+// credential is never stored, the next refresh is told invalid_grant, and the account is
+// permanently logged out.
+//
+// The Swift original was immune by accident: it ran the grant in an unstructured Task,
+// which outlives the awaiting one.
+func TestACancelledCallerDoesNotAbortTheRotation(t *testing.T) {
+	started := make(chan struct{})
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		close(started)
+		// Long enough that the caller's cancellation lands while we are in flight. If the
+		// grant were on the caller's context, r.Context() would already be done here.
+		time.Sleep(200 * time.Millisecond)
+		select {
+		case <-r.Context().Done():
+			return nil, r.Context().Err()
+		default:
+		}
+		return jsonResponse(200,
+			`{"access_token":"rotated","expires_in":28800,"refresh_token":"r2"}`), nil
+	})
+	vault := NewVault(&OAuthClient{HTTP: &http.Client{Transport: transport}}, NewMemoryStore())
+	vault.Store("acct", Credential{AccessToken: "old", RefreshToken: "r1",
+		ExpiresAt: time.Now().Add(-time.Minute)})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan bool, 1)
+	go func() {
+		_, ok := vault.Refresh(ctx, "acct")
+		done <- ok
+	}()
+
+	<-started
+	cancel() // the client hangs up while Anthropic is processing the rotation
+
+	if ok := <-done; !ok {
+		t.Fatal("the grant was abandoned when the caller went away")
+	}
+	stored, _ := vault.Credential("acct")
+	if stored.RefreshToken != "r2" {
+		t.Fatalf("the rotated refresh token was lost: %q", stored.RefreshToken)
+	}
+	if stored.AccessToken != "rotated" {
+		t.Fatalf("the rotated access token was lost: %q", stored.AccessToken)
+	}
+}
+
+// And a delete racing an in-flight refresh must not resurrect the credential: storing it
+// afterwards leaves a live refresh token orphaned in the sealed file.
+func TestARemovalDuringARefreshDiscardsTheResult(t *testing.T) {
+	started := make(chan struct{})
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		close(started)
+		time.Sleep(150 * time.Millisecond)
+		return jsonResponse(200,
+			`{"access_token":"rotated","expires_in":28800,"refresh_token":"r2"}`), nil
+	})
+	secrets := NewMemoryStore()
+	vault := NewVault(&OAuthClient{HTTP: &http.Client{Transport: transport}}, secrets)
+	vault.Store("acct", Credential{AccessToken: "old", RefreshToken: "r1",
+		ExpiresAt: time.Now().Add(-time.Minute)})
+
+	done := make(chan struct{})
+	go func() { vault.Refresh(context.Background(), "acct"); close(done) }()
+
+	<-started
+	vault.Forget("acct")
+	<-done
+
+	if _, ok := vault.Credential("acct"); ok {
+		t.Fatal("the removed account came back in memory")
+	}
+	if _, ok, _ := secrets.Read("acct"); ok {
+		t.Fatal("a live refresh token was left orphaned in the store after removal")
+	}
+}

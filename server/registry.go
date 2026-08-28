@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -27,6 +28,10 @@ type Registry struct {
 	apiKeys      SecretStore
 	accountsFile string
 	startedAt    time.Time
+
+	// Held across snapshot-and-write so persisted state cannot go backwards. Never taken
+	// while holding mu.
+	persistMu sync.Mutex
 
 	mu       sync.Mutex
 	accounts map[string]RemoteAccount
@@ -515,7 +520,9 @@ func (r *Registry) record(accountID string, windows []UsageWindow, err error) {
 	defer r.mu.Unlock()
 
 	previous := r.usage[accountID]
-	snapshot := UsageSnapshot{}
+	// Stamped now, not left at the zero time: a first poll that fails would otherwise
+	// report an age of two thousand years to every client that asked.
+	snapshot := UsageSnapshot{FetchedAt: time.Now()}
 	if previous != nil {
 		snapshot = *previous
 	}
@@ -583,12 +590,22 @@ func (r *Registry) markHealthy(accountID string) {
 	r.persist()
 }
 
+// persist serialises writers. Two callers that snapshot and then race to the file can
+// otherwise commit in the opposite order to their snapshots, silently dropping a
+// just-adopted account or resurrecting a removed one — and the Swift original got this
+// for free by being an actor.
 func (r *Registry) persist() {
+	r.persistMu.Lock()
+	defer r.persistMu.Unlock()
 	r.mu.Lock()
 	accounts := r.listLocked()
 	r.mu.Unlock()
 	saveAccountsFile(r.accountsFile, accounts)
 }
+
+var tempCounter atomic.Uint64
+
+func atomicNextTemp() uint64 { return tempCounter.Add(1) }
 
 func APIKeyFingerprint(key string) string {
 	sum := sha256.Sum256([]byte(key))
@@ -614,7 +631,11 @@ func saveAccountsFile(path string, accounts []RemoteAccount) {
 		logError("could not encode accounts: %v", err)
 		return
 	}
-	tmp := path + ".tmp"
+	// Unique per call: two concurrent saves on one fixed temp path open the same file
+	// with O_TRUNC and interleave, and the result is an accounts.json that parses as
+	// nothing on the next restart. persist() serialises our own writers; this covers
+	// anything else that ever calls in.
+	tmp := fmt.Sprintf("%s.%d.tmp", path, os.Getpid()^int(atomicNextTemp()))
 	if err := os.WriteFile(tmp, encoded, 0o600); err != nil {
 		logError("could not write %s: %v", tmp, err)
 		return
