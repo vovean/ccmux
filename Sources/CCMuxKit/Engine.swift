@@ -1,3 +1,4 @@
+import CCMuxCore
 import AppKit
 import Foundation
 import SwiftUI
@@ -14,8 +15,12 @@ public final class Engine: ObservableObject {
     @Published public private(set) var claudeSessions: [ClaudeSessionInfo] = []
     @Published public private(set) var chromeProfiles: [ChromeProfile] = []
     @Published public private(set) var settings: Settings
-    @Published public private(set) var banner: Banner?
-    @Published public private(set) var loginInProgress = false
+    @Published public internal(set) var banner: Banner?
+    @Published public internal(set) var loginInProgress = false
+    /// What connecting to a ccmuxd would mean for the accounts already on this Mac.
+    /// Non-nil only while the connect sheet is deciding.
+    @Published public internal(set) var delegationPlan: Delegation.Plan?
+    @Published public internal(set) var serverBusy = false
 
     public struct Banner: Equatable {
         public enum Level { case info, warning }
@@ -40,11 +45,17 @@ public final class Engine: ObservableObject {
         }
     }
 
-    private let store = Store()
-    private let vault = TokenVault()
+    let store = Store()
+    let vault = TokenVault(client: OAuthClient(),
+                                   secrets: KeychainSecretStore(
+                                       service: AccountCredentialStore.service))
     private let notifier = Notifier()
-    private var client = OAuthClient()
-    private lazy var sessionManager = SessionManager(store: store, vault: vault)
+    var client = OAuthClient()
+    lazy var sessionManager = SessionManager(store: store, vault: vault)
+    /// Held rather than rebuilt per call: a URLSession with a delegate retains it until
+    /// invalidated, so handing out a new client on every access leaked a session and a
+    /// pinning delegate each time. Rebuilt only when the connection settings change.
+    var serverClientCache: (connection: ServerConnection, client: ServerClient)?
     private var controlHandler: ControlHandler?
     private var controlServer: ControlServer?
     private var timers: [Timer] = []
@@ -110,6 +121,7 @@ public final class Engine: ObservableObject {
         vault.load(accountIDs: store.accounts.all().map(\.id))
 
         applyUpstreamProxy()
+        applyRemoteToVault()
         sessionManager.recoverAfterLaunch()
         restoreBlocks()
         reload(rescanClaudeSessions: true)
@@ -122,6 +134,7 @@ public final class Engine: ObservableObject {
             // Not `force`: that stamps the manual-refresh floor and would make the
             // Refresh button a silent no-op for the first minute after launch.
             await pollDueAccounts()
+            await pollDelegatedUsage()
         }
     }
 
@@ -180,6 +193,7 @@ public final class Engine: ObservableObject {
                 await self?.refreshExpiringTokens()
                 await self?.backfillMissingPlans()
                 await self?.pollDueAccounts()
+                await self?.pollDelegatedUsage()
                 await self?.keepWindowsRolling()
             }
         })
@@ -252,6 +266,8 @@ public final class Engine: ObservableObject {
             // on response headers and its spend is accumulated per request.
             guard account.kind == .subscription else { return false }
             guard account.health != .needsRelogin else { return false }
+            // Delegated accounts are polled once, centrally; see pollDelegatedUsage.
+            guard !settings.delegated.contains(account.id) else { return false }
             if force { return true }
             guard let next = store.usage(for: account.id)?.nextPollAt else { return true }
             return next <= now
@@ -284,7 +300,7 @@ public final class Engine: ObservableObject {
 
     /// Fetches one account's usage now, bypassing the manual-refresh floor. Used when an
     /// account has just been added and has nothing to show yet.
-    private func poll(_ accountID: String) async {
+    func poll(_ accountID: String) async {
         guard let token = vault.credential(for: accountID)?.accessToken else { return }
         do {
             record(.success(try await client.usage(accessToken: token)), for: accountID)
@@ -293,15 +309,16 @@ public final class Engine: ObservableObject {
         }
     }
 
-    private func record(_ result: Result<[UsageWindow], Error>, for accountID: String) {
+    func record(_ result: Result<[UsageWindow], Error>, for accountID: String,
+                fetchedAt: Date = Date()) {
         let previous = store.usage(for: accountID)
         var snapshot: UsageSnapshot
         var rateLimited = false
 
         switch result {
         case .success(let windows):
-            snapshot = UsageSnapshot(windows: windows, fetchedAt: Date(),
-                                     lastEndpointFetchAt: Date())
+            snapshot = UsageSnapshot(windows: windows, fetchedAt: fetchedAt,
+                                     lastEndpointFetchAt: fetchedAt)
             markHealthy(accountID)
         case .failure(let error):
             snapshot = UsageSnapshot(windows: previous?.windows ?? [],
@@ -659,15 +676,19 @@ public final class Engine: ObservableObject {
         claudeSession(forPID: pid)?.status == "busy"
     }
 
-    private func displayName(_ accountID: String) -> String {
+    func displayName(_ accountID: String) -> String {
         store.accounts.get(accountID)?.displayName ?? accountID
     }
 
     private func handleRefreshFailure(_ accountID: String, _ error: OAuthError) {
         guard error.isPermanent else {
+            // A delegated account is renewed from ccmuxd, so blaming Anthropic would send
+            // you looking in the wrong place.
+            let upstream = settings.delegated.contains(accountID)
+                ? "the account server" : "Anthropic"
             banner = Banner(level: .warning,
-                            text: "Could not reach Anthropic for \(displayName(accountID)): "
-                                + error.localizedDescription)
+                            text: "Could not reach \(upstream) for "
+                                + "\(displayName(accountID)): \(error.localizedDescription)")
             return
         }
         guard store.accounts.get(accountID)?.health != .needsRelogin else { return }
@@ -822,8 +843,16 @@ public final class Engine: ObservableObject {
     public func relogin(accountID: String) {
         guard let account = store.accounts.get(accountID) else { return }
         Task {
-            await beginLogin(chromeProfileDirectory: account.chromeProfileDirectory,
-                             label: account.label, loginHint: account.email)
+            // A delegated account's lineage belongs to the server, so the exchange has to
+            // happen there. The browser half still runs here — the server is headless.
+            if settings.delegated.contains(accountID) {
+                await beginServerLogin(accountID: accountID,
+                                       chromeProfileDirectory: account.chromeProfileDirectory,
+                                       loginHint: account.email)
+            } else {
+                await beginLogin(chromeProfileDirectory: account.chromeProfileDirectory,
+                                 label: account.label, loginHint: account.email)
+            }
         }
     }
 
@@ -854,7 +883,7 @@ public final class Engine: ObservableObject {
         }
     }
 
-    private func adopt(credential: OAuthCredential, chromeProfileDirectory: String?,
+    func adopt(credential: OAuthCredential, chromeProfileDirectory: String?,
                        label: String?) async throws -> Account {
         let identity = try await client.profile(accessToken: credential.accessToken)
         var account = store.accounts.get(identity.uuid)
@@ -924,6 +953,10 @@ public final class Engine: ObservableObject {
         let proxied = OAuthClient.proxied(proxy, password: password)
         client = proxied
         vault.setClient(proxied)
+        // The cached ServerClient is keyed on the connection, which has not changed — but
+        // its URLSession fixed the proxy at construction, so it has to be rebuilt too.
+        serverClientCache = nil
+        applyRemoteToVault()
         if let proxy {
             Log.info("outbound requests now go through \(proxy.displayString)")
         }
@@ -1014,6 +1047,13 @@ public final class Engine: ObservableObject {
         // Leaving the key behind would keep a working credential in the Keychain for an
         // account the user believes they deleted.
         try? APIKeyStore.delete(accountID)
+        // Leaving it delegated would route a later re-added account to the server, whose
+        // 404 is transient by design — so the fresh local lineage would never be refreshed
+        // and the account would quietly stop working when its access token expired.
+        if settings.delegated.contains(accountID) {
+            updateSettings { $0.delegatedAccountIDs.removeAll { $0 == accountID } }
+            applyRemoteToVault()
+        }
         store.removeAccount(accountID)
     }
 

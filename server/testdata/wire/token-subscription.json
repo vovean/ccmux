@@ -1,0 +1,12 @@
+{
+  "accountID": "11111111-2222-3333-4444-555555555555",
+  "kind": "subscription",
+  "accessToken": "an-access-token",
+  "expiresIn": 3599,
+  "subscriptionType": "team",
+  "rateLimitTier": "tier_x",
+  "scopes": [
+    "user:inference",
+    "user:profile"
+  ]
+}

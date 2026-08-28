@@ -1,3 +1,4 @@
+import CCMuxCore
 import Foundation
 
 /// A session ccmux launched. `pid` is the claude process itself: the shim execs

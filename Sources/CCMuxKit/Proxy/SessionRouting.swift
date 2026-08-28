@@ -1,3 +1,4 @@
+import CCMuxCore
 import Foundation
 
 /// What the proxy needs to know to keep a session running across accounts.

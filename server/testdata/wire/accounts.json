@@ -1,0 +1,24 @@
+{
+  "apiVersion": 1,
+  "accounts": [
+    {
+      "id": "11111111-2222-3333-4444-555555555555",
+      "label": "Work",
+      "email": "someone@example.com",
+      "organizationUUID": "org-1",
+      "organizationName": "Example Org",
+      "subscriptionType": "team",
+      "rateLimitTier": "tier_x",
+      "kind": "subscription",
+      "health": "ok"
+    },
+    {
+      "id": "local-uuid",
+      "label": "Billing",
+      "kind": "apiKey",
+      "health": "needsRelogin",
+      "healthDetail": "no credential on the server",
+      "apiKeyFingerprint": "6de5c6335d27378ef3ee3000e7fe75e5907c525ab60ac1ed56dca4729561f2b3"
+    }
+  ]
+}

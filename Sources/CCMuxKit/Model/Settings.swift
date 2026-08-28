@@ -1,3 +1,4 @@
+import CCMuxCore
 import Foundation
 
 /// A launch policy: what an alias like `cc-fable` requires of an account.
@@ -74,6 +75,23 @@ public enum AutoSwitchMode: String, Codable, Equatable, CaseIterable {
     }
 }
 
+/// A ccmuxd this Mac has been told to trust. The password is not here — it lives in the
+/// Keychain, because settings.json is plaintext on disk.
+public struct ServerConnection: Codable, Equatable, Sendable {
+    public var url: String
+    public var username: String
+    /// SHA-256 of the server's TLS certificate, agreed once on first connect. Checked on
+    /// every request: a self-signed certificate has no CA behind it, so this pin is the
+    /// only thing distinguishing the real server from anything else on that address.
+    public var fingerprint: String
+
+    public init(url: String, username: String, fingerprint: String) {
+        self.url = url
+        self.username = username
+        self.fingerprint = fingerprint
+    }
+}
+
 public struct Settings: Codable, Equatable {
     public var warnThresholdPercent: Double
     /// Percentage of an API-key account's monthly budget at which to warn.
@@ -93,6 +111,11 @@ public struct Settings: Codable, Equatable {
     /// Directories whose sessions must launch on a particular account. Launch only —
     /// see `DirectoryBinding`.
     public var directoryBindings: [DirectoryBinding]
+    public var server: ServerConnection?
+    /// Accounts whose refresh lineage now belongs to the server. This Mac holds only
+    /// short-lived access tokens for them and must never run a refresh grant of its own —
+    /// that is precisely the two-holders-of-one-lineage case that logs an account out.
+    public var delegatedAccountIDs: [String]
 
     public init(warnThresholdPercent: Double = 3,
                 budgetWarnPercent: Double = 80,
@@ -104,7 +127,9 @@ public struct Settings: Codable, Equatable {
                 notifyOnReloginNeeded: Bool = true,
                 mutedAccountIDs: [String] = [],
                 keepWindowsRolling: Bool = true,
-                directoryBindings: [DirectoryBinding] = []) {
+                directoryBindings: [DirectoryBinding] = [],
+                server: ServerConnection? = nil,
+                delegatedAccountIDs: [String] = []) {
         self.warnThresholdPercent = warnThresholdPercent
         self.budgetWarnPercent = budgetWarnPercent
         self.upstreamProxy = upstreamProxy
@@ -116,6 +141,8 @@ public struct Settings: Codable, Equatable {
         self.mutedAccountIDs = mutedAccountIDs
         self.keepWindowsRolling = keepWindowsRolling
         self.directoryBindings = directoryBindings
+        self.server = server
+        self.delegatedAccountIDs = delegatedAccountIDs
     }
 
     /// See `Policy.init(from:)`: tolerant of keys an older build did not write, so an
@@ -148,7 +175,13 @@ public struct Settings: Codable, Equatable {
         directoryBindings = try c.decodeIfPresent([DirectoryBinding].self,
                                                   forKey: .directoryBindings)
             ?? d.directoryBindings
+        server = try c.decodeIfPresent(ServerConnection.self, forKey: .server)
+        delegatedAccountIDs = try c.decodeIfPresent([String].self,
+                                                    forKey: .delegatedAccountIDs)
+            ?? d.delegatedAccountIDs
     }
+
+    public var delegated: Set<String> { Set(delegatedAccountIDs) }
 
     /// Replaces any rule for the same directory rather than letting two rules for one
     /// path both sit in the file, where which one wins would come down to array order.

@@ -35,7 +35,20 @@ public struct JSONStore {
             try data.write(to: tmp, options: .atomic)
             try? FileManager.default.setAttributes([.posixPermissions: 0o600],
                                                    ofItemAtPath: tmp.path)
-            _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp)
+            // replaceItemAt wants something to replace. On Linux — where the server
+            // writes accounts.json into a fresh data directory — a missing original
+            // fails, and the error would only ever surface as a log line.
+            if FileManager.default.fileExists(atPath: url.path) {
+                _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp)
+            } else {
+                // The target can appear between the check and the move, so the move is
+                // not the last word — falling back beats losing the write.
+                do {
+                    try FileManager.default.moveItem(at: tmp, to: url)
+                } catch {
+                    _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp)
+                }
+            }
         } catch {
             try? FileManager.default.removeItem(at: tmp)
             Log.error("could not save \(url.lastPathComponent): \(error)")

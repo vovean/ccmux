@@ -1,3 +1,4 @@
+import CCMuxCore
 import SwiftUI
 
 public enum Page: String, CaseIterable, Identifiable {

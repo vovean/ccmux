@@ -1,3 +1,4 @@
+import CCMuxCore
 import Foundation
 
 /// Builds the URLSession pieces that route ccmux's own traffic through an upstream proxy.

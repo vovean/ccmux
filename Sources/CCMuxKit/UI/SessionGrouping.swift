@@ -1,3 +1,4 @@
+import CCMuxCore
 import Foundation
 
 /// One collapsible section on the Sessions screen. Managed and unmanaged sessions share

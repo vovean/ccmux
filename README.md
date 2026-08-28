@@ -250,11 +250,38 @@ in-process call binds the item's ACL to the calling binary, which is re-signed o
 rebuild, so macOS would prompt after each build. `security` never changes, so creator ==
 reader and there is no prompt.
 
+## More than one Mac
+
+Setting a second machine up means signing in to every account again, and neither Mac knows
+what the other has spent. `ccmuxd` fixes that: a small Go server that holds every account and
+is the sole holder of every refresh lineage. It hands out short-lived access tokens and
+nothing that could rotate a lineage — inference still goes straight from each Mac to
+Anthropic. Standard library only, ~7 MB static binary, idles at 25 MB of RAM.
+
+    make ccmuxd-linux
+    scp dist/ccmuxd-linux-amd64 scripts/install-ccmuxd.sh you@host:
+    ssh you@host 'sudo ./install-ccmuxd.sh --mode systemd \
+        --binary ./ccmuxd-linux-amd64 --dns ccmux.example.com --ip 203.0.113.10'
+
+Then Settings → Account server on each Mac. ccmux shows you the certificate to confirm
+before it sends anything, and pins it from then on. Accounts the server already has are
+handed over; accounts only this Mac has are offered one checkbox at a time, because pushing
+one uploads its refresh token.
+
+Signing in again still happens in the browser here — the server is headless — but the PKCE
+verifier and the code exchange are the server's, so the refresh token is born there. The
+redirect stays on this Mac's loopback, which is why none of it needs Anthropic to accept a
+public redirect URI.
+
+See [docs/server.md](docs/server.md), including what it costs: the server becomes a
+dependency, and token refreshes start coming from its IP rather than your laptop's.
+
 ## Where things live
 
     ~/Library/Application Support/ccmux/    accounts.json, usage.json, sessions.json,
                                             settings.json, ccmux.log, control.sock, ns/
     Keychain "ccmux-credentials"             one item per account, keyed by account uuid
+    Keychain "ccmux-server"                  the ccmuxd basic-auth password
 
 The control socket is a unix socket in a 0700 directory and checks the peer's uid: it
 hands out session tokens, so it is not a TCP port.
@@ -262,8 +289,10 @@ hands out session tokens, so it is not a TCP port.
 ## Develop
 
     swift build
-    make test      # plain `swift test` fails on a CLT-only machine
-    make app       # dist/ccmux.app
+    make test          # plain `swift test` fails on a CLT-only machine
+    make test-server   # ccmuxd (Go), race detector on
+    make ccmuxd-linux  # the static Linux binary that ships
+    make app           # dist/ccmux.app
     make restart   # restart without losing live sessions
     make upgrade   # install, then that restart
     make icon      # re-renders Resources/AppIcon.icns from Sources/CCMuxKit/UI/IconArt.swift

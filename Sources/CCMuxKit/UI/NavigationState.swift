@@ -1,3 +1,4 @@
+import CCMuxCore
 import SwiftUI
 
 /// Which screen is showing and which session groups are folded away. Lives above the

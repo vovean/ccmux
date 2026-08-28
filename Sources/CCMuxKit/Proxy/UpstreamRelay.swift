@@ -1,3 +1,4 @@
+import CCMuxCore
 import Foundation
 
 /// Streams one upstream request/response pair without buffering the body.

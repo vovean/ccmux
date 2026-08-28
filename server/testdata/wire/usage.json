@@ -1,0 +1,24 @@
+{
+  "accountID": "11111111-2222-3333-4444-555555555555",
+  "windows": [
+    {
+      "kind": "session",
+      "label": "5-hour",
+      "percent": 33.5,
+      "resetsAt": "2026-08-28T15:04:05Z"
+    },
+    {
+      "kind": "weeklyAll",
+      "label": "Weekly",
+      "percent": 12
+    },
+    {
+      "kind": "weeklyScoped",
+      "label": "Weekly Fable",
+      "percent": 61.25,
+      "resetsAt": "2026-08-28T15:04:05Z",
+      "modelName": "Fable"
+    }
+  ],
+  "ageSeconds": 42.5
+}

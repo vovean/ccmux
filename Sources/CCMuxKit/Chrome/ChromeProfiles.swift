@@ -1,3 +1,4 @@
+import CCMuxCore
 import Foundation
 
 public struct ChromeProfile: Identifiable, Hashable, Sendable {

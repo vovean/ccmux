@@ -1,8 +1,8 @@
 import Foundation
 
 /// One rate-limit window as reported by the usage API or by response headers.
-public struct UsageWindow: Codable, Equatable, Identifiable {
-    public enum Kind: String, Codable, Equatable, CaseIterable {
+public struct UsageWindow: Codable, Equatable, Identifiable, Sendable {
+    public enum Kind: String, Codable, Equatable, CaseIterable, Sendable {
         case session          // the 5-hour window
         case weeklyAll        // weekly across all models
         case weeklyScoped     // weekly for one model, e.g. Fable
@@ -63,7 +63,7 @@ public struct UsageWindow: Codable, Equatable, Identifiable {
     }
 }
 
-public struct UsageSnapshot: Codable, Equatable {
+public struct UsageSnapshot: Codable, Equatable, Sendable {
     public var windows: [UsageWindow]
     /// When any source last updated these numbers, including a proxied response header.
     public var fetchedAt: Date

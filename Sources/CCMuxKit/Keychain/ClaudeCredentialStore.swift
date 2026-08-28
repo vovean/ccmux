@@ -1,4 +1,4 @@
-import CryptoKit
+import CCMuxCore
 import Foundation
 
 /// Reads and writes the Keychain items Claude Code itself uses.
@@ -13,7 +13,7 @@ public enum ClaudeCredentialStore {
 
     public static func service(forNamespace dir: URL) -> String {
         let path = dir.path.precomposedStringWithCanonicalMapping
-        let hex = Data(SHA256.hash(data: Data(path.utf8))).hexEncoded()
+        let hex = CryptoShim.sha256Hex(Data(path.utf8))
         return "\(globalService)-\(hex.prefix(8))"
     }
 
@@ -77,6 +77,25 @@ public enum APIKeyStore {
 public enum ProxyPasswordStore {
     static let service = "ccmux-proxy"
     static let account = "upstream"
+
+    public static func read() throws -> String? {
+        try Keychain.read(service: service, account: account)
+    }
+
+    public static func write(_ password: String?) throws {
+        guard let password, !password.isEmpty else {
+            try? Keychain.delete(service: service, account: account)
+            return
+        }
+        try Keychain.write(service: service, account: account, value: password)
+    }
+}
+
+/// The ccmuxd basic-auth password. Its own service, and out of settings.json for the same
+/// reason as the proxy password: that file is plaintext on disk.
+public enum ServerPasswordStore {
+    static let service = "ccmux-server"
+    static let account = "basic-auth"
 
     public static func read() throws -> String? {
         try Keychain.read(service: service, account: account)

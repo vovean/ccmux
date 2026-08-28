@@ -4,7 +4,8 @@ SWIFT_TEST_FLAGS = --disable-xctest --enable-swift-testing \
 	-Xlinker -F -Xlinker $(FW) -Xlinker -rpath -Xlinker $(FW)
 
 .PHONY: build app icon test install run restart upgrade clean install-agent \
-	uninstall-agent release publish
+	uninstall-agent release publish test-server build-server ccmuxd-linux ccmuxd-image \
+	verify-server
 
 build:
 	swift build
@@ -17,6 +18,31 @@ app:
 
 test:
 	swift test $(SWIFT_TEST_FLAGS)
+
+# ccmuxd is Go: standard library only, no external modules, and it cross-compiles to a
+# static Linux binary from anywhere. That last part is why it is not Swift — a Linux Swift
+# build needs a 1.2 GB toolchain downloaded first, which is exactly what blocked the
+# original deployment.
+build-server:
+	cd server && go build ./... && go vet ./...
+
+test-server:
+	cd server && go test -race ./...
+
+# The artifact that actually ships. ~7 MB, statically linked, no runtime on the target.
+ccmuxd-linux:
+	@mkdir -p dist
+	cd server && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+	  go build -trimpath -ldflags="-s -w" -o ../dist/ccmuxd-linux-amd64 .
+	@ls -lh dist/ccmuxd-linux-amd64 | awk '{print "  dist/ccmuxd-linux-amd64", $$5}'
+
+ccmuxd-image:
+	docker build -f server/Dockerfile -t ccmuxd:latest server
+
+# Starts a real ccmuxd with a real certificate and drives it with the real Mac client.
+# Covers what neither compiler can: TLS pinning, the auth header, HTTP/2, error mapping.
+verify-server:
+	./scripts/verify-server.sh
 
 install: app
 	rm -rf /Applications/ccmux.app

@@ -1,3 +1,4 @@
+import CCMuxCore
 import AppKit
 import SwiftUI
 
@@ -14,6 +15,7 @@ struct SettingsPage: View {
                 exhaustion
                 limitWindows
                 signInBrowser
+                ServerSection(engine: engine)
                 upstreamProxySection
                 policies
                 directoryBindings
