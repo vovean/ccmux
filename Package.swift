@@ -1,20 +1,16 @@
 // swift-tools-version:6.0
 import PackageDescription
 
-// CCMuxCore is the portable half: models, the OAuth client, usage parsing. It builds on
-// Linux so `ccmuxd` (server/Package.swift) can share it verbatim rather than growing a
-// second, drifting copy of the credential logic.
-//
-// The server is a separate package on purpose. Hummingbird and NIO are a large build,
-// and `make publish` guards on a zero-warning clean build — third-party warnings would
-// fail a release that has nothing to do with them.
+// CCMuxCore holds the models, the OAuth client and usage parsing — the half with no
+// AppKit in it. ccmuxd is a separate Go program that re-declares the wire types; the
+// fixtures in server/testdata/wire are what stop the two drifting apart.
 let package = Package(
     name: "CCMux",
     platforms: [.macOS(.v14)],
     products: [
+        // Exposed so the wire types stay a named, shared contract even though ccmuxd is
+        // now Go and re-declares them: server/testdata/wire pins the two together.
         .library(name: "CCMuxCore", targets: ["CCMuxCore"]),
-        // Exposed for the server package's end-to-end test, which drives the real client.
-        .library(name: "CCMuxKit", targets: ["CCMuxKit"]),
     ],
     dependencies: [
         // Linux only: CryptoKit covers macOS, and building swift-crypto there would slow

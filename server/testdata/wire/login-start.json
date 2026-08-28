@@ -1,0 +1,5 @@
+{
+  "loginID": "a-login-id",
+  "authorizeURL": "https://claude.com/cai/oauth/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A51234%2Fcallback",
+  "state": "a-state-value"
+}

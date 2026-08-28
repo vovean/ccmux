@@ -5,3 +5,4 @@ dist/
 ai/
 CLAUDE.md
 server/.build/
+server/ccmuxd

@@ -53,31 +53,42 @@ rather than rejecting it. Whether that survives the final redirect and the code 
 was **not** established — the token endpoint rate-limits unauthenticated probes, and it is
 the same endpoint keeping live sessions alive. The design does not depend on the answer.
 
+## What it is
+
+A single Go program, standard library only — no external modules at all. It
+cross-compiles to a ~7 MB static Linux binary from any machine with Go, needs no runtime
+on the target, and idles at about 25 MB of RAM.
+
+That last part is why it is not Swift. A Linux Swift build needs a 1.2 GB toolchain
+downloaded first, and on a 961 MB VPS the Docker route would have spent ~1.5 GB of disk
+and ~200 MB of RAM to run a workload this size — where an OOM reaches whatever else the
+box is running, not just ccmuxd.
+
 ## Install
 
-Build the image from the repository root, then set the host up:
+Build the binary, copy it and the script over, and run it:
 
 ```sh
-make ccmuxd-image                      # docker build -f server/Dockerfile -t ccmuxd .
-scp -r scripts/install-ccmuxd.sh you@host:
-ssh you@host './install-ccmuxd.sh --dns ccmux.example.com --ip 203.0.113.10'
+make ccmuxd-linux                        # dist/ccmuxd-linux-amd64, ~7 MB
+scp dist/ccmuxd-linux-amd64 scripts/install-ccmuxd.sh you@host:
+ssh you@host 'sudo ./install-ccmuxd.sh --mode systemd \
+    --binary ./ccmuxd-linux-amd64 --dns ccmux.example.com --ip 203.0.113.10'
 ```
 
 Pass every name and address you will actually use. They become the certificate's SANs, and
 a client reaching the server by a name the certificate does not cover will refuse the
-connection. Then:
+connection.
 
-```sh
-cd ccmuxd && docker compose up -d
-```
-
-The compose file runs the container as whoever owns `data/`. That directory is 0700 and
-holds every refresh lineage, so the alternatives were chowning it to the image's own uid
-(needs root) or making it world-readable (defeats the sealing). Run the install script as
-an ordinary user, not root.
+That installs to `/usr/local/bin/ccmuxd`, creates a `ccmuxd` system user, puts the sealed
+store in `/var/lib/ccmuxd` and the certificate in `/etc/ccmuxd`, and starts a systemd unit
+with the usual hardening plus a `MemoryMax` — so ccmuxd can never be the reason something
+else on the box gets killed.
 
 The script prints the password **once** and the certificate fingerprint. Delete
-`data/auth` and rerun it to issue a new password.
+`/var/lib/ccmuxd/auth` and rerun it to issue a new password.
+
+A `server/Dockerfile` exists for hosts where a container is the house style; it builds a
+`scratch` image of the binary plus a CA bundle, under 10 MB.
 
 ## Connecting a Mac
 
@@ -180,11 +191,22 @@ The server keeps its copies; nothing is deleted.
 ## Development
 
 ```sh
-make build-server     # cd server && swift build
-make test-server      # 35 tests, including a real client against a real server over TLS
+make build-server     # go build + go vet
+make test-server      # go test -race
+make ccmuxd-linux     # the artifact that ships
 ```
 
-The end-to-end suite generates a certificate with `openssl`, starts Hummingbird on a
-kernel-assigned port, and drives the actual `ServerClient` through it. It is the test that
-catches what per-side tests cannot — it found the double percent-encoding bug that made
-every token request 404.
+The end-to-end suite starts a real TLS server on a kernel-assigned port and drives the
+real routes through it, pinning the certificate the same way the Mac does.
+
+**The cross-language contract** is the part worth understanding. The client is Swift and
+models this protocol independently, so nothing the compiler does can catch a renamed key
+or a reformatted date — it would surface as a broken client on someone's Mac.
+`server/fixtures_test.go` writes `server/testdata/wire/*.json` from the server's own
+marshalling, and `Tests/CCMuxKitTests/ServerWireCompatibilityTests.swift` decodes those
+exact bytes with the real client types. Change the shape on either side and one of them
+fails.
+
+The sharpest edge it guards: Swift's `.iso8601` decoding strategy rejects fractional
+seconds, and Go's default time marshalling emits them. The server carries a custom time
+type purely so usage timestamps stay decodable.

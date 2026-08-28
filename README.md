@@ -253,15 +253,15 @@ reader and there is no prompt.
 ## More than one Mac
 
 Setting a second machine up means signing in to every account again, and neither Mac knows
-what the other has spent. `ccmuxd` fixes that: a small server that holds every account and
+what the other has spent. `ccmuxd` fixes that: a small Go server that holds every account and
 is the sole holder of every refresh lineage. It hands out short-lived access tokens and
 nothing that could rotate a lineage — inference still goes straight from each Mac to
-Anthropic.
+Anthropic. Standard library only, ~7 MB static binary, idles at 25 MB of RAM.
 
-    make ccmuxd-image
-    scp scripts/install-ccmuxd.sh you@host:
-    ssh you@host './install-ccmuxd.sh --dns ccmux.example.com --ip 203.0.113.10'
-    ssh you@host 'cd ccmuxd && docker compose up -d'
+    make ccmuxd-linux
+    scp dist/ccmuxd-linux-amd64 scripts/install-ccmuxd.sh you@host:
+    ssh you@host 'sudo ./install-ccmuxd.sh --mode systemd \
+        --binary ./ccmuxd-linux-amd64 --dns ccmux.example.com --ip 203.0.113.10'
 
 Then Settings → Account server on each Mac. ccmux shows you the certificate to confirm
 before it sends anything, and pins it from then on. Accounts the server already has are
@@ -290,7 +290,8 @@ hands out session tokens, so it is not a TCP port.
 
     swift build
     make test          # plain `swift test` fails on a CLT-only machine
-    make test-server   # the ccmuxd package, including a real client over real TLS
+    make test-server   # ccmuxd (Go), race detector on
+    make ccmuxd-linux  # the static Linux binary that ships
     make app           # dist/ccmux.app
     make restart   # restart without losing live sessions
     make upgrade   # install, then that restart

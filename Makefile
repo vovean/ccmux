@@ -4,7 +4,7 @@ SWIFT_TEST_FLAGS = --disable-xctest --enable-swift-testing \
 	-Xlinker -F -Xlinker $(FW) -Xlinker -rpath -Xlinker $(FW)
 
 .PHONY: build app icon test install run restart upgrade clean install-agent \
-	uninstall-agent release publish test-server build-server ccmuxd-image
+	uninstall-agent release publish test-server build-server ccmuxd-linux ccmuxd-image
 
 build:
 	swift build
@@ -18,18 +18,25 @@ app:
 test:
 	swift test $(SWIFT_TEST_FLAGS)
 
-# The server is its own package: Hummingbird and NIO must not land in the app's build,
-# because `publish` guards on a zero-warning clean build and third-party warnings would
-# fail a release that has nothing to do with them.
+# ccmuxd is Go: standard library only, no external modules, and it cross-compiles to a
+# static Linux binary from anywhere. That last part is why it is not Swift — a Linux Swift
+# build needs a 1.2 GB toolchain downloaded first, which is exactly what blocked the
+# original deployment.
 build-server:
-	cd server && swift build
+	cd server && go build ./... && go vet ./...
 
 test-server:
-	cd server && swift test $(SWIFT_TEST_FLAGS)
+	cd server && go test -race ./...
 
-# Build context is the repo root — ccmuxd depends on CCMuxCore by path.
+# The artifact that actually ships. ~7 MB, statically linked, no runtime on the target.
+ccmuxd-linux:
+	@mkdir -p dist
+	cd server && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+	  go build -trimpath -ldflags="-s -w" -o ../dist/ccmuxd-linux-amd64 .
+	@ls -lh dist/ccmuxd-linux-amd64 | awk '{print "  dist/ccmuxd-linux-amd64", $$5}'
+
 ccmuxd-image:
-	docker build -f server/Dockerfile -t ccmuxd:latest .
+	docker build -f server/Dockerfile -t ccmuxd:latest server
 
 install: app
 	rm -rf /Applications/ccmux.app

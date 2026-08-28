@@ -4,7 +4,7 @@
 #
 # Host-agnostic on purpose — pass the names and addresses you will actually use:
 #   ./install-ccmuxd.sh --dns ccmux.example.com --ip 203.0.113.10
-#   ./install-ccmuxd.sh --mode systemd --binary ./ccmuxd --ip 10.9.0.1 --bind 10.9.0.1
+#   ./install-ccmuxd.sh --mode systemd --binary ./ccmuxd --ip 10.0.0.1 --bind 10.0.0.1
 #
 # Run it on the server. Docker mode writes to ./ccmuxd and starts nothing; systemd mode
 # needs root, installs system-wide, and enables the service.
