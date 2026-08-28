@@ -4,7 +4,8 @@ SWIFT_TEST_FLAGS = --disable-xctest --enable-swift-testing \
 	-Xlinker -F -Xlinker $(FW) -Xlinker -rpath -Xlinker $(FW)
 
 .PHONY: build app icon test install run restart upgrade clean install-agent \
-	uninstall-agent release publish test-server build-server ccmuxd-linux ccmuxd-image
+	uninstall-agent release publish test-server build-server ccmuxd-linux ccmuxd-image \
+	verify-server
 
 build:
 	swift build
@@ -37,6 +38,11 @@ ccmuxd-linux:
 
 ccmuxd-image:
 	docker build -f server/Dockerfile -t ccmuxd:latest server
+
+# Starts a real ccmuxd with a real certificate and drives it with the real Mac client.
+# Covers what neither compiler can: TLS pinning, the auth header, HTTP/2, error mapping.
+verify-server:
+	./scripts/verify-server.sh
 
 install: app
 	rm -rf /Applications/ccmux.app
