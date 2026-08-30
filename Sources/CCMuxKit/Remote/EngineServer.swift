@@ -40,14 +40,26 @@ public extension Engine {
         }
         serverBusy = true
         defer { serverBusy = false }
+        Log.info("probing \(url.absoluteString) (typed as \(rawURL))")
         do {
-            return .success(try await ServerClient.probeFingerprint(
+            let fingerprint = try await ServerClient.probeFingerprint(
                 baseURL: url, proxy: settings.upstreamProxy,
-                proxyPassword: try? ProxyPasswordStore.read()))
+                proxyPassword: try? ProxyPasswordStore.read(), trace: Self.logTrace)
+            Log.info("probe of \(url.absoluteString) saw \(fingerprint)")
+            return .success(fingerprint)
         } catch {
+            Log.warn("probe of \(url.absoluteString) failed: "
+                + ServerDiagnostics.describe(error))
             return .failure(error)
         }
     }
+
+    /// Both first-connect paths narrate into the log.
+    ///
+    /// They are user-initiated and rare, and they are the two that could previously fail
+    /// with nothing written down anywhere — the banner was the only report, and a banner
+    /// is gone by the time anyone asks what happened.
+    nonisolated static let logTrace: ServerTrace = { Log.info("server: \($0)") }
 
     /// Step two: the user has agreed to the fingerprint. Verify the credentials actually
     /// work before writing anything down, then work out what it means for local accounts.
@@ -58,14 +70,19 @@ public extension Engine {
         serverBusy = true
         defer { serverBusy = false }
 
+        Log.info("connecting to \(url.absoluteString) as \(username) "
+            + "pinning \(fingerprint.lowercased())")
         let client = ServerClient(baseURL: url, username: username, password: password,
                                   fingerprint: fingerprint, proxy: settings.upstreamProxy,
-                                  proxyPassword: try? ProxyPasswordStore.read())
+                                  proxyPassword: try? ProxyPasswordStore.read(),
+                                  trace: Self.logTrace)
         let remote: [RemoteAccount]
         do {
             _ = try await client.health()
             remote = try await client.accounts()
         } catch {
+            Log.warn("connect to \(url.absoluteString) failed: "
+                + ServerDiagnostics.describe(error))
             return error.localizedDescription
         }
 

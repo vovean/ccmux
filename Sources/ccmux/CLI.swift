@@ -19,6 +19,9 @@ enum CLI {
         Command(name: "assign", usage: "assign <session-id> <account-id>", run: assign),
         Command(name: "end", usage: "end <session-id>", run: end),
         Command(name: "import", usage: "import", run: { _ in importLogin() }),
+        Command(name: "server-check",
+                usage: "server-check <address> [--username <u>] [--fingerprint <hex>]",
+                run: serverCheck),
         Command(name: "shell-init", usage: "shell-init", run: { _ in shellInit() }),
         Command(name: "install-agent", usage: "install-agent",
                 run: { _ in installAgent() }),
@@ -167,6 +170,164 @@ enum CLI {
         return nil
     }
 
+    // MARK: - server-check
+
+    /// Reproduces first-connect against a ccmuxd and narrates every step.
+    ///
+    /// Runs the real `ServerClient`, deliberately. A standalone reimplementation of the
+    /// pinning logic was written to chase a Mac that could not connect, and it succeeded
+    /// on the machine where the app failed — which proved only that the reimplementation
+    /// was not the app. Anything that is going to answer this question has to be the
+    /// shipped class, on the shipped binary, in the shipped bundle.
+    static func serverCheck(_ arguments: [String]) -> Never {
+        var address: String?
+        var username = "ccmux"
+        var fingerprint: String?
+        var index = 0
+        while index < arguments.count {
+            switch arguments[index] {
+            case "--username":
+                index += 1
+                guard index < arguments.count else { fail("--username needs a value") }
+                username = arguments[index]
+            case "--fingerprint":
+                index += 1
+                guard index < arguments.count else { fail("--fingerprint needs a value") }
+                fingerprint = arguments[index].lowercased()
+            default:
+                guard address == nil else { fail("unexpected argument \(arguments[index])") }
+                address = arguments[index]
+            }
+            index += 1
+        }
+        guard let address else { fail("server-check needs an address") }
+        // The trace runs on a URLSession queue while the narration runs here, and a
+        // buffered stdout interleaves the two into nonsense — the first run printed every
+        // trace line above the heading it belonged under.
+        setvbuf(stdout, nil, _IONBF, 0)
+        guard let url = CCMuxKit.Engine.normalizeServerURL(address) else {
+            fail("\(address) is not a URL")
+        }
+
+        // Never from argv: a password there is visible in `ps` to every user on the
+        // machine and lands in shell history.
+        let password = ProcessInfo.processInfo.environment["CCMUX_PASSWORD"]
+            ?? (try? ServerPasswordStore.read()) ?? nil
+
+        print("address     \(address)")
+        print("normalized  \(url.absoluteString)")
+        print("username    \(username)")
+        print("password    \(password == nil ? "none — will stop after the probe" : "supplied")")
+        print("system proxy for this URL: \(systemProxyDescription(for: url))")
+        print("")
+
+        let trace: ServerTrace = { line in
+            print("  \(line)")
+            Log.info("server-check: \(line)")
+        }
+
+        let done = DispatchSemaphore(value: 0)
+        var failure: String?
+        Task {
+            defer { done.signal() }
+            print("--- probe (accepts any certificate, sends no credentials) ---")
+            let observed: String
+            do {
+                observed = try await ServerClient.probeFingerprint(
+                    baseURL: url, proxy: nil, proxyPassword: nil, trace: trace)
+            } catch {
+                await tlsMatrix(url)
+                failure = "probe failed: \(ServerDiagnostics.describe(error))"
+                return
+            }
+            print("  fingerprint \(ServerFingerprint.display(observed))")
+            print("")
+
+            guard let password else { return }
+            let pin = fingerprint ?? observed
+            if fingerprint == nil {
+                print("--- authenticated request (pinning the fingerprint just probed) ---")
+            } else {
+                print("--- authenticated request (pinning \(pin)) ---")
+            }
+            let client = ServerClient(baseURL: url, username: username, password: password,
+                                      fingerprint: pin, proxy: nil, proxyPassword: nil,
+                                      trace: trace)
+            do {
+                let health = try await client.health()
+                print("  health ok: apiVersion=\(health.apiVersion)")
+                let accounts = try await client.accounts()
+                print("  accounts: \(accounts.count)")
+                for account in accounts {
+                    print("    \(account.id)  \(account.label)  \(account.health)")
+                }
+            } catch {
+                await tlsMatrix(url)
+                failure = "authenticated request failed: "
+                    + ServerDiagnostics.describe(error)
+            }
+        }
+        done.wait()
+        if let failure {
+            print("")
+            fail(failure)
+        }
+        print("")
+        print("OK")
+        exit(0)
+    }
+
+    /// Which TLS versions this machine can actually complete a handshake with.
+    ///
+    /// Trust is out of the picture here — every certificate is accepted — so a failure at
+    /// one ceiling and not another is the protocol itself, not the pin, the certificate or
+    /// the network. That distinction is the one the app could never make: every cause
+    /// arrived as the same sentence about an SSL error.
+    private static func tlsMatrix(_ url: URL) async {
+        print("")
+        print("--- TLS version matrix (accepts any certificate, no credentials) ---")
+        let ceilings: [(String, tls_protocol_version_t)] = [
+            ("max TLS 1.2", .TLSv12),
+            ("max TLS 1.3", .TLSv13),
+        ]
+        for (label, version) in ceilings {
+            let config = URLSessionConfiguration.ephemeral
+            config.timeoutIntervalForRequest = 12
+            config.tlsMaximumSupportedProtocolVersion = version
+            let delegate = AcceptAnyTrust()
+            let session = URLSession(configuration: config, delegate: delegate,
+                                     delegateQueue: nil)
+            defer { session.invalidateAndCancel() }
+            var request = URLRequest(url: url.appendingPathComponent("v1/health"))
+            request.httpMethod = "GET"
+            do {
+                let (_, response) = try await session.data(for: request)
+                print("  \(label): HTTP "
+                    + "\((response as? HTTPURLResponse)?.statusCode.description ?? "?")")
+            } catch {
+                print("  \(label): \(ServerDiagnostics.describe(error))")
+            }
+        }
+    }
+
+    /// What the system would route this URL through if nothing overrides it — which is
+    /// exactly what a URLSession with no `connectionProxyDictionary` does.
+    private static func systemProxyDescription(for url: URL) -> String {
+        guard let settings = CFNetworkCopySystemProxySettings()?
+            .takeRetainedValue() as? [AnyHashable: Any] else { return "unreadable" }
+        let proxies = CFNetworkCopyProxiesForURL(url as CFURL,
+                                                 settings as CFDictionary)
+            .takeRetainedValue() as? [[AnyHashable: Any]] ?? []
+        let described = proxies.compactMap { proxy -> String? in
+            guard let type = proxy[kCFProxyTypeKey as String] as? String else { return nil }
+            if type == kCFProxyTypeNone as String { return "direct" }
+            let host = proxy[kCFProxyHostNameKey as String] as? String ?? "?"
+            let port = proxy[kCFProxyPortNumberKey as String] as? Int ?? 0
+            return "\(type) \(host):\(port)"
+        }
+        return described.isEmpty ? "direct" : described.joined(separator: ", ")
+    }
+
     // MARK: - Other commands
 
     static func status() -> Never {
@@ -307,5 +468,19 @@ enum CLI {
     static func fail(_ message: String) -> Never {
         FileHandle.standardError.write(Data("ccmux: \(message)\n".utf8))
         exit(1)
+    }
+}
+
+/// Accepts every certificate. Only ever used by `server-check`'s TLS matrix, which is
+/// asking what the protocol does and has no opinion about who it is talking to.
+private final class AcceptAnyTrust: NSObject, URLSessionDelegate, @unchecked Sendable {
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition,
+                                                  URLCredential?) -> Void) {
+        guard let trust = challenge.protectionSpace.serverTrust else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        completionHandler(.useCredential, URLCredential(trust: trust))
     }
 }

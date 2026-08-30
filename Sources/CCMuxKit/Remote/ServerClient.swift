@@ -59,19 +59,23 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
     private let pinnedFingerprint: String
     private let pin: PinnedTrust
     private let session: URLSession
+    private let trace: ServerTrace?
 
     /// `proxy` follows the same rule as every other outbound path in ccmux: routing only
     /// some calls through it looks like the setting worked while the rest go direct, and
     /// on a machine that needs the proxy those are exactly the calls that fail.
     public init(baseURL: URL, username: String, password: String, fingerprint: String,
-                proxy: UpstreamProxy? = nil, proxyPassword: String? = nil) {
+                proxy: UpstreamProxy? = nil, proxyPassword: String? = nil,
+                trace: ServerTrace? = nil) {
         self.baseURL = baseURL
         self.username = username
         self.password = password
         self.pinnedFingerprint = fingerprint.lowercased()
+        self.trace = trace
         let pin = PinnedTrust(expected: fingerprint.lowercased(),
                               proxyCredential: ProxyTransport.credential(
-                                  for: proxy, password: proxyPassword))
+                                  for: proxy, password: proxyPassword),
+                              trace: trace)
         self.pin = pin
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 20
@@ -79,6 +83,11 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
         ProxyTransport.apply(proxy, to: config)
         self.session = URLSession(configuration: config, delegate: pin, delegateQueue: nil)
         super.init()
+        // `nil` does not mean "no proxy" — it means "whatever the system is configured to
+        // use", which is how one Mac silently sent every ccmuxd request through a squid
+        // that refused CONNECT to 8443. Worth a line whenever anyone is watching.
+        trace?("client baseURL=\(baseURL.absoluteString) pin=\(self.pinnedFingerprint) "
+            + "proxy=\(proxy.map { "\($0.host):\($0.port)" } ?? "system default")")
     }
 
     /// A session holds its delegate until invalidated, so a discarded client would leak
@@ -94,10 +103,12 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
     /// moment, and a 401 back is a perfectly good outcome. Nothing here is written down;
     /// the caller stores the pin only after the user agrees to it.
     public static func probeFingerprint(baseURL: URL, proxy: UpstreamProxy? = nil,
-                                        proxyPassword: String? = nil) async throws -> String {
+                                        proxyPassword: String? = nil,
+                                        trace: ServerTrace? = nil) async throws -> String {
         let collector = PinnedTrust(expected: nil,
                                     proxyCredential: ProxyTransport.credential(
-                                        for: proxy, password: proxyPassword))
+                                        for: proxy, password: proxyPassword),
+                                    trace: trace)
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 15
         ProxyTransport.apply(proxy, to: config)
@@ -106,7 +117,18 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
 
         var request = URLRequest(url: baseURL.appendingPathComponent("v1/health"))
         request.httpMethod = "GET"
-        _ = try? await session.data(for: request)
+        trace?("probe GET \(request.url?.absoluteString ?? "?")")
+        do {
+            let (_, response) = try await session.data(for: request)
+            trace?("probe answered HTTP "
+                + "\((response as? HTTPURLResponse)?.statusCode.description ?? "?")")
+        } catch {
+            // Deliberately not fatal: a 401, a refused body, anything at all is fine here
+            // as long as the handshake produced a certificate. But the error is the only
+            // record of *why* a probe that showed a fingerprint still could not talk, and
+            // it used to be dropped on the floor.
+            trace?("probe request failed: \(ServerDiagnostics.describe(error))")
+        }
         guard let observed = collector.observed else {
             throw ServerClientError.transport(
                 "no TLS handshake completed — is \(baseURL.absoluteString) a ccmuxd?")
@@ -272,11 +294,21 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
             // A pin mismatch surfaces as a generic cancellation, so the specific cause is
             // reported from what the delegate saw rather than from the URLError.
             if let seen = pin.mismatch {
+                trace?("pin mismatch: expected \(pinnedFingerprint) got \(seen)")
                 throw ServerClientError.certificateMismatch(expected: pinnedFingerprint,
                                                             got: seen)
             }
+            // Logged, not merely traced. A steady-state client carries no trace, and this
+            // is the one place that knows why an established connection stopped working.
+            let detail = ServerDiagnostics.describe(error)
+            trace?("\(request.httpMethod ?? "?") \(request.url?.absoluteString ?? "?") "
+                + "failed: \(detail)")
+            Log.warn("ccmuxd request failed: \(request.url?.path ?? "?") \(detail) "
+                + "trustChallenges=\(pin.challengeCount)")
             throw ServerClientError.transport(error.localizedDescription)
         }
+        trace?("\(request.httpMethod ?? "?") \(request.url?.absoluteString ?? "?") -> HTTP "
+            + "\((response as? HTTPURLResponse)?.statusCode.description ?? "?")")
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         if status == 401 { throw ServerClientError.unauthorized }
         guard (200..<300).contains(status) else {
@@ -295,28 +327,40 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
 private final class PinnedTrust: NSObject, URLSessionDelegate, @unchecked Sendable {
     private let expected: String?
     private let proxyCredential: URLCredential?
+    private let trace: ServerTrace?
     private let lock = NSLock()
     private var _observed: String?
     private var _mismatch: String?
+    private var _challengeCount = 0
 
     var observed: String? { lock.lock(); defer { lock.unlock() }; return _observed }
     var mismatch: String? { lock.lock(); defer { lock.unlock() }; return _mismatch }
+    /// Zero means the handshake never got as far as asking us anything, which separates a
+    /// connection this delegate refused from one that died before it had a say.
+    var challengeCount: Int { lock.lock(); defer { lock.unlock() }; return _challengeCount }
 
     /// `expected: nil` accepts any certificate and only records what it saw. That is the
     /// first-connect probe and nothing else — it never carries credentials.
-    init(expected: String?, proxyCredential: URLCredential? = nil) {
+    init(expected: String?, proxyCredential: URLCredential? = nil,
+         trace: ServerTrace? = nil) {
         self.expected = expected
         self.proxyCredential = proxyCredential
+        self.trace = trace
     }
 
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping (URLSession.AuthChallengeDisposition,
                                                   URLCredential?) -> Void) {
+        lock.lock(); _challengeCount += 1; lock.unlock()
+        trace?("challenge #\(challengeCount) \(ServerDiagnostics.describe(challenge.protectionSpace)) "
+            + "previousFailures=\(challenge.previousFailureCount)")
         // A proxy in front of us asks first, and with its own scheme. Answering that here
         // is not optional: the server-trust branch below would otherwise cancel it.
         if challenge.protectionSpace.isProxy() {
             let (disposition, credential) = ProxyTransport.respond(to: challenge,
                                                                    credential: proxyCredential)
+            trace?("proxy challenge -> \(name(disposition)) "
+                + "credential=\(credential == nil ? "none" : "yes")")
             completionHandler(disposition, credential)
             return
         }
@@ -325,6 +369,13 @@ private final class PinnedTrust: NSObject, URLSessionDelegate, @unchecked Sendab
               let trust = challenge.protectionSpace.serverTrust,
               let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
               let leaf = chain.first else {
+            // The branch that produced no fingerprint and no mismatch, so the app could
+            // only say "an SSL error has occurred". Naming which half of the guard failed
+            // is the whole difference between that and a diagnosis.
+            trace?("cancelling: method="
+                + "\(challenge.protectionSpace.authenticationMethod) "
+                + "trust=\(challenge.protectionSpace.serverTrust == nil ? "nil" : "yes") "
+                + "chain=\(chainDescription(challenge.protectionSpace.serverTrust))")
             completionHandler(.cancelAuthenticationChallenge, nil)
             return
         }
@@ -334,15 +385,38 @@ private final class PinnedTrust: NSObject, URLSessionDelegate, @unchecked Sendab
         let expected = self.expected
         if let expected, expected != fingerprint { _mismatch = fingerprint }
         lock.unlock()
+        trace?("server trust: chain=\(chain.count) leaf=\(fingerprint) "
+            + "expected=\(expected ?? "any (probe)")")
 
         guard let expected else {
+            trace?("accepting any certificate (probe)")
             completionHandler(.useCredential, URLCredential(trust: trust))
             return
         }
         if expected == fingerprint {
+            trace?("pin matched -> useCredential")
             completionHandler(.useCredential, URLCredential(trust: trust))
         } else {
+            trace?("pin MISMATCH -> cancel")
             completionHandler(.cancelAuthenticationChallenge, nil)
+        }
+    }
+
+    private func chainDescription(_ trust: SecTrust?) -> String {
+        guard let trust else { return "no trust" }
+        guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate] else {
+            return "SecTrustCopyCertificateChain returned nil"
+        }
+        return chain.isEmpty ? "empty" : "\(chain.count)"
+    }
+
+    private func name(_ disposition: URLSession.AuthChallengeDisposition) -> String {
+        switch disposition {
+        case .useCredential: return "useCredential"
+        case .performDefaultHandling: return "performDefaultHandling"
+        case .cancelAuthenticationChallenge: return "cancel"
+        case .rejectProtectionSpace: return "rejectProtectionSpace"
+        @unknown default: return "unknown"
         }
     }
 }

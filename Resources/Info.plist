@@ -24,6 +24,33 @@
 	<string>public.app-category.developer-tools</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<!-- ccmuxd is reached at a bare IP with a self-signed certificate, which App
+		     Transport Security refuses outright: it evaluates the chain itself, and no
+		     amount of accepting the trust in a URLSession delegate changes its mind. The
+		     handshake dies after the certificate arrives, and every cause surfaces as the
+		     same sentence about an SSL error, which is why this took a packet capture to
+		     find. A domain exception cannot express it — NSExceptionDomains takes domain
+		     names, and this address is a literal — so ATS goes off globally and the
+		     domains that can be named are tightened back below. What actually guards the
+		     ccmuxd connection is the SHA-256 pin on its certificate, checked on every
+		     request, which is a stronger statement about that one host than any CA. -->
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<key>NSExceptionDomains</key>
+		<dict>
+			<key>anthropic.com</key>
+			<dict>
+				<key>NSIncludesSubdomains</key>
+				<true/>
+				<key>NSExceptionMinimumTLSVersion</key>
+				<string>TLSv1.2</string>
+				<key>NSExceptionRequiresForwardSecrecy</key>
+				<true/>
+			</dict>
+		</dict>
+	</dict>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>ccmux asks iTerm to bring a session's tab to the front when you press Show in iTerm.</string>
 	<key>NSHighResolutionCapable</key>
