@@ -18,6 +18,12 @@ public struct RedDot: View {
 struct UsageBar: View {
     let window: UsageWindow
     let threshold: Double
+    /// Replaces the reset countdown, together with the tooltip that explains it. The
+    /// summary pools several accounts whose resets fall at different times, so printing
+    /// one of them in the usual place would read as the moment this bar empties — which is
+    /// not a thing that happens. One optional rather than two, so a note without its
+    /// explanation cannot be expressed.
+    var reset: (note: String, help: String)?
 
     private var tint: Color {
         if window.headroom <= threshold { return .red }
@@ -37,7 +43,12 @@ struct UsageBar: View {
                 Text(String(format: "%.0f%% used", window.percent))
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(tint)
-                if let resetsAt = window.resetsAt {
+                if let reset {
+                    Text("· \(reset.note)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                        .help(reset.help)
+                } else if let resetsAt = window.resetsAt {
                     Text("· \(Format.countdown(to: resetsAt)) · \(Format.clock(resetsAt))")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.tertiary)
