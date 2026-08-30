@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -17,8 +18,9 @@ import (
 func NewMux(registry *Registry, machines *MachineStore,
 	credential BasicAuthCredential) *http.ServeMux {
 	mux := http.NewServeMux()
+	throttle := newAuthThrottle()
 	guard := func(handler http.HandlerFunc) http.Handler {
-		return requireAuth(credential, handler)
+		return requireAuth(credential, throttle, handler)
 	}
 
 	mux.Handle("GET "+apiPrefix+"/health", guard(func(w http.ResponseWriter, r *http.Request) {
@@ -177,10 +179,30 @@ func (c BasicAuthCredential) Accepts(username, password string) bool {
 	return userOK == 1 && passOK == 1
 }
 
-func requireAuth(credential BasicAuthCredential, next http.HandlerFunc) http.Handler {
+func requireAuth(credential BasicAuthCredential, throttle *authThrottle,
+	next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := requestHost(r)
+		now := time.Now()
+		if blocked, remaining := throttle.Blocked(host, now); blocked {
+			// Refused without comparing, so a blocked source cannot even use the timing
+			// of the comparison as a signal.
+			w.Header().Set("Retry-After",
+				strconv.Itoa(int(remaining.Seconds())+1))
+			writeError(w, http.StatusTooManyRequests, "too many failed attempts")
+			return
+		}
+
 		username, password, ok := parseBasicAuth(r.Header.Get("Authorization"))
 		if !ok || !credential.Accepts(username, password) {
+			wait := throttle.Failed(host, now)
+			// Logged with the source: on a public address this is the only record that
+			// anyone is trying, and silence is indistinguishable from nobody trying.
+			if wait > 0 {
+				logWarn("rejected basic auth from %s — blocking for %s", host, wait)
+			} else {
+				logWarn("rejected basic auth from %s", host)
+			}
 			// The realm is what makes a browser and `curl -u` offer a prompt rather than
 			// just failing, which matters because this is also how you check the server
 			// by hand.
@@ -188,6 +210,7 @@ func requireAuth(credential BasicAuthCredential, next http.HandlerFunc) http.Han
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
+		throttle.Succeeded(host, now)
 		next(w, r)
 	})
 }
