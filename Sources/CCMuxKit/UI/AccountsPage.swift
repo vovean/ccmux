@@ -243,7 +243,7 @@ struct AccountsPage: View {
                         Button("Sign in again") { engine.relogin(accountID: account.id) }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
-                        .disabled(engine.loginInProgress)
+
                     }
                 }
 

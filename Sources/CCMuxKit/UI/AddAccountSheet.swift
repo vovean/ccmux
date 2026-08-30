@@ -107,16 +107,18 @@ struct AddAccountSheet: View {
                 Spacer()
                 Button("Cancel") { dismiss() }
                 Button("Sign in") {
+                    // Dismiss first: the login modal takes over from here, and waiting for
+                    // the sign-in before closing this sheet is what used to leave a dead
+                    // button on screen for five minutes.
+                    dismiss()
                     Task {
-                        await engine.beginLogin(
-                            chromeProfileDirectory: chromeProfile,
+                        await engine.startLogin(
                             label: label.isEmpty ? nil : label,
-                            loginHint: loginHint.isEmpty ? nil : loginHint)
-                        dismiss()
+                            loginHint: loginHint.isEmpty ? nil : loginHint,
+                            chromeProfileDirectory: chromeProfile)
                     }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(engine.loginInProgress)
             }
         }
     }

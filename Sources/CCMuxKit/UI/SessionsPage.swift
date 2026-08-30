@@ -328,7 +328,7 @@ struct SessionsPage: View {
             Button("Sign in again") { engine.relogin(accountID: accountID) }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
-                .disabled(engine.loginInProgress)
+
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)

@@ -17,6 +17,9 @@ public final class Engine: ObservableObject {
     @Published public private(set) var settings: Settings
     @Published public internal(set) var banner: Banner?
     @Published public internal(set) var loginInProgress = false
+    /// The sign-in the login modal is showing, if any. Non-nil from the moment the browser
+    /// opens until the user dismisses the result.
+    @Published public internal(set) var loginAttempt: LoginAttempt?
     /// What connecting to a ccmuxd would mean for the accounts already on this Mac.
     /// Non-nil only while the connect sheet is deciding.
     @Published public internal(set) var delegationPlan: Delegation.Plan?
@@ -82,6 +85,16 @@ public final class Engine: ObservableObject {
     var apiKeyFingerprints = APIKeyFingerprintCache()
     /// One session report in flight at a time.
     var syncingSessions = false
+    /// Everything needed to redeem a code, retry the browser, or abandon the attempt.
+    var loginContext: LoginContext?
+    var loginListener: LoopbackListener?
+    var loginTask: Task<Void, Never>?
+    /// Guards against two redemptions of one authorize request — a pasted code and the
+    /// browser's callback can arrive together.
+    var redeemingLogin = false
+    /// Identifies the attempt currently on screen. Every login mutation checks it, so a
+    /// redeem the user walked away from cannot write its result over its successor.
+    var loginGeneration: UUID?
     /// Whether the last session sync failed, so an outage is logged once rather than on
     /// every tick. ccmux.log is where a credential going wrong is diagnosed; three lines a
     /// minute of "could not reach the server" would bury exactly that.
@@ -150,6 +163,7 @@ public final class Engine: ObservableObject {
         // deferring.
         vault.load(accountIDs: store.accounts.all().map(\.id))
 
+        repairAccountKinds()
         applyUpstreamProxy()
         applyRemoteToVault()
         sessionManager.recoverAfterLaunch()
@@ -827,64 +841,42 @@ public final class Engine: ObservableObject {
         }
     }
 
-    public func beginLogin(chromeProfileDirectory: String?, label: String?,
-                           loginHint: String?) async {
-        guard !loginInProgress else { return }
-        loginInProgress = true
-        defer { loginInProgress = false }
-
-        let pkce = OAuthClient.PKCE()
-        let listener: LoopbackListener
-        do {
-            listener = try LoopbackListener()
-        } catch {
-            banner = Banner(level: .warning, text: error.localizedDescription)
-            return
-        }
-        defer { listener.stop() }
-
-        let url = OAuthClient.authorizeURL(pkce: pkce, port: listener.port, email: loginHint)
-        let outcome = ChromeLauncher.open(url: url.absoluteString,
-                                          profileDirectory: chromeProfileDirectory)
-        banner = Banner(level: .info, text: "Waiting for sign-in… \(outcome.message)")
-
-        do {
-            let items = try await listener.awaitCallback(timeout: 300)
-            guard let code = items["code"] else {
-                banner = Banner(level: .warning, text: "The browser returned no code.")
-                return
+    /// Signs an account in again, reusing everything already known about it — including
+    /// its Chrome profile, which is the whole point of that setting.
+    /// Puts back a `kind` the record lost. Runs at launch because the damage is silent:
+    /// an API key recorded as a subscription is picked automatically by the policy engine
+    /// and then fails to seed, which surfaces as a sign-in prompt for an account that
+    /// never had a sign-in.
+    private func repairAccountKinds() {
+        for account in store.accounts.all() {
+            let key = (try? APIKeyStore.read(account.id)) ?? nil
+            guard account.contradictsStoredAPIKey(hasStoredAPIKey: !(key ?? "").isEmpty)
+            else { continue }
+            store.accounts.mutate(account.id) {
+                $0.kind = .apiKey
+                // Never re-enter rotation on its own: an API key costs money per token,
+                // so it is only ever used when a session is assigned to it deliberately.
+                $0.inRotation = false
             }
-            guard items["state"] == nil || items["state"] == pkce.state else {
-                banner = Banner(level: .warning,
-                                text: "Sign-in state did not match; nothing was stored.")
-                return
-            }
-            let credential = try await client.exchange(code: code, pkce: pkce,
-                                                       port: listener.port)
-            let account = try await adopt(credential: credential,
-                                          chromeProfileDirectory: chromeProfileDirectory,
-                                          label: label)
-            banner = Banner(level: .info, text: "Signed in as \(account.displayName).")
-        } catch {
-            banner = Banner(level: .warning, text: error.localizedDescription)
+            Log.warn("repaired \(account.displayName): an API-key account was recorded as "
+                     + "a subscription in rotation")
+            // On screen, not only in the log: the account silently stops being picked,
+            // and an unexplained change of behaviour reads as a bug.
+            banner = Banner(level: .warning,
+                            text: "\(account.displayName) was recorded as a subscription "
+                                + "but holds an API key. It has been put back and taken "
+                                + "out of rotation, so nothing spends it by accident.")
         }
     }
 
-    /// Signs an account in again, reusing everything already known about it — including
-    /// its Chrome profile, which is the whole point of that setting.
     public func relogin(accountID: String) {
         guard let account = store.accounts.get(accountID) else { return }
+        // Whether the code is redeemed here or on the server is decided inside
+        // `startLogin` from the delegation set, so every caller looks the same.
         Task {
-            // A delegated account's lineage belongs to the server, so the exchange has to
-            // happen there. The browser half still runs here — the server is headless.
-            if settings.delegated.contains(accountID) {
-                await beginServerLogin(accountID: accountID,
-                                       chromeProfileDirectory: account.chromeProfileDirectory,
-                                       loginHint: account.email)
-            } else {
-                await beginLogin(chromeProfileDirectory: account.chromeProfileDirectory,
-                                 label: account.label, loginHint: account.email)
-            }
+            await startLogin(accountID: accountID, label: account.label,
+                             loginHint: account.email,
+                             chromeProfileDirectory: account.chromeProfileDirectory)
         }
     }
 

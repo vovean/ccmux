@@ -116,7 +116,7 @@ public extension Engine {
     /// writing settings would come back with a credential that cannot be refreshed and no
     /// record that it is the server's job now — which presents as a healthy account
     /// suddenly needing re-login.
-    private func commitDelegation(_ delegated: Set<String>, client: ServerClient) {
+    internal func commitDelegation(_ delegated: Set<String>, client: ServerClient) {
         updateSettings { $0.delegatedAccountIDs = delegated.sorted() }
         vault.setRemote(client, delegated: delegated)
     }
@@ -371,7 +371,7 @@ public extension Engine {
         }
     }
 
-    private func importAccount(_ remote: RemoteAccount, client: ServerClient,
+    internal func importAccount(_ remote: RemoteAccount, client: ServerClient,
                                delegated: inout Set<String>) async -> Bool {
         adoptRemoteRecord(remote)
         return await handOver(remote.id, localID: remote.id, client: client,
@@ -412,67 +412,6 @@ public extension Engine {
     }
 
     // MARK: - Login through the relay
-
-    /// Signs a delegated account in again. The browser runs here, but the PKCE verifier
-    /// and the code exchange are the server's, so the refresh token is born there and
-    /// this Mac never holds one.
-    func beginServerLogin(accountID: String?, chromeProfileDirectory: String?,
-                          loginHint: String?) async {
-        guard let client = serverClient else {
-            // The button is the only affordance for a delegated account that needs
-            // signing in again; returning quietly makes it look broken.
-            banner = Banner(level: .warning,
-                            text: settings.server == nil
-                                ? "This account is delegated but no account server is "
-                                    + "configured. Connect one in Settings."
-                                : "Could not reach the account server's saved password in "
-                                    + "the Keychain. Reconnect it in Settings.")
-            return
-        }
-        guard !loginInProgress else { return }
-        loginInProgress = true
-        defer { loginInProgress = false }
-
-        let listener: LoopbackListener
-        do {
-            listener = try LoopbackListener()
-        } catch {
-            banner = Banner(level: .warning, text: error.localizedDescription)
-            return
-        }
-        defer { listener.stop() }
-
-        do {
-            let started = try await client.startLogin(
-                LoginStartRequest(redirectPort: listener.port, accountID: accountID,
-                                  loginHint: loginHint))
-            let outcome = ChromeLauncher.open(url: started.authorizeURL,
-                                              profileDirectory: chromeProfileDirectory)
-            banner = Banner(level: .info,
-                            text: "Waiting for sign-in… \(outcome.message)")
-
-            let items = try await listener.awaitCallback(timeout: 300)
-            guard let code = items["code"] else {
-                banner = Banner(level: .warning, text: "The browser returned no code.")
-                return
-            }
-            guard items["state"] == nil || items["state"] == started.state else {
-                banner = Banner(level: .warning,
-                                text: "Sign-in state did not match; nothing was stored.")
-                return
-            }
-            let account = try await client.finishLogin(
-                LoginFinishRequest(loginID: started.loginID, code: code,
-                                   state: items["state"]))
-
-            var delegated = settings.delegated
-            _ = await importAccount(account, client: client, delegated: &delegated)
-            commitDelegation(delegated, client: client)
-            banner = Banner(level: .info, text: "Signed in as \(account.displayName).")
-        } catch {
-            banner = Banner(level: .warning, text: error.localizedDescription)
-        }
-    }
 
     // MARK: - Usage
 

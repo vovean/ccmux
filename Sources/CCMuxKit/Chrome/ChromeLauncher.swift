@@ -14,6 +14,13 @@ public enum OpenOutcome: Equatable, Sendable {
         case .copiedToClipboard(let reason): return "\(reason) — link copied instead"
         }
     }
+
+    /// Whether a browser actually came up. A clipboard fallback leaves the user waiting on
+    /// a window that was never opened, so the caller has to be able to tell.
+    public var opened: Bool {
+        if case .copiedToClipboard = self { return false }
+        return true
+    }
 }
 
 public enum ChromeLauncher {

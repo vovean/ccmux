@@ -128,6 +128,16 @@ public struct Account: Codable, Equatable, Identifiable {
         label.isEmpty ? (email ?? id) : label
     }
 
+    /// Whether this record contradicts the Keychain by claiming not to be an API key.
+    ///
+    /// A record that lost its `kind` decodes as a subscription in rotation — see the
+    /// defaults in `init(from:)` — which makes an API key auto-assignable and therefore
+    /// spendable without anyone choosing it, and makes seeding hunt for an OAuth
+    /// credential that was never there. A stored key is the evidence that settles it.
+    public func contradictsStoredAPIKey(hasStoredAPIKey: Bool) -> Bool {
+        hasStoredAPIKey && kind != .apiKey
+    }
+
     /// Whether ccmux may choose this account on its own. An API key is never chosen
     /// automatically: spending money is an explicit decision, so it is reachable only by
     /// assigning a session to it by hand.

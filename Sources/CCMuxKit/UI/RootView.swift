@@ -53,6 +53,17 @@ public struct RootView: View {
             }
         }
         .frame(minWidth: 620, minHeight: 520)
+        // Hosted here rather than per screen: a sign-in started from Accounts must survive
+        // navigating to Sessions, and there must only ever be one of these.
+        .sheet(item: Binding(get: { engine.loginAttempt },
+                             // Identity-checked for the same reason as the sheet's own
+                             // onDisappear: a dismissal of the previous attempt must not
+                             // cancel the one Start over just armed.
+                             set: { if $0 == nil, engine.loginAttempt != nil {
+                                 engine.cancelLogin()
+                             } })) { attempt in
+            LoginSheet(engine: engine, attempt: attempt)
+        }
     }
 
     private var header: some View {
