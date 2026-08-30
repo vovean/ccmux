@@ -9,8 +9,15 @@ struct SessionGroup: Identifiable, Equatable {
     let subtitle: String?
     let sessions: [SessionRecord]
     let unmanaged: [ClaudeSessionInfo]
+    /// Sessions for this account running on other Macs. Read-only, and counted apart from
+    /// `count` — every existing caller of that means "how many are running here".
+    var foreign: [ForeignSession] = []
+    /// True when nothing local is left and the group exists only for foreign sessions:
+    /// the account is not on this Mac, or has none of its own running.
+    var isForeignOnly = false
 
     var count: Int { sessions.count + unmanaged.count }
+    var foreignCount: Int { foreign.count }
     var isUnmanaged: Bool { id == SessionGrouping.unmanagedGroupID }
 }
 
@@ -33,20 +40,29 @@ enum SessionGrouping {
     static func groups(accounts: [Account],
                        sessions: [SessionRecord],
                        unmanaged: [ClaudeSessionInfo],
-                       live: [Int32: ClaudeSessionInfo] = [:]) -> [SessionGroup] {
+                       live: [Int32: ClaudeSessionInfo] = [:],
+                       foreign: [ForeignSession] = []) -> [SessionGroup] {
         var byAccount: [String: [SessionRecord]] = [:]
         for session in sessions {
             byAccount[session.accountID, default: []].append(session)
         }
+        var foreignByAccount: [String: [ForeignSession]] = [:]
+        for session in foreign {
+            foreignByAccount[session.accountID, default: []].append(session)
+        }
 
         var groups: [SessionGroup] = []
         for account in accounts {
-            guard let owned = byAccount.removeValue(forKey: account.id) else { continue }
+            let owned = byAccount.removeValue(forKey: account.id)
+            let elsewhere = foreignByAccount.removeValue(forKey: account.id) ?? []
+            guard owned != nil || !elsewhere.isEmpty else { continue }
             groups.append(SessionGroup(id: account.id,
                                        title: account.displayName,
                                        subtitle: account.subscriptionType,
-                                       sessions: sorted(owned, live: live),
-                                       unmanaged: []))
+                                       sessions: sorted(owned ?? [], live: live),
+                                       unmanaged: [],
+                                       foreign: ForeignSessions.sorted(elsewhere),
+                                       isForeignOnly: owned == nil))
         }
 
         // A session whose account was removed still holds a proxy port, so it gets a
@@ -57,7 +73,24 @@ enum SessionGrouping {
                                        subtitle: String(accountID.prefix(8)),
                                        sessions: sorted(byAccount[accountID] ?? [],
                                                         live: live),
-                                       unmanaged: []))
+                                       unmanaged: [],
+                                       foreign: ForeignSessions.sorted(
+                                           foreignByAccount.removeValue(forKey: accountID) ?? [])))
+        }
+
+        // An account that only exists on another Mac. Titled from what that Mac called it
+        // rather than from eight characters of UUID, which is the whole reason the label
+        // travels on the wire.
+        for accountID in foreignByAccount.keys.sorted() {
+            let elsewhere = foreignByAccount[accountID] ?? []
+            groups.append(SessionGroup(id: accountID,
+                                       title: elsewhere.first?.accountLabel
+                                           ?? "Unknown account",
+                                       subtitle: "not on this Mac",
+                                       sessions: [],
+                                       unmanaged: [],
+                                       foreign: ForeignSessions.sorted(elsewhere),
+                                       isForeignOnly: true))
         }
 
         if !unmanaged.isEmpty {

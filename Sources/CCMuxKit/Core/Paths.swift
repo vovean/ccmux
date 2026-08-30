@@ -16,6 +16,9 @@ public enum Paths {
     public static var settingsFile: URL { support.appendingPathComponent("settings.json") }
     public static var logFile: URL { support.appendingPathComponent("ccmux.log") }
     public static var notifiedFile: URL { support.appendingPathComponent("notified.json") }
+    /// This Mac's identity on the account server. Kept out of settings.json so copying
+    /// settings between Macs cannot give two of them the same machine id.
+    public static var machineFile: URL { support.appendingPathComponent("machine.json") }
     /// Dropped by the shim before it launches the app, so a session started from a
     /// terminal does not pop a window over what you were doing.
     public static var headlessMarker: URL { support.appendingPathComponent(".headless") }

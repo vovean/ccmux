@@ -83,6 +83,7 @@ public extension Engine {
         }
         delegationPlan = buildPlan(remote: remote)
         applyRemoteToVault()
+        Task { await syncSessions() }
         banner = Banner(level: .info,
                         text: "Connected to \(url.host() ?? url.absoluteString) · "
                             + "\(remote.count) account(s) available.")
@@ -138,6 +139,7 @@ public extension Engine {
         serverClientCache = nil
         vault.setRemote(nil, delegated: [])
         delegationPlan = nil
+        forgetForeignSessions()
         banner = stranded.isEmpty
             ? Banner(level: .info, text: "Disconnected from the account server.")
             : Banner(level: .warning,
@@ -313,6 +315,9 @@ public extension Engine {
     /// One retry, for the same reason `TokenVault.store` has one: the usual cause is a
     /// transient `security` timeout under contention, and losing this costs a credential.
     private func writeAPIKey(_ key: String, for accountID: String) -> Bool {
+        // A key can change under an id that does not, which the account set alone cannot
+        // show — so the fingerprint cache is told directly.
+        defer { apiKeyFingerprints.invalidate() }
         do {
             try APIKeyStore.write(key, for: accountID)
             return true

@@ -145,6 +145,7 @@ func (r *Registry) Health() HealthResponse {
 		APIVersion:    apiVersion,
 		Accounts:      len(r.accounts),
 		UptimeSeconds: time.Since(r.startedAt).Seconds(),
+		Features:      serverFeatures,
 	}
 }
 

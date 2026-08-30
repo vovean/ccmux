@@ -37,6 +37,24 @@ public enum Format {
         return "\(minutes)m"
     }
 
+    /// A century, past which every span reads the same anyway.
+    static let maxDisplayableSeconds: TimeInterval = 100 * 365 * 24 * 3600
+
+    /// An elapsed span, coarsened the way people read one: seconds only under a minute,
+    /// then minutes, then hours. Used for how long ago something happened, where the
+    /// difference between 4m12s and 4m is worth nothing.
+    public static func duration(_ seconds: TimeInterval) -> String {
+        // Clamped before the conversion, which traps: `Int(Double)` fatal-errors on NaN
+        // and on anything past Int.max, and this formats ages that arrive over the wire
+        // as bare float64. A crash inside a SwiftUI view body takes the window with it.
+        let total = Int(min(max(0, seconds.rounded()), maxDisplayableSeconds))
+        if total < 60 { return "\(total)s" }
+        if total < 3600 { return "\(total / 60)m" }
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        return minutes > 0 ? "\(hours)h \(minutes)m" : "\(hours)h"
+    }
+
     public static func shortenHome(_ path: String) -> String {
         path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
     }

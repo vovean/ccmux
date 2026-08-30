@@ -112,6 +112,10 @@ public struct Settings: Codable, Equatable {
     /// see `DirectoryBinding`.
     public var directoryBindings: [DirectoryBinding]
     public var server: ServerConnection?
+    /// Whether sessions running on other Macs are shown here. Display only — this Mac
+    /// keeps reporting its own either way, so turning it off on a laptop does not blank
+    /// that laptop's sessions everywhere else.
+    public var showForeignSessions: Bool
     /// Accounts whose refresh lineage now belongs to the server. This Mac holds only
     /// short-lived access tokens for them and must never run a refresh grant of its own —
     /// that is precisely the two-holders-of-one-lineage case that logs an account out.
@@ -129,6 +133,7 @@ public struct Settings: Codable, Equatable {
                 keepWindowsRolling: Bool = true,
                 directoryBindings: [DirectoryBinding] = [],
                 server: ServerConnection? = nil,
+                showForeignSessions: Bool = true,
                 delegatedAccountIDs: [String] = []) {
         self.warnThresholdPercent = warnThresholdPercent
         self.budgetWarnPercent = budgetWarnPercent
@@ -142,6 +147,7 @@ public struct Settings: Codable, Equatable {
         self.keepWindowsRolling = keepWindowsRolling
         self.directoryBindings = directoryBindings
         self.server = server
+        self.showForeignSessions = showForeignSessions
         self.delegatedAccountIDs = delegatedAccountIDs
     }
 
@@ -176,6 +182,8 @@ public struct Settings: Codable, Equatable {
                                                   forKey: .directoryBindings)
             ?? d.directoryBindings
         server = try c.decodeIfPresent(ServerConnection.self, forKey: .server)
+        showForeignSessions = try c.decodeIfPresent(Bool.self, forKey: .showForeignSessions)
+            ?? d.showForeignSessions
         delegatedAccountIDs = try c.decodeIfPresent([String].self,
                                                     forKey: .delegatedAccountIDs)
             ?? d.delegatedAccountIDs

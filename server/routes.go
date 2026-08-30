@@ -9,18 +9,22 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // The HTTP surface. Every route sits behind basic auth; the paths and the JSON shapes are
 // the contract in wire.go.
-func NewMux(registry *Registry, credential BasicAuthCredential) *http.ServeMux {
+func NewMux(registry *Registry, machines *MachineStore,
+	credential BasicAuthCredential) *http.ServeMux {
 	mux := http.NewServeMux()
 	guard := func(handler http.HandlerFunc) http.Handler {
 		return requireAuth(credential, handler)
 	}
 
 	mux.Handle("GET "+apiPrefix+"/health", guard(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, registry.Health())
+		health := registry.Health()
+		health.Machines = machines.Count(time.Now())
+		writeJSON(w, http.StatusOK, health)
 	}))
 
 	mux.Handle("GET "+apiPrefix+"/accounts", guard(func(w http.ResponseWriter, r *http.Request) {
@@ -102,6 +106,51 @@ func NewMux(registry *Registry, credential BasicAuthCredential) *http.ServeMux {
 					status = http.StatusNotFound
 				}
 				writeError(w, status, RejectionMessage(err))
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}))
+
+	// The session view. A report is the machine's whole list, so this replaces rather
+	// than merges, and the answer is the world — including the reporter, which the client
+	// filters out by its own id. One round trip does both halves of the exchange.
+	mux.Handle("POST "+apiPrefix+"/machines/{id}/sessions",
+		guard(func(w http.ResponseWriter, r *http.Request) {
+			id := r.PathValue("id")
+			if !ValidMachineID(id) {
+				writeError(w, http.StatusBadRequest, "that is not a usable machine id")
+				return
+			}
+			var body MachineReport
+			if !decodeBody(w, r, &body) {
+				return
+			}
+			now := time.Now()
+			machines.Report(id, body, now)
+			writeJSON(w, http.StatusOK, SessionsResponse{
+				APIVersion: apiVersion,
+				Machines:   machines.Snapshots(now),
+			})
+		}))
+
+	mux.Handle("GET "+apiPrefix+"/sessions", guard(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, SessionsResponse{
+			APIVersion: apiVersion,
+			Machines:   machines.Snapshots(time.Now()),
+		})
+	}))
+
+	mux.Handle("DELETE "+apiPrefix+"/machines/{id}",
+		guard(func(w http.ResponseWriter, r *http.Request) {
+			id := r.PathValue("id")
+			// Checked here too, not only on the way in: the id is echoed back in the
+			// error below, which a Mac shows verbatim in a banner.
+			if !ValidMachineID(id) {
+				writeError(w, http.StatusBadRequest, "that is not a usable machine id")
+				return
+			}
+			if !machines.Forget(id) {
+				writeError(w, http.StatusNotFound, "no machine "+id)
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)

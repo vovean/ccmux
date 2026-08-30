@@ -21,6 +21,14 @@ public final class Engine: ObservableObject {
     /// Non-nil only while the connect sheet is deciding.
     @Published public internal(set) var delegationPlan: Delegation.Plan?
     @Published public internal(set) var serverBusy = false
+    /// Sessions running on other Macs. In memory only — they are another machine's truth,
+    /// and a copy of it restored from disk at launch would be a list of sessions that may
+    /// well have ended hours ago.
+    @Published public internal(set) var foreignSessions: [ForeignSession] = []
+    /// Nil until the server has been asked. False for a ccmuxd built before session
+    /// sharing existed, whose routes for it answer 404 — a fact about the server rather
+    /// than a failure worth showing as one.
+    @Published public internal(set) var serverSupportsSessions: Bool?
 
     public struct Banner: Equatable {
         public enum Level { case info, warning }
@@ -56,6 +64,28 @@ public final class Engine: ObservableObject {
     /// invalidated, so handing out a new client on every access leaked a session and a
     /// pinning delegate each time. Rebuilt only when the connection settings change.
     var serverClientCache: (connection: ServerConnection, client: ServerClient)?
+    /// This Mac's name on the server. Loaded once: minting a new id per launch would leave
+    /// the server holding a ghost machine for every restart.
+    ///
+    /// Published because Settings shows and edits it — a plain property leaves the field
+    /// and its Save button showing the name from before the rename.
+    @Published public internal(set) var machineIdentity = MachineIdentityStore.load()
+    /// The last answer from the server, and when it arrived. Kept raw so staleness can go
+    /// on advancing while the server is unreachable — a frozen age would show a sleeping
+    /// laptop's sessions as current indefinitely.
+    ///
+    /// Published in its own right rather than left to `foreignSessions`: the Settings list
+    /// of machines derives from this alone, and a machine quiet for longer than `hideAfter`
+    /// contributes no sessions at all — so nothing would ever republish, and Forget would
+    /// appear to do nothing on precisely the machine it exists for.
+    @Published var foreignSnapshots: (machines: [MachineSnapshot], fetchedAt: Date)?
+    var apiKeyFingerprints = APIKeyFingerprintCache()
+    /// One session report in flight at a time.
+    var syncingSessions = false
+    /// Whether the last session sync failed, so an outage is logged once rather than on
+    /// every tick. ccmux.log is where a credential going wrong is diagnosed; three lines a
+    /// minute of "could not reach the server" would bury exactly that.
+    var sessionSyncFailing = false
     private var controlHandler: ControlHandler?
     private var controlServer: ControlServer?
     private var timers: [Timer] = []
@@ -135,6 +165,7 @@ public final class Engine: ObservableObject {
             // Refresh button a silent no-op for the first minute after launch.
             await pollDueAccounts()
             await pollDelegatedUsage()
+            await syncSessions()
         }
     }
 
@@ -195,6 +226,7 @@ public final class Engine: ObservableObject {
                 await self?.pollDueAccounts()
                 await self?.pollDelegatedUsage()
                 await self?.keepWindowsRolling()
+                await self?.syncSessions()
             }
         })
         timers.append(Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
@@ -930,6 +962,8 @@ public final class Engine: ObservableObject {
             account.health = .ok
             account.priority = (store.accounts.all().map(\.priority).max() ?? 0) + 1
             try APIKeyStore.write(trimmed, for: id)
+            // The account set has not moved, so nothing else would prompt a re-read.
+            apiKeyFingerprints.invalidate()
             store.accounts.upsert(account)
             banner = Banner(level: .info,
                             text: "Added \(account.displayName) · \(models.count) models "
@@ -1083,6 +1117,20 @@ public final class Engine: ObservableObject {
 
     public func sessionCount(forAccount accountID: String) -> Int {
         sessions.reduce(0) { $0 + ($1.accountID == accountID ? 1 : 0) }
+    }
+
+    /// Sessions on this account running on other Macs. Counted apart from
+    /// `sessionCount(forAccount:)`, which every caller reads as "running here".
+    public func foreignSessionCount(forAccount accountID: String) -> Int {
+        foreignSessions.reduce(0) { $0 + ($1.accountID == accountID ? 1 : 0) }
+    }
+
+    public func foreignMachineNames(forAccount accountID: String) -> [String] {
+        var seen: [String] = []
+        for session in foreignSessions where session.accountID == accountID {
+            if !seen.contains(session.machineLabel) { seen.append(session.machineLabel) }
+        }
+        return seen
     }
 
     // MARK: - Sessions

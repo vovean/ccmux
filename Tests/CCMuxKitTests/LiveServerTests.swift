@@ -88,6 +88,44 @@ struct LiveServerTests {
     }
 
     /// And a genuine HTTP error still arrives as a readable message rather than raw JSON.
+    /// The full exchange: one request reports this machine's list and returns everyone's.
+    @Test func reportingSessionsRoundTrips() async throws {
+        let client = try Self.client()
+        let machineID = "test-\(UUID().uuidString)"
+        let session = MachineSession(id: "s1", accountID: "acct-1",
+                                     accountLabel: "Work", name: "api",
+                                     directory: "/tmp/api", policy: "opus",
+                                     status: "busy", startedSecondsAgo: 42)
+        let response = try await client.reportSessions(
+            machineID: machineID, MachineReport(label: "test-machine", sessions: [session]))
+
+        #expect(response.apiVersion == ServerAPI.version)
+        let mine = try #require(response.machines.first { $0.machineID == machineID })
+        #expect(mine.label == "test-machine")
+        #expect(mine.sessions.map(\.id) == ["s1"])
+        #expect(mine.ageSeconds >= 0)
+
+        // A GET sees the same thing without reporting anything.
+        let fetched = try await client.sessions()
+        #expect(fetched.machines.contains { $0.machineID == machineID })
+
+        // A report is a whole snapshot: what is absent from the next one is gone.
+        let emptied = try await client.reportSessions(
+            machineID: machineID, MachineReport(label: "test-machine", sessions: []))
+        let after = try #require(emptied.machines.first { $0.machineID == machineID })
+        #expect(after.sessions.isEmpty)
+
+        try await client.forgetMachine(machineID)
+        let gone = try await client.sessions()
+        #expect(!gone.machines.contains { $0.machineID == machineID })
+    }
+
+    /// Forgetting something the server does not have is not an error — on an older ccmuxd
+    /// the route does not exist at all, and either way nothing is left behind.
+    @Test func forgettingAnUnknownMachineIsQuiet() async throws {
+        try await Self.client().forgetMachine("never-existed-\(UUID().uuidString)")
+    }
+
     @Test func serverErrorsAreReadable() async throws {
         do {
             _ = try await Self.client().usage(for: "definitely-not-an-account")

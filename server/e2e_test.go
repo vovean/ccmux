@@ -33,8 +33,13 @@ func jsonResponse(status int, body string) *http.Response {
 // Mac does — SHA-256 over the DER, which is also what `openssl x509 -fingerprint -sha256`
 // prints and what install-ccmuxd.sh shows the user.
 func startTestServer(t *testing.T, registry *Registry) (*httptest.Server, string, *http.Client) {
+	return startTestServerWith(t, registry, NewMachineStore())
+}
+
+func startTestServerWith(t *testing.T, registry *Registry,
+	machines *MachineStore) (*httptest.Server, string, *http.Client) {
 	t.Helper()
-	server := httptest.NewTLSServer(NewMux(registry, testCredential()))
+	server := httptest.NewTLSServer(NewMux(registry, machines, testCredential()))
 	t.Cleanup(server.Close)
 
 	leaf := server.Certificate()

@@ -17,9 +17,18 @@ import (
 
 const (
 	apiPrefix = "/v1"
-	// Bumped when a change would make an older client misread a response.
+	// Bumped when a change would make an older client misread a response. Adding a route
+	// or an optional field does not qualify: the client refuses to talk to a server whose
+	// version differs from its own, so a bump strands every Mac that has not upgraded yet.
 	apiVersion = 1
 )
+
+// What this build can do beyond the original surface. A client that finds its feature
+// missing — an older ccmuxd, which omits the field entirely — turns the feature off and
+// says why, instead of showing errors from routes that answer 404.
+const featureSessions = "sessions"
+
+var serverFeatures = []string{featureSessions}
 
 // Time marshals as RFC 3339 with second precision.
 //
@@ -174,9 +183,62 @@ type AccountListResponse struct {
 }
 
 type HealthResponse struct {
-	APIVersion    int     `json:"apiVersion"`
-	Accounts      int     `json:"accounts"`
-	UptimeSeconds float64 `json:"uptimeSeconds"`
+	APIVersion    int      `json:"apiVersion"`
+	Accounts      int      `json:"accounts"`
+	UptimeSeconds float64  `json:"uptimeSeconds"`
+	Features      []string `json:"features"`
+	// Machines that have reported sessions recently. Only ever a diagnostic — the count
+	// says whether reporting is reaching the server at all.
+	Machines int `json:"machines"`
+}
+
+// MachineSession is one session as the Mac running it describes it.
+//
+// No pid and no port: they are meaningless on another host, and leaving them out is what
+// keeps a foreign card from ever growing a control that would act on the wrong process.
+//
+// Every time here is an age in seconds rather than a timestamp. Three clocks are involved
+// — two laptops and a VPS — so the client adds the reporting machine's own staleness to
+// these to get a real age, and no absolute time ever crosses a machine boundary.
+type MachineSession struct {
+	ID        string `json:"id"`
+	AccountID string `json:"accountID"`
+	// SHA-256 of the API key when the account is one. Such an account's id is generated
+	// by whichever Mac added it, so this is the only thing that matches one across two.
+	AccountFingerprint *string `json:"accountFingerprint,omitempty"`
+	// Carried so a session for an account this Mac has never seen still has a name to be
+	// grouped under, rather than eight characters of UUID.
+	AccountLabel string  `json:"accountLabel"`
+	Name         string  `json:"name"`
+	Directory    *string `json:"directory,omitempty"`
+	Policy       string  `json:"policy"`
+	// "busy", "waiting", "idle", or empty when Claude Code has not said.
+	Status            string   `json:"status"`
+	StartedSecondsAgo float64  `json:"startedSecondsAgo"`
+	UpdatedSecondsAgo *float64 `json:"updatedSecondsAgo,omitempty"`
+	SpendUSD          float64  `json:"spendUSD"`
+}
+
+// MachineReport is one Mac's entire session list. The machine id comes from the path, so
+// there is exactly one authority on which machine a report belongs to.
+type MachineReport struct {
+	Label    string           `json:"label"`
+	Sessions []MachineSession `json:"sessions"`
+}
+
+type MachineSnapshot struct {
+	MachineID string           `json:"machineID"`
+	Label     string           `json:"label"`
+	Sessions  []MachineSession `json:"sessions"`
+	// Since this machine last reported. Added to each session's own age by the client,
+	// and on its own it is what decides whether the machine is shown as current, shown
+	// as stale, or not shown at all.
+	AgeSeconds float64 `json:"ageSeconds"`
+}
+
+type SessionsResponse struct {
+	APIVersion int               `json:"apiVersion"`
+	Machines   []MachineSnapshot `json:"machines"`
 }
 
 // ServerErrorResponse is the envelope the client parses. Nested, because that is the

@@ -24,6 +24,7 @@ func TestWireFixturesMatchWhatWeEmit(t *testing.T) {
 	fixtures := map[string]any{
 		"health.json": HealthResponse{
 			APIVersion: apiVersion, Accounts: 2, UptimeSeconds: 1234.5,
+			Features: serverFeatures, Machines: 2,
 		},
 		"accounts.json": AccountListResponse{
 			APIVersion: apiVersion,
@@ -68,6 +69,41 @@ func TestWireFixturesMatchWhatWeEmit(t *testing.T) {
 		},
 		"error.json": ServerErrorResponse{
 			Error: ServerErrorDetail{Message: "no usable credential for acct-1"},
+		},
+		// Invented machine names and paths. A real hostname or a real working directory in
+		// a tracked file is the kind of thing the pre-push scan exists to catch.
+		"sessions.json": SessionsResponse{
+			APIVersion: apiVersion,
+			Machines: []MachineSnapshot{
+				// Ordered the way MachineStore.Snapshots emits them — by lower-cased
+				// label — so the fixture pins the real thing rather than an order the
+				// server never produces.
+				{
+					MachineID: "8f0f1b64-0000-4000-8000-000000000002",
+					Label:     "laptop", AgeSeconds: 900, Sessions: []MachineSession{},
+				},
+				{
+					MachineID:  "8f0f1b64-0000-4000-8000-000000000001",
+					Label:      "studio",
+					AgeSeconds: 6.5,
+					Sessions: []MachineSession{
+						{
+							ID: "sess-1", AccountID: "11111111-2222-3333-4444-555555555555",
+							AccountLabel: "Work", Name: "api-gateway",
+							Directory: ptr("/Users/someone/dev/api"), Policy: "opus",
+							Status: "busy", StartedSecondsAgo: 3600,
+							UpdatedSecondsAgo: ptr(12.0),
+						},
+						{
+							ID: "sess-2", AccountID: "local-uuid",
+							AccountFingerprint: ptr(APIKeyFingerprint("sk-ant-fixture")),
+							AccountLabel:       "Billing", Name: "batch",
+							Policy: "any", Status: "waiting", StartedSecondsAgo: 90,
+							SpendUSD: 1.25,
+						},
+					},
+				},
+			},
 		},
 	}
 

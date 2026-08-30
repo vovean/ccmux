@@ -14,6 +14,7 @@ struct ServerSection: View {
     @State private var pendingFingerprint: String?
     @State private var failure: String?
     @State private var pushSelection: Set<String> = []
+    @State private var machineLabel = ""
 
     var body: some View {
         Card {
@@ -126,12 +127,94 @@ struct ServerSection: View {
             planView(plan)
         }
 
+        sessionSharing
+
         HStack(spacing: 8) {
             Button("Check for changes") { Task { await engine.refreshDelegationPlan() } }
                 .disabled(engine.serverBusy)
             Button("Disconnect") { engine.disconnectServer() }
             Spacer()
         }
+    }
+
+    // MARK: - Sessions across machines
+
+    @ViewBuilder
+    private var sessionSharing: some View {
+        Divider()
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Sessions on other Macs").font(.caption.weight(.semibold))
+
+            if engine.serverSupportsSessions == false {
+                Text("This ccmuxd predates session sharing — upgrade the server and it "
+                     + "starts working on its own.")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Toggle("Show sessions from other Macs", isOn: Binding(
+                get: { engine.settings.showForeignSessions },
+                set: { engine.setShowForeignSessions($0) }))
+                .toggleStyle(.checkbox)
+                .font(.caption)
+            // Display only, and said so plainly: turning it off here and having this Mac
+            // vanish from every other window would read as the feature being broken.
+            Text("This Mac keeps reporting its own sessions either way, so the others "
+                 + "still see it.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 8) {
+                Text("This Mac is called").font(.caption).foregroundStyle(.secondary)
+                TextField("name", text: $machineLabel)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 180)
+                    // Return goes through the same predicate as the button. Without it,
+                    // Return on an empty field renamed the Mac to its computer name while
+                    // the field still read empty.
+                    .onSubmit { saveMachineLabel() }
+                Button("Save") { saveMachineLabel() }
+                    .controlSize(.small)
+                    .disabled(!canSaveMachineLabel)
+                Spacer()
+            }
+
+            ForEach(engine.foreignMachines, id: \.id) { machine in
+                HStack(spacing: 8) {
+                    Image(systemName: "desktopcomputer")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                    Text(machine.label).font(.caption)
+                    let current = machine.ageSeconds <= ForeignSessions.currentWithin
+                    Text(current ? "now"
+                         : "last seen \(Format.duration(machine.ageSeconds)) ago")
+                        .font(.caption2)
+                        .foregroundStyle(current ? Color.secondary : Color.orange)
+                    Spacer()
+                    // For a Mac that is gone for good; one still running reports itself
+                    // back on its next tick.
+                    Button("Forget") { Task { await engine.forgetMachine(machine.id) } }
+                        .controlSize(.small)
+                }
+            }
+        }
+        .onAppear { machineLabel = engine.machineIdentity.label }
+    }
+
+    private var canSaveMachineLabel: Bool {
+        let trimmed = machineLabel.trimmingCharacters(in: .whitespaces)
+        return !trimmed.isEmpty && trimmed != engine.machineIdentity.label
+    }
+
+    /// Echoes back what was actually stored — the label is trimmed on the way in, so a
+    /// name typed with stray spaces would otherwise leave Save enabled for a rename that
+    /// had already happened.
+    private func saveMachineLabel() {
+        guard canSaveMachineLabel else { return }
+        engine.setMachineLabel(machineLabel)
+        machineLabel = engine.machineIdentity.label
     }
 
     @ViewBuilder

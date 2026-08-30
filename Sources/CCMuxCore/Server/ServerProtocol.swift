@@ -10,7 +10,15 @@ public enum ServerAPI {
     public static let prefix = "/v1"
     /// Bumped when a change would make an older client misread a response. The client
     /// checks it on connect and says so plainly rather than failing in pieces later.
+    ///
+    /// Adding a route or an optional field does not qualify. The check is an equality
+    /// test, so a bump strands every Mac that has not upgraded yet — new capability is
+    /// advertised through `HealthResponse.features` instead.
     public static let version = 1
+
+    /// Cross-machine session visibility. Absent from a ccmuxd built before it existed,
+    /// whose new routes answer 404.
+    public static let sessionsFeature = "sessions"
 }
 
 /// An account as the server describes it. Deliberately not `Account`: the client's record
@@ -205,12 +213,113 @@ public struct HealthResponse: Codable, Equatable, Sendable {
     public var apiVersion: Int
     public var accounts: Int
     public var uptimeSeconds: TimeInterval
+    /// Optional because a server built before features existed omits the key entirely,
+    /// and a non-optional array would fail the whole decode — turning an old-but-working
+    /// server into an unreachable one.
+    public var features: [String]?
+    public var machines: Int?
 
     public init(apiVersion: Int = ServerAPI.version, accounts: Int,
-                uptimeSeconds: TimeInterval) {
+                uptimeSeconds: TimeInterval, features: [String]? = nil,
+                machines: Int? = nil) {
         self.apiVersion = apiVersion
         self.accounts = accounts
         self.uptimeSeconds = uptimeSeconds
+        self.features = features
+        self.machines = machines
+    }
+
+    public func supports(_ feature: String) -> Bool {
+        features?.contains(feature) ?? false
+    }
+}
+
+// MARK: - Sessions across machines
+
+/// One session as the Mac running it describes it.
+///
+/// No pid and no port: they are meaningless on another host, and leaving them out is what
+/// keeps a foreign card from ever growing a control that would act on the wrong process.
+///
+/// Every time here is an age in seconds rather than a timestamp. Three clocks are involved
+/// — two laptops and a VPS — so the reader adds the reporting machine's own staleness to
+/// these, and no absolute time ever crosses a machine boundary.
+public struct MachineSession: Codable, Equatable, Sendable {
+    public var id: String
+    public var accountID: String
+    /// SHA-256 of the API key when the account is one. Such an account's `id` is generated
+    /// by whichever Mac added it, so this is the only thing that matches one across two.
+    public var accountFingerprint: String?
+    /// Carried so a session for an account this Mac has never seen still has a name to be
+    /// grouped under, rather than eight characters of UUID.
+    public var accountLabel: String
+    public var name: String
+    public var directory: String?
+    public var policy: String
+    /// "busy", "waiting", "idle", or empty when Claude Code has not said.
+    public var status: String
+    public var startedSecondsAgo: TimeInterval
+    public var updatedSecondsAgo: TimeInterval?
+    public var spendUSD: Double
+
+    public init(id: String, accountID: String, accountFingerprint: String? = nil,
+                accountLabel: String, name: String, directory: String? = nil,
+                policy: String, status: String, startedSecondsAgo: TimeInterval,
+                updatedSecondsAgo: TimeInterval? = nil, spendUSD: Double = 0) {
+        self.id = id
+        self.accountID = accountID
+        self.accountFingerprint = accountFingerprint
+        self.accountLabel = accountLabel
+        self.name = name
+        self.directory = directory
+        self.policy = policy
+        self.status = status
+        self.startedSecondsAgo = startedSecondsAgo
+        self.updatedSecondsAgo = updatedSecondsAgo
+        self.spendUSD = spendUSD
+    }
+}
+
+/// One Mac's entire session list. A whole snapshot, never a delta: a session that ended is
+/// simply absent from the next one, which makes a clean exit, a `kill -9` and a closed lid
+/// indistinguishable to the server.
+public struct MachineReport: Codable, Equatable, Sendable {
+    public var label: String
+    public var sessions: [MachineSession]
+
+    public init(label: String, sessions: [MachineSession]) {
+        self.label = label
+        self.sessions = sessions
+    }
+}
+
+public struct MachineSnapshot: Codable, Equatable, Sendable, Identifiable {
+    public var machineID: String
+    public var label: String
+    public var sessions: [MachineSession]
+    /// Since this machine last reported. Added to each session's own age to get a real
+    /// one, and on its own it decides whether the machine reads as current, as stale, or
+    /// is not shown at all.
+    public var ageSeconds: TimeInterval
+
+    public var id: String { machineID }
+
+    public init(machineID: String, label: String, sessions: [MachineSession],
+                ageSeconds: TimeInterval) {
+        self.machineID = machineID
+        self.label = label
+        self.sessions = sessions
+        self.ageSeconds = ageSeconds
+    }
+}
+
+public struct SessionsResponse: Codable, Equatable, Sendable {
+    public var apiVersion: Int
+    public var machines: [MachineSnapshot]
+
+    public init(apiVersion: Int = ServerAPI.version, machines: [MachineSnapshot]) {
+        self.apiVersion = apiVersion
+        self.machines = machines
     }
 }
 

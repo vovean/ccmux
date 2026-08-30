@@ -8,6 +8,7 @@ public enum ServerClientError: Error, LocalizedError, Equatable {
     case transport(String)
     case decoding(String)
     case incompatible(Int)
+    case unsupported
 
     public var errorDescription: String? {
         switch self {
@@ -25,6 +26,8 @@ public enum ServerClientError: Error, LocalizedError, Equatable {
         case .incompatible(let version):
             return "The server speaks API v\(version) and this ccmux speaks "
                 + "v\(ServerAPI.version). Upgrade whichever is older."
+        case .unsupported:
+            return "This ccmuxd is too old for that — upgrade the server."
         }
     }
 }
@@ -156,6 +159,60 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
         try await post(["accounts", "adopt"], body)
     }
 
+    // MARK: - Sessions across machines
+
+    /// Reports this Mac's whole session list and gets everyone's back — one round trip
+    /// for both halves. The answer includes this machine; the caller drops its own id.
+    public func reportSessions(machineID: String,
+                               _ report: MachineReport) async throws -> SessionsResponse {
+        try checkVersion(
+            await unsupportedIfMissing {
+                try await post(["machines", machineID, "sessions"], report)
+            })
+    }
+
+    public func sessions() async throws -> SessionsResponse {
+        try checkVersion(await unsupportedIfMissing { try await get(["sessions"]) })
+    }
+
+    /// Drops a machine's sessions. A 404 is success: either the server never had it, or
+    /// this server predates the route — nothing is left behind either way.
+    public func forgetMachine(_ machineID: String) async throws {
+        do {
+            try await delete(["machines", machineID])
+        } catch {
+            guard Self.isMissingRoute(error) else { throw error }
+        }
+    }
+
+    /// Whether an error means the route is simply not on this server.
+    ///
+    /// A ccmuxd built before session sharing answers 404 for every one of those routes,
+    /// and 405 for a path it knows under a different method. Both are facts about the
+    /// server rather than failures worth showing the user as one.
+    static func isMissingRoute(_ error: Error) -> Bool {
+        switch error {
+        case ServerClientError.http(404, _), ServerClientError.http(405, _): return true
+        default: return false
+        }
+    }
+
+    private func unsupportedIfMissing(
+        _ body: () async throws -> SessionsResponse) async throws -> SessionsResponse {
+        do {
+            return try await body()
+        } catch {
+            throw Self.isMissingRoute(error) ? ServerClientError.unsupported : error
+        }
+    }
+
+    private func checkVersion(_ response: SessionsResponse) throws -> SessionsResponse {
+        guard response.apiVersion == ServerAPI.version else {
+            throw ServerClientError.incompatible(response.apiVersion)
+        }
+        return response
+    }
+
     // MARK: - Transport
 
     /// Built one component at a time and left to Foundation to encode. Escaping them by
@@ -178,6 +235,10 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
                                body: try JSONStore.encoder.encode(body)))
     }
 
+    private func delete(_ path: [String]) async throws {
+        try await sendWithoutResponse(request(path, method: "DELETE", body: nil))
+    }
+
     private func request(_ path: [String], method: String, body: Data?) -> URLRequest {
         var request = URLRequest(url: url(path))
         request.httpMethod = method
@@ -191,6 +252,19 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
     }
 
     private func send<Response: Decodable>(_ request: URLRequest) async throws -> Response {
+        let data = try await perform(request)
+        do {
+            return try JSONStore.decoder.decode(Response.self, from: data)
+        } catch {
+            throw ServerClientError.decoding("\(error)")
+        }
+    }
+
+    private func sendWithoutResponse(_ request: URLRequest) async throws {
+        _ = try await perform(request)
+    }
+
+    private func perform(_ request: URLRequest) async throws -> Data {
         let data: Data, response: URLResponse
         do {
             (data, response) = try await session.data(for: request)
@@ -211,11 +285,7 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
                 ?? String(decoding: data.prefix(300), as: UTF8.self)
             throw ServerClientError.http(status, message)
         }
-        do {
-            return try JSONStore.decoder.decode(Response.self, from: data)
-        } catch {
-            throw ServerClientError.decoding("\(error)")
-        }
+        return data
     }
 }
 

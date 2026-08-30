@@ -144,18 +144,61 @@ POST   /login/start                → loginID, authorizeURL, state
 POST   /login/finish               → the account
 POST   /accounts/adopt             credentialJSON or apiKey
 DELETE /accounts/{id}
+POST   /machines/{id}/sessions     this Mac's whole session list → every machine's
+GET    /sessions                   every machine's, without reporting
+DELETE /machines/{id}              forget a Mac that is gone for good
 ```
 
 `expiresIn` is **seconds, not a timestamp**. A laptop and a server do not agree on the wall
-clock, and a client trusting a remote absolute time would treat dead tokens as live.
+clock, and a client trusting a remote absolute time would treat dead tokens as live. The
+session routes carry ages for the same reason and have no dates on them at all.
+
+New routes do **not** bump `apiVersion`. The client's check is an equality test, so a bump
+strands every Mac still on the old build. Capability is advertised through
+`health.features` instead — a field an older server omits entirely, and an older client
+ignores.
+
+## Sessions across machines
+
+Each Mac reports what it is running every 20 seconds and gets back what every other Mac
+is running, in one request. Foreign sessions appear on the Sessions tab under their own
+account, below a divider, and as a `+N elsewhere` pill on the Accounts screen. They are
+read-only: there is no pid on this host to signal and no port to reach, so no card offers
+a control that would act on the wrong thing.
+
+Two properties carry the design:
+
+- **A report is a whole snapshot, never a delta.** A session that ended is simply absent
+  from the next one, which makes a clean exit, a `kill -9` and a closed lid
+  indistinguishable — nothing is ever reaped per session.
+- **Staleness is per machine.** A session is dimmed once its Mac has been quiet for 90
+  seconds and hidden after 15 minutes; the server forgets a machine entirely after 24
+  hours. A laptop that sleeps mid-session fades rather than lying.
+
+None of it is persisted, on either side. The server holds it in memory — every machine
+re-reports within a tick, so a restart costs a few seconds of blank screens and buys no
+file to corrupt and nothing to encrypt at rest — and the client keeps no copy at all,
+because a list restored from disk at launch is a list of sessions that may have ended
+hours ago. Bounded at 32 machines and 128 sessions each, since the daemon runs under
+`MemoryMax=192M` beside the VPN processes.
+
+Session names and working directories are the most personally revealing thing ccmuxd
+holds. Settings → Account server has a switch for showing other Macs' sessions; it governs
+display only, because a Mac that stopped reporting would silently vanish from every other
+window and read as broken. This Mac's name there defaults to its computer name and is
+editable.
+
+A foreign session that is `waiting` shows on its group header and nowhere else: it does
+not light the menu-bar badge and never raises a notification, because it cannot be
+answered from here.
 
 ## Usage polling
 
 The server polls, clients read. The usage endpoint budgets roughly 28 requests per hour per
 token, and two Macs polling the same account independently spend it twice for the same
 numbers. Polling cadence comes from `PollPolicy`, the same code the app uses; the server has
-no session knowledge, so it treats an account as in use if a client asked for its token in
-the last ten minutes.
+no knowledge of what the sessions it hears about are *doing*, so it treats an account as in
+use if a client asked for its token in the last ten minutes.
 
 ## What this costs you
 
@@ -172,8 +215,8 @@ Worth knowing before you rely on it.
    the server and inference from laptops, on the same account. On company accounts under a
    CISO's eye, that is the limitation to weigh hardest.
 3. **Two Macs still rank independently.** Both will pick the account with the most headroom
-   and drain it together. The server could publish an advisory "sessions elsewhere" count;
-   it does not yet.
+   and drain it together. Sessions elsewhere are now *visible*, but nothing acts on them:
+   ranking is still per machine, and usage snapshots are not shared.
 4. **One shared credential.** Basic auth means revoking one Mac rotates the password for all
    of them.
 5. **Back up `data/`.** It holds every refresh lineage, sealed with `master.key` sitting

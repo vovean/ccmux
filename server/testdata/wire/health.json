@@ -1,5 +1,9 @@
 {
   "apiVersion": 1,
   "accounts": 2,
-  "uptimeSeconds": 1234.5
+  "uptimeSeconds": 1234.5,
+  "features": [
+    "sessions"
+  ],
+  "machines": 2
 }

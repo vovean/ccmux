@@ -1,0 +1,41 @@
+{
+  "apiVersion": 1,
+  "machines": [
+    {
+      "machineID": "8f0f1b64-0000-4000-8000-000000000002",
+      "label": "laptop",
+      "sessions": [],
+      "ageSeconds": 900
+    },
+    {
+      "machineID": "8f0f1b64-0000-4000-8000-000000000001",
+      "label": "studio",
+      "sessions": [
+        {
+          "id": "sess-1",
+          "accountID": "11111111-2222-3333-4444-555555555555",
+          "accountLabel": "Work",
+          "name": "api-gateway",
+          "directory": "/Users/someone/dev/api",
+          "policy": "opus",
+          "status": "busy",
+          "startedSecondsAgo": 3600,
+          "updatedSecondsAgo": 12,
+          "spendUSD": 0
+        },
+        {
+          "id": "sess-2",
+          "accountID": "local-uuid",
+          "accountFingerprint": "6de5c6335d27378ef3ee3000e7fe75e5907c525ab60ac1ed56dca4729561f2b3",
+          "accountLabel": "Billing",
+          "name": "batch",
+          "policy": "any",
+          "status": "waiting",
+          "startedSecondsAgo": 90,
+          "spendUSD": 1.25
+        }
+      ],
+      "ageSeconds": 6.5
+    }
+  ]
+}

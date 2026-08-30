@@ -124,7 +124,11 @@ weekly-per-model when the plan has one) with the reset countdown.
 **Sessions** — every live session, joined with what Claude Code publishes in
 `~/.claude/sessions/<pid>.json`: its own session name, busy/idle/waiting, cwd. Change a
 session's account from the picker and it takes effect on that session's next request.
-Sessions started as plain `claude` are listed too, marked as not managed.
+Sessions started as plain `claude` are listed too, marked as not managed. With an account
+server connected, sessions running on your other Macs appear under the same account below
+an "On other Macs" divider, and as a `+N elsewhere` pill on the Accounts screen — dimmed
+once that Mac has been quiet for 90 seconds, gone after 15 minutes, and read-only, since
+there is no process here to act on. Settings has a switch for showing them.
 
 Each session has a button that brings its iTerm tab to the front. Nothing is stored for
 it: the handle is read from the process when you press it — the UUID out of its
@@ -279,7 +283,8 @@ dependency, and token refreshes start coming from its IP rather than your laptop
 ## Where things live
 
     ~/Library/Application Support/ccmux/    accounts.json, usage.json, sessions.json,
-                                            settings.json, ccmux.log, control.sock, ns/
+                                            settings.json, machine.json, ccmux.log,
+                                            control.sock, ns/
     Keychain "ccmux-credentials"             one item per account, keyed by account uuid
     Keychain "ccmux-server"                  the ccmuxd basic-auth password
 

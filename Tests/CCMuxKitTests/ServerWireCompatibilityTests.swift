@@ -125,6 +125,52 @@ struct ServerWireCompatibilityTests {
         #expect(scoped.headroom == 38.75)
     }
 
+    /// New capability is advertised, not versioned: the version check is an equality
+    /// test, so bumping it to announce a feature would strand every Mac still on the old
+    /// build. A server that predates features omits the key entirely.
+    @Test func healthAdvertisesTheSessionFeature() throws {
+        let health = try Self.decode(HealthResponse.self, "health.json")
+        #expect(health.supports(ServerAPI.sessionsFeature))
+        #expect(health.machines == 2)
+
+        let older = Data(#"{"apiVersion":1,"accounts":0,"uptimeSeconds":1}"#.utf8)
+        let before = try JSONStore.decoder.decode(HealthResponse.self, from: older)
+        #expect(before.supports(ServerAPI.sessionsFeature) == false)
+        #expect(before.apiVersion == ServerAPI.version)
+    }
+
+    /// The session view carries no dates at all — every time is an age in seconds, so the
+    /// fractional-second trap below cannot reach it.
+    @Test func theSessionViewDecodes() throws {
+        let response = try Self.decode(SessionsResponse.self, "sessions.json")
+        #expect(response.apiVersion == ServerAPI.version)
+        #expect(response.machines.count == 2)
+
+        // Lower-cased label order, which is what MachineStore.Snapshots emits.
+        #expect(response.machines.map(\.label) == ["laptop", "studio"])
+
+        let studio = response.machines[1]
+        #expect(studio.ageSeconds == 6.5)
+        #expect(studio.sessions.count == 2)
+
+        let first = studio.sessions[0]
+        #expect(first.name == "api-gateway")
+        #expect(first.accountLabel == "Work")
+        #expect(first.directory == "/Users/someone/dev/api")
+        #expect(first.status == "busy")
+        #expect(first.startedSecondsAgo == 3600)
+        #expect(first.updatedSecondsAgo == 12)
+
+        // An API-key account's id differs per machine; the fingerprint is what matches it.
+        let keyed = studio.sessions[1]
+        #expect(keyed.accountFingerprint == "sk-ant-fixture".apiKeyFingerprint)
+        #expect(keyed.spendUSD == 1.25)
+        #expect(keyed.updatedSecondsAgo == nil)
+
+        // Go marshals a nil slice as null, which this non-optional array throws on.
+        #expect(response.machines[0].sessions.isEmpty)
+    }
+
     @Test func theLoginStartResponseDecodes() throws {
         let started = try Self.decode(LoginStartResponse.self, "login-start.json")
         #expect(started.loginID == "a-login-id")

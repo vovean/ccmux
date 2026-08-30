@@ -13,7 +13,8 @@ struct SessionsPage: View {
         SessionGrouping.groups(accounts: engine.accounts,
                                sessions: engine.sessions,
                                unmanaged: engine.unmanagedSessions,
-                               live: engine.liveByPID)
+                               live: engine.liveByPID,
+                               foreign: engine.foreignSessions)
     }
 
     var body: some View {
@@ -22,7 +23,10 @@ struct SessionsPage: View {
                 VStack(alignment: .leading, spacing: 14) {
                     if engine.sessions.isEmpty {
                         EmptyHint(title: "No managed sessions",
-                                  detail: "Start one with cc-opus or cc-fable in a terminal.")
+                                  detail: engine.foreignSessions.isEmpty
+                                      ? "Start one with cc-opus or cc-fable in a terminal."
+                                      : "Nothing is running on this Mac. What is below is "
+                                          + "running elsewhere.")
                     } else {
                         reassignBar
                     }
@@ -70,6 +74,10 @@ struct SessionsPage: View {
                         .foregroundStyle(.tertiary)
                 } else if expiredAccounts.contains(group.id) {
                     reloginNotice(group.id)
+                } else if group.isForeignOnly && account(group.id) == nil {
+                    Text("This account is not on this Mac.")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
                 } else {
                     // Once per group: every session in it draws on the same quota.
                     ForEach(groupBars(group.id)) { window in
@@ -83,8 +91,82 @@ struct SessionsPage: View {
                 ForEach(group.unmanaged) { info in
                     unmanagedCard(info)
                 }
+                if !group.foreign.isEmpty {
+                    foreignDivider(group)
+                    ForEach(group.foreign) { session in
+                        foreignCard(session)
+                    }
+                }
             }
         }
+    }
+
+    /// The line between what is running here and what is not. Foreign sessions cannot be
+    /// switched, ended or revealed from this Mac, so the separation is the point.
+    private func foreignDivider(_ group: SessionGroup) -> some View {
+        HStack(spacing: 8) {
+            Text("On other Macs")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.tertiary)
+            Rectangle()
+                .fill(Color.secondary.opacity(0.18))
+                .frame(height: 1)
+            Text("\(group.foreignCount)")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.top, 2)
+    }
+
+    /// Read-only by construction: no account picker, no auto-switch, no end, no reveal.
+    /// The process is on another host — every one of those controls would act on the
+    /// wrong thing or on nothing.
+    private func foreignCard(_ session: ForeignSession) -> some View {
+        Card {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 8) {
+                    Image(systemName: "desktopcomputer")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                    Text(session.machineLabel)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                    Text(session.name).font(.subheadline)
+                    if let status = session.status {
+                        StatusPill(text: status, tint: statusTint(status))
+                    }
+                    StatusPill(text: session.policy, tint: .purple)
+                    Spacer()
+                    Text(activityText(session))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                }
+                if let directory = session.directory {
+                    Text(Format.shortenHome(directory))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if session.isStale {
+                    Text("\(session.machineLabel) last reported "
+                         + "\(Format.duration(session.machineAge)) ago — this may be out "
+                         + "of date.")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
+                if session.spendUSD > 0 {
+                    Text(Format.money(session.spendUSD))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .opacity(session.isStale ? 0.55 : 0.85)
+        }
+    }
+
+    private func activityText(_ session: ForeignSession) -> String {
+        let reference = session.updatedAt ?? session.startedAt
+        let elapsed = Date().timeIntervalSince(reference)
+        return "\(Format.duration(max(0, elapsed))) ago"
     }
 
     /// Re-picks accounts for running sessions the way a fresh `cc-opus` would. The
@@ -142,6 +224,13 @@ struct SessionsPage: View {
         return managed + group.unmanaged.filter { $0.status == "waiting" }.count
     }
 
+    /// Shown apart from the local count, and deliberately not fed into the burger badge or
+    /// a notification: a question on another Mac cannot be answered from this one, and an
+    /// alert you have no way to clear is what makes people turn alerts off.
+    private func foreignWaitingCount(_ group: SessionGroup) -> Int {
+        group.foreign.filter { $0.status == "waiting" && !$0.isStale }.count
+    }
+
     private func account(_ id: String) -> Account? {
         engine.accounts.first { $0.id == id }
     }
@@ -171,8 +260,16 @@ struct SessionsPage: View {
                 if let subtitle = group.subtitle {
                     Text(subtitle).font(.caption).foregroundStyle(.tertiary)
                 }
-                StatusPill(text: "\(group.count)",
-                           tint: group.isUnmanaged ? .secondary : .accentColor)
+                if group.count > 0 {
+                    StatusPill(text: "\(group.count)",
+                               tint: group.isUnmanaged ? .secondary : .accentColor)
+                }
+                if group.foreignCount > 0 {
+                    StatusPill(text: "+\(group.foreignCount)", tint: .secondary)
+                        .help("Running on "
+                              + Set(group.foreign.map(\.machineLabel)).sorted()
+                                  .joined(separator: ", "))
+                }
                 if waitingCount(group) > 0 {
                     HStack(spacing: 3) {
                         Image(systemName: "hand.raised.fill").font(.system(size: 8))
@@ -184,6 +281,16 @@ struct SessionsPage: View {
                     .padding(.vertical, 2)
                     .background(Capsule().fill(Color.orange.opacity(0.22)))
                     .foregroundStyle(.orange)
+                }
+                if foreignWaitingCount(group) > 0 {
+                    Text(foreignWaitingCount(group) == 1
+                         ? "1 waiting elsewhere"
+                         : "\(foreignWaitingCount(group)) waiting elsewhere")
+                        .font(.caption2.weight(.medium))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.orange.opacity(0.10)))
+                        .foregroundStyle(.orange.opacity(0.75))
                 }
                 if let account = account(group.id), account.kind == .apiKey {
                     Text(Format.money(engine.liveSpend(forAccount: account.id)))
