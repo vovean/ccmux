@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"net/http"
@@ -9,53 +10,30 @@ import (
 	"time"
 )
 
-func TestGuessingIsBlockedAfterAHandfulOfFailures(t *testing.T) {
+func TestGuessingIsHeldAfterAHandfulOfFailures(t *testing.T) {
 	throttle := newAuthThrottle()
 	now := time.Now()
 
-	// A mistyped password a few times over must not lock anyone out.
+	// A mistyped password a few times over must not cost anyone anything.
 	for i := 0; i < authFreeAttempts; i++ {
 		if wait := throttle.Failed("203.0.113.9", now); wait != 0 {
-			t.Fatalf("attempt %d already blocked for %s", i+1, wait)
-		}
-		if blocked, _ := throttle.Blocked("203.0.113.9", now); blocked {
-			t.Fatalf("blocked after %d attempts", i+1)
+			t.Fatalf("attempt %d already held for %s", i+1, wait)
 		}
 	}
-
-	wait := throttle.Failed("203.0.113.9", now)
-	if wait <= 0 {
-		t.Fatal("the attempt past the allowance should have started a block")
-	}
-	blocked, remaining := throttle.Blocked("203.0.113.9", now)
-	if !blocked || remaining <= 0 {
-		t.Fatalf("expected a block, got %v %s", blocked, remaining)
+	if wait := throttle.Failed("203.0.113.9", now); wait <= 0 {
+		t.Fatal("the attempt past the allowance should have been held")
 	}
 }
 
-// Otherwise one guesser would lock out every other machine in the fleet.
-func TestOneHostsFailuresDoNotBlockAnother(t *testing.T) {
+// Otherwise one guesser would slow every other machine in the fleet.
+func TestOneHostsFailuresDoNotDelayAnother(t *testing.T) {
 	throttle := newAuthThrottle()
 	now := time.Now()
 	for i := 0; i < authFreeAttempts+3; i++ {
 		throttle.Failed("203.0.113.9", now)
 	}
-	if blocked, _ := throttle.Blocked("198.51.100.4", now); blocked {
-		t.Fatal("an unrelated host was blocked")
-	}
-}
-
-func TestABlockExpires(t *testing.T) {
-	throttle := newAuthThrottle()
-	now := time.Now()
-	for i := 0; i < authFreeAttempts+1; i++ {
-		throttle.Failed("203.0.113.9", now)
-	}
-	if blocked, _ := throttle.Blocked("203.0.113.9", now); !blocked {
-		t.Fatal("expected a block")
-	}
-	if blocked, _ := throttle.Blocked("203.0.113.9", now.Add(authMaxBlock+time.Minute)); blocked {
-		t.Fatal("the block should have expired")
+	if wait := throttle.Failed("198.51.100.4", now); wait != 0 {
+		t.Fatalf("an unrelated host was held for %s", wait)
 	}
 }
 
@@ -69,27 +47,38 @@ func TestSuccessClearsTheRecord(t *testing.T) {
 	throttle.Succeeded("203.0.113.9", now)
 	for i := 0; i < authFreeAttempts; i++ {
 		if wait := throttle.Failed("203.0.113.9", now); wait != 0 {
-			t.Fatalf("the allowance did not reset: blocked after %d", i+1)
+			t.Fatalf("the allowance did not reset: held after %d", i+1)
 		}
 	}
 }
 
-func TestTheBlockGrowsButIsCapped(t *testing.T) {
+func TestAQuietHostIsForgotten(t *testing.T) {
+	throttle := newAuthThrottle()
+	now := time.Now()
+	for i := 0; i < authFreeAttempts+3; i++ {
+		throttle.Failed("203.0.113.9", now)
+	}
+	if wait := throttle.Failed("203.0.113.9", now.Add(authForget+time.Minute)); wait != 0 {
+		t.Fatalf("a host quiet for an hour is still held for %s", wait)
+	}
+}
+
+func TestTheDelayGrowsButIsCapped(t *testing.T) {
 	throttle := newAuthThrottle()
 	now := time.Now()
 	var last time.Duration
 	for i := 0; i < 40; i++ {
 		wait := throttle.Failed("203.0.113.9", now)
-		if wait > authMaxBlock {
-			t.Fatalf("block ran past the cap: %s", wait)
+		if wait > authMaxDelay {
+			t.Fatalf("delay ran past the cap: %s", wait)
 		}
 		if wait > 0 && wait < last {
-			t.Fatalf("block shrank from %s to %s", last, wait)
+			t.Fatalf("delay shrank from %s to %s", last, wait)
 		}
 		last = wait
 	}
 	// Far enough in that the shift would have overflowed a signed duration.
-	if last != authMaxBlock {
+	if last != authMaxDelay {
 		t.Fatalf("expected the cap, got %s", last)
 	}
 }
@@ -109,6 +98,36 @@ func TestTheHostTableIsBounded(t *testing.T) {
 	}
 }
 
+// A client that hangs up mid-hold leaves nobody to answer, and the goroutine must not go
+// on sleeping on its behalf.
+func TestHoldStopsWhenTheCallerGoesAway(t *testing.T) {
+	throttle := newAuthThrottle()
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(20 * time.Millisecond); cancel() }()
+	started := time.Now()
+	if throttle.Hold(ctx, time.Minute) {
+		t.Fatal("Hold claimed it waited out a cancelled request")
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("Hold kept sleeping for %s after the cancel", elapsed)
+	}
+}
+
+// Parallel guessing must not be able to park an unbounded number of goroutines here.
+func TestHeldAnswersAreBounded(t *testing.T) {
+	throttle := newAuthThrottle()
+	for i := 0; i < maxHeldAnswers; i++ {
+		throttle.slots <- struct{}{}
+	}
+	started := time.Now()
+	if !throttle.Hold(context.Background(), time.Minute) {
+		t.Fatal("Hold reported a cancelled caller")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("Hold waited %s with every slot taken", elapsed)
+	}
+}
+
 func TestThrottleIsRaceFree(t *testing.T) {
 	throttle := newAuthThrottle()
 	now := time.Now()
@@ -117,7 +136,7 @@ func TestThrottleIsRaceFree(t *testing.T) {
 		wg.Add(3)
 		host := fmt.Sprintf("203.0.113.%d", i%4)
 		go func() { defer wg.Done(); throttle.Failed(host, now) }()
-		go func() { defer wg.Done(); _, _ = throttle.Blocked(host, now) }()
+		go func() { defer wg.Done(); throttle.Hold(context.Background(), 0) }()
 		go func() { defer wg.Done(); throttle.Succeeded(host, now) }()
 	}
 	wg.Wait()
@@ -134,38 +153,92 @@ func TestTheSourceIsThePeerNotAHeader(t *testing.T) {
 	}
 }
 
-// End to end: the guard must stop comparing once a source is blocked, and say so.
-func TestRepeatedBadPasswordsGetRefusedWithRetryAfter(t *testing.T) {
+// The bug that locked out the fleet. Every Mac reaches this server from one VPN egress,
+// so an address that can be blocked is an address that takes everyone down with it — and
+// a correct password could never clear the block, because it was refused before it was
+// compared.
+func TestACorrectPasswordIsServedDespiteGuessingFromTheSameSource(t *testing.T) {
 	registry, _ := newTestRegistry(t, newStub(nil))
 	server, _, client := startTestServerWith(t, registry, NewMachineStore())
 
 	wrong := "Basic " + base64.StdEncoding.EncodeToString([]byte("ccmux:nope"))
-	var last int
-	for i := 0; i < authFreeAttempts+2; i++ {
+	for i := 0; i < authFreeAttempts; i++ {
 		req, _ := http.NewRequest("GET", server.URL+"/v1/health", nil)
 		req.Header.Set("Authorization", wrong)
 		resp, err := client.Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}
-		last = resp.StatusCode
-		if last == http.StatusTooManyRequests && resp.Header.Get("Retry-After") == "" {
-			t.Fatal("a 429 must say how long to wait")
+		resp.Body.Close()
+	}
+
+	resp := authed(t, client, "GET", server.URL+"/v1/health", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("the right password answered %d from a source that had been guessing",
+			resp.StatusCode)
+	}
+}
+
+// The other half of the same bug: trust-on-first-use probes this server with no
+// credential at all, by design, once per click of Connect. Counting those as guesses
+// spent the whole fleet's allowance before anyone had typed a password.
+func TestAnUnauthenticatedProbeIsNotAGuess(t *testing.T) {
+	registry, _ := newTestRegistry(t, newStub(nil))
+	server, _, client := startTestServerWith(t, registry, NewMachineStore())
+
+	for i := 0; i < authFreeAttempts*3; i++ {
+		req, _ := http.NewRequest("GET", server.URL+"/v1/health", nil)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("probe %d answered %d", i+1, resp.StatusCode)
 		}
 		resp.Body.Close()
 	}
-	if last != http.StatusTooManyRequests {
-		t.Fatalf("expected 429 once the allowance ran out, got %d", last)
-	}
 
-	// The security property, and the reason the block is checked before the compare: a
-	// blocked source is refused even when it finally presents the right password. Letting
-	// a correct one through would mean every guess still gets evaluated, and the throttle
-	// would buy nothing but latency.
-	blocked := authed(t, client, "GET", server.URL+"/v1/health", "")
-	defer blocked.Body.Close()
-	if blocked.StatusCode != http.StatusTooManyRequests {
-		t.Fatalf("a blocked source got through with %d", blocked.StatusCode)
+	started := time.Now()
+	resp := authed(t, client, "GET", server.URL+"/v1/health", "")
+	elapsed := time.Since(started)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("connecting after %d probes answered %d", authFreeAttempts*3,
+			resp.StatusCode)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("connecting after probes was held for %s", elapsed)
+	}
+}
+
+// Guessing still has to cost something, or the throttle is decoration.
+func TestAWrongPasswordPastTheAllowanceIsHeld(t *testing.T) {
+	registry, _ := newTestRegistry(t, newStub(nil))
+	server, _, client := startTestServerWith(t, registry, NewMachineStore())
+
+	wrong := "Basic " + base64.StdEncoding.EncodeToString([]byte("ccmux:nope"))
+	attempt := func() time.Duration {
+		req, _ := http.NewRequest("GET", server.URL+"/v1/health", nil)
+		req.Header.Set("Authorization", wrong)
+		started := time.Now()
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("a wrong password answered %d", resp.StatusCode)
+		}
+		return time.Since(started)
+	}
+	for i := 0; i < authFreeAttempts; i++ {
+		if elapsed := attempt(); elapsed > time.Second {
+			t.Fatalf("attempt %d within the allowance was held for %s", i+1, elapsed)
+		}
+	}
+	if elapsed := attempt(); elapsed < authBaseDelay/2 {
+		t.Fatalf("the attempt past the allowance came back in %s", elapsed)
 	}
 }
 

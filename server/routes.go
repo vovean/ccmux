@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -184,34 +183,38 @@ func requireAuth(credential BasicAuthCredential, throttle *authThrottle,
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := requestHost(r)
 		now := time.Now()
-		if blocked, remaining := throttle.Blocked(host, now); blocked {
-			// Refused without comparing, so a blocked source cannot even use the timing
-			// of the comparison as a signal.
-			w.Header().Set("Retry-After",
-				strconv.Itoa(int(remaining.Seconds())+1))
-			writeError(w, http.StatusTooManyRequests, "too many failed attempts")
+		username, password, presented := parseBasicAuth(r.Header.Get("Authorization"))
+		// Compared first, and the comparison is constant-time, so a correct password is
+		// always served however much guessing has come from the same address. That is the
+		// property the fleet needs: every Mac arrives from one VPN egress, and anything
+		// that can lock out an address locks out all of them at once.
+		if presented && credential.Accepts(username, password) {
+			throttle.Succeeded(host, now)
+			next(w, r)
 			return
 		}
-
-		username, password, ok := parseBasicAuth(r.Header.Get("Authorization"))
-		if !ok || !credential.Accepts(username, password) {
+		// A request carrying no credential at all is not a guess of anything and tells
+		// its sender nothing. Counting it as a failure is what spent the fleet's whole
+		// allowance before a password was ever typed: trust-on-first-use probes this
+		// server unauthenticated by design, once per click of Connect.
+		if presented {
 			wait := throttle.Failed(host, now)
 			// Logged with the source: on a public address this is the only record that
 			// anyone is trying, and silence is indistinguishable from nobody trying.
 			if wait > 0 {
-				logWarn("rejected basic auth from %s — blocking for %s", host, wait)
+				logWarn("rejected basic auth from %s — holding the answer %s", host, wait)
 			} else {
 				logWarn("rejected basic auth from %s", host)
 			}
-			// The realm is what makes a browser and `curl -u` offer a prompt rather than
-			// just failing, which matters because this is also how you check the server
-			// by hand.
-			w.Header().Set("WWW-Authenticate", `Basic realm="ccmuxd", charset="UTF-8"`)
-			w.WriteHeader(http.StatusUnauthorized)
-			return
+			if !throttle.Hold(r.Context(), wait) {
+				return
+			}
 		}
-		throttle.Succeeded(host, now)
-		next(w, r)
+		// The realm is what makes a browser and `curl -u` offer a prompt rather than
+		// just failing, which matters because this is also how you check the server
+		// by hand.
+		w.Header().Set("WWW-Authenticate", `Basic realm="ccmuxd", charset="UTF-8"`)
+		w.WriteHeader(http.StatusUnauthorized)
 	})
 }
 
