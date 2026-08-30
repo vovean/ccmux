@@ -241,6 +241,8 @@ public final class Engine: ObservableObject {
                 await self?.pollDelegatedUsage()
                 await self?.keepWindowsRolling()
                 await self?.syncSessions()
+                // Last, so it records the address whatever the tick above ended up using.
+                self?.rememberReachableAddress()
             }
         })
         timers.append(Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in

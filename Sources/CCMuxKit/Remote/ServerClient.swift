@@ -53,7 +53,10 @@ public enum ServerFingerprint {
 /// it has not been told to expect. The pin is checked on every request, not just the
 /// first, so a swapped certificate fails loudly rather than silently re-trusting.
 public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendable {
-    public let baseURL: URL
+    /// Every address this server is known to answer on, best first.
+    public let baseURLs: [URL]
+    private let addressLock = NSLock()
+    private var _active = 0
     private let username: String
     private let password: String
     private let pinnedFingerprint: String
@@ -64,10 +67,21 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
     /// `proxy` follows the same rule as every other outbound path in ccmux: routing only
     /// some calls through it looks like the setting worked while the rest go direct, and
     /// on a machine that needs the proxy those are exactly the calls that fail.
-    public init(baseURL: URL, username: String, password: String, fingerprint: String,
+    public convenience init(baseURL: URL, username: String, password: String,
+                            fingerprint: String, proxy: UpstreamProxy? = nil,
+                            proxyPassword: String? = nil, trace: ServerTrace? = nil) {
+        self.init(baseURLs: [baseURL], username: username, password: password,
+                  fingerprint: fingerprint, proxy: proxy, proxyPassword: proxyPassword,
+                  trace: trace)
+    }
+
+    /// One pin covers every address: an alternate has to present the same certificate to
+    /// be talked to at all, so the list widens where the server may be found and not what
+    /// may answer.
+    public init(baseURLs: [URL], username: String, password: String, fingerprint: String,
                 proxy: UpstreamProxy? = nil, proxyPassword: String? = nil,
                 trace: ServerTrace? = nil) {
-        self.baseURL = baseURL
+        self.baseURLs = baseURLs
         self.username = username
         self.password = password
         self.pinnedFingerprint = fingerprint.lowercased()
@@ -86,8 +100,34 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
         // `nil` does not mean "no proxy" — it means "whatever the system is configured to
         // use", which is how one Mac silently sent every ccmuxd request through a squid
         // that refused CONNECT to 8443. Worth a line whenever anyone is watching.
-        trace?("client baseURL=\(baseURL.absoluteString) pin=\(self.pinnedFingerprint) "
+        trace?("client addresses=\(baseURLs.map(\.absoluteString).joined(separator: ", ")) "
+            + "pin=\(self.pinnedFingerprint) "
             + "proxy=\(proxy.map { "\($0.host):\($0.port)" } ?? "system default")")
+    }
+
+    /// The address that last answered. The engine persists it, so the next launch starts
+    /// where this one left off rather than spending a timeout on an address that is
+    /// unreachable on this network.
+    public var activeBaseURL: URL {
+        addressLock.lock(); defer { addressLock.unlock() }
+        return baseURLs[_active]
+    }
+
+    /// Ordered from the one that last worked, so a healthy connection never pays for the
+    /// alternates existing.
+    private func candidates() -> [URL] {
+        addressLock.lock(); let start = _active; addressLock.unlock()
+        guard baseURLs.count > 1 else { return baseURLs }
+        return Array(baseURLs[start...]) + Array(baseURLs[..<start])
+    }
+
+    private func noteAnswered(_ url: URL) {
+        guard let index = baseURLs.firstIndex(of: url) else { return }
+        addressLock.lock()
+        let changed = _active != index
+        _active = index
+        addressLock.unlock()
+        if changed { Log.info("ccmuxd now answering at \(url.absoluteString)") }
     }
 
     /// A session holds its delegate until invalidated, so a discarded client would leak
@@ -105,6 +145,38 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
     public static func probeFingerprint(baseURL: URL, proxy: UpstreamProxy? = nil,
                                         proxyPassword: String? = nil,
                                         trace: ServerTrace? = nil) async throws -> String {
+        try await probe(baseURLs: [baseURL], proxy: proxy, proxyPassword: proxyPassword,
+                        trace: trace).fingerprint
+    }
+
+    /// Probes each address and reports the first that completes a handshake, along with
+    /// which one it was — the caller records that as the address to try first.
+    ///
+    /// A server with several addresses is normal here, and on any given network most of
+    /// them are unreachable. Reporting the reachable one is what lets the connect sheet
+    /// accept them all at once and still store something that works today.
+    public static func probe(baseURLs: [URL], proxy: UpstreamProxy? = nil,
+                             proxyPassword: String? = nil,
+                             trace: ServerTrace? = nil) async throws
+        -> (fingerprint: String, url: URL) {
+        var lastFailure: Error?
+        for base in baseURLs {
+            do {
+                return (try await probeOne(baseURL: base, proxy: proxy,
+                                           proxyPassword: proxyPassword, trace: trace),
+                        base)
+            } catch {
+                trace?("no handshake at \(base.absoluteString)")
+                lastFailure = error
+            }
+        }
+        throw lastFailure
+            ?? ServerClientError.transport("no address to try")
+    }
+
+    private static func probeOne(baseURL: URL, proxy: UpstreamProxy? = nil,
+                                 proxyPassword: String? = nil,
+                                 trace: ServerTrace? = nil) async throws -> String {
         let collector = PinnedTrust(expected: nil,
                                     proxyCredential: ProxyTransport.credential(
                                         for: proxy, password: proxyPassword),
@@ -240,29 +312,29 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
     /// Built one component at a time and left to Foundation to encode. Escaping them by
     /// hand first meant `appendingPathComponent` encoded the `%` again, so an account id
     /// arrived as `39220F76%252D23E7…` and every token request 404'd.
-    private func url(_ components: [String]) -> URL {
-        components.reduce(baseURL.appendingPathComponent("v1")) {
+    private func url(_ base: URL, _ components: [String]) -> URL {
+        components.reduce(base.appendingPathComponent("v1")) {
             $0.appendingPathComponent($1)
         }
     }
 
     private func get<Response: Decodable>(_ path: [String]) async throws -> Response {
-        try await send(request(path, method: "GET", body: nil))
+        try await send(path, method: "GET", body: nil)
     }
 
     private func post<Body: Encodable, Response: Decodable>(_ path: [String],
                                                             _ body: Body) async throws
         -> Response {
-        try await send(request(path, method: "POST",
-                               body: try JSONStore.encoder.encode(body)))
+        try await send(path, method: "POST", body: try JSONStore.encoder.encode(body))
     }
 
     private func delete(_ path: [String]) async throws {
-        try await sendWithoutResponse(request(path, method: "DELETE", body: nil))
+        _ = try await perform(path, method: "DELETE", body: nil)
     }
 
-    private func request(_ path: [String], method: String, body: Data?) -> URLRequest {
-        var request = URLRequest(url: url(path))
+    private func request(_ base: URL, _ path: [String], method: String,
+                         body: Data?) -> URLRequest {
+        var request = URLRequest(url: url(base, path))
         request.httpMethod = method
         let basic = Data("\(username):\(password)".utf8).base64EncodedString()
         request.setValue("Basic \(basic)", forHTTPHeaderField: "Authorization")
@@ -273,8 +345,9 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
         return request
     }
 
-    private func send<Response: Decodable>(_ request: URLRequest) async throws -> Response {
-        let data = try await perform(request)
+    private func send<Response: Decodable>(_ path: [String], method: String,
+                                           body: Data?) async throws -> Response {
+        let data = try await perform(path, method: method, body: body)
         do {
             return try JSONStore.decoder.decode(Response.self, from: data)
         } catch {
@@ -282,42 +355,55 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
         }
     }
 
-    private func sendWithoutResponse(_ request: URLRequest) async throws {
-        _ = try await perform(request)
-    }
-
-    private func perform(_ request: URLRequest) async throws -> Data {
-        let data: Data, response: URLResponse
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch {
-            // A pin mismatch surfaces as a generic cancellation, so the specific cause is
-            // reported from what the delegate saw rather than from the URLError.
-            if let seen = pin.mismatch {
-                trace?("pin mismatch: expected \(pinnedFingerprint) got \(seen)")
-                throw ServerClientError.certificateMismatch(expected: pinnedFingerprint,
-                                                            got: seen)
+    /// Tries each address until one answers, starting from the one that last did.
+    ///
+    /// Only a transport failure moves on. An answer — a 401, a 404, a 429 — means this
+    /// address *is* the server, and trying the next one would turn a clear refusal into a
+    /// confusing one and spend the request budget of every address to do it. A pin
+    /// mismatch stops everything: it is the one error that means something is wrong rather
+    /// than merely unreachable, and it must never be walked past in search of an address
+    /// that agrees.
+    private func perform(_ path: [String], method: String, body: Data?) async throws -> Data {
+        var lastFailure: Error?
+        for base in candidates() {
+            let request = self.request(base, path, method: method, body: body)
+            let data: Data, response: URLResponse
+            do {
+                (data, response) = try await session.data(for: request)
+            } catch {
+                // A pin mismatch surfaces as a generic cancellation, so the specific cause
+                // is reported from what the delegate saw rather than from the URLError.
+                if let seen = pin.mismatch {
+                    trace?("pin mismatch: expected \(pinnedFingerprint) got \(seen)")
+                    throw ServerClientError.certificateMismatch(expected: pinnedFingerprint,
+                                                                got: seen)
+                }
+                let detail = ServerDiagnostics.describe(error)
+                trace?("\(method) \(request.url?.absoluteString ?? "?") failed: \(detail)")
+                lastFailure = error
+                continue
             }
-            // Logged, not merely traced. A steady-state client carries no trace, and this
-            // is the one place that knows why an established connection stopped working.
-            let detail = ServerDiagnostics.describe(error)
-            trace?("\(request.httpMethod ?? "?") \(request.url?.absoluteString ?? "?") "
-                + "failed: \(detail)")
-            Log.warn("ccmuxd request failed: \(request.url?.path ?? "?") \(detail) "
-                + "trustChallenges=\(pin.challengeCount)")
-            throw ServerClientError.transport(error.localizedDescription)
+            noteAnswered(base)
+            trace?("\(method) \(request.url?.absoluteString ?? "?") -> HTTP "
+                + "\((response as? HTTPURLResponse)?.statusCode.description ?? "?")")
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if status == 401 { throw ServerClientError.unauthorized }
+            guard (200..<300).contains(status) else {
+                let message = (try? JSONStore.decoder.decode(ServerErrorResponse.self,
+                                                             from: data))?.message
+                    ?? String(decoding: data.prefix(300), as: UTF8.self)
+                throw ServerClientError.http(status, message)
+            }
+            return data
         }
-        trace?("\(request.httpMethod ?? "?") \(request.url?.absoluteString ?? "?") -> HTTP "
-            + "\((response as? HTTPURLResponse)?.statusCode.description ?? "?")")
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        if status == 401 { throw ServerClientError.unauthorized }
-        guard (200..<300).contains(status) else {
-            let message = (try? JSONStore.decoder.decode(ServerErrorResponse.self,
-                                                         from: data))?.message
-                ?? String(decoding: data.prefix(300), as: UTF8.self)
-            throw ServerClientError.http(status, message)
-        }
-        return data
+        // Logged once for the whole attempt rather than once per address: a Mac on the
+        // wrong network would otherwise write a line per address per housekeeping tick.
+        let detail = lastFailure.map(ServerDiagnostics.describe) ?? "no address to try"
+        Log.warn("ccmuxd unreachable at \(baseURLs.count) address(es): /"
+            + path.joined(separator: "/") + " \(detail) "
+            + "trustChallenges=\(pin.challengeCount)")
+        throw ServerClientError.transport(
+            lastFailure?.localizedDescription ?? "no address to try")
     }
 }
 

@@ -7,6 +7,9 @@ struct ServerSection: View {
     @ObservedObject var engine: Engine
 
     @State private var urlText = ""
+    @State private var editingAddresses = false
+    @State private var addressText = ""
+    @State private var addressError: String?
     @State private var username = ""
     @State private var password = ""
     /// Set once the handshake has happened and the user has yet to agree to it. Holding
@@ -50,8 +53,14 @@ struct ServerSection: View {
 
     @ViewBuilder
     private var disconnected: some View {
-        TextField("ccmux.example.com  or  203.0.113.10:8443", text: $urlText)
+        TextField("ccmux.example.com  or  203.0.113.10:8443, 10.0.0.1", text: $urlText)
             .textFieldStyle(.roundedBorder)
+        Text("Several addresses for the same server, separated by commas, are tried in "
+             + "turn — useful when it is reachable at one address over a tunnel and "
+             + "another without. They all have to present the same certificate.")
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+            .fixedSize(horizontal: false, vertical: true)
         HStack(spacing: 8) {
             TextField("username", text: $username)
                 .textFieldStyle(.roundedBorder)
@@ -109,6 +118,44 @@ struct ServerSection: View {
             Text(connection.url).font(.caption.monospaced())
             Text("· \(connection.username)").font(.caption2).foregroundStyle(.tertiary)
             Spacer()
+        }
+        if !connection.alternateURLs.isEmpty {
+            // Named rather than merely counted: which address is in use says which network
+            // this Mac is on, and that is the first thing worth knowing when it stops
+            // working.
+            Text("also tries " + connection.alternateURLs.joined(separator: ", "))
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        if editingAddresses {
+            HStack(spacing: 8) {
+                TextField("10.0.0.1, 203.0.113.10:8443", text: $addressText)
+                    .textFieldStyle(.roundedBorder)
+                Button("Save") {
+                    addressError = engine.setServerAddresses(addressText)
+                    if addressError == nil { editingAddresses = false }
+                }
+                .disabled(addressText.trimmingCharacters(in: .whitespaces).isEmpty)
+                Button("Cancel") { editingAddresses = false; addressError = nil }
+            }
+            if let addressError {
+                Text(addressError).font(.caption).foregroundStyle(.red)
+            }
+            Text("The certificate is not re-confirmed: every address is checked against "
+                 + "the pin already agreed, so one that answers with anything else is "
+                 + "refused.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            Button("Edit addresses") {
+                addressText = connection.addresses.joined(separator: ", ")
+                addressError = nil
+                editingAddresses = true
+            }
+            .font(.caption)
+            .buttonStyle(.link)
         }
         Text("pinned \(ServerFingerprint.short(connection.fingerprint))")
             .font(.caption2)

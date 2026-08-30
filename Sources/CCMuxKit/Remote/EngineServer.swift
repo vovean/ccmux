@@ -20,9 +20,10 @@ public extension Engine {
         if let cached = serverClientCache, cached.connection == connection {
             return cached.client
         }
-        guard let url = URL(string: connection.url),
+        let urls = connection.addresses.compactMap(URL.init(string:))
+        guard !urls.isEmpty,
               let password = (try? ServerPasswordStore.read()) ?? nil else { return nil }
-        let client = ServerClient(baseURL: url, username: connection.username,
+        let client = ServerClient(baseURLs: urls, username: connection.username,
                                   password: password, fingerprint: connection.fingerprint,
                                   proxy: settings.upstreamProxy,
                                   proxyPassword: try? ProxyPasswordStore.read())
@@ -35,21 +36,22 @@ public extension Engine {
     /// Step one of first connect: complete a handshake and report the certificate so the
     /// user can confirm it. Sends no credentials — the peer is unverified at this point.
     func probeServer(_ rawURL: String) async -> Result<String, Error> {
-        guard let url = Self.normalizeServerURL(rawURL) else {
+        let urls = Self.serverAddresses(rawURL)
+        guard !urls.isEmpty else {
             return .failure(ServerClientError.transport("that is not a URL"))
         }
         serverBusy = true
         defer { serverBusy = false }
-        Log.info("probing \(url.absoluteString) (typed as \(rawURL))")
+        Log.info("probing \(urls.map(\.absoluteString).joined(separator: ", ")) "
+            + "(typed as \(rawURL))")
         do {
-            let fingerprint = try await ServerClient.probeFingerprint(
-                baseURL: url, proxy: settings.upstreamProxy,
+            let found = try await ServerClient.probe(
+                baseURLs: urls, proxy: settings.upstreamProxy,
                 proxyPassword: try? ProxyPasswordStore.read(), trace: Self.logTrace)
-            Log.info("probe of \(url.absoluteString) saw \(fingerprint)")
-            return .success(fingerprint)
+            Log.info("probe saw \(found.fingerprint) at \(found.url.absoluteString)")
+            return .success(found.fingerprint)
         } catch {
-            Log.warn("probe of \(url.absoluteString) failed: "
-                + ServerDiagnostics.describe(error))
+            Log.warn("probe failed at every address: " + ServerDiagnostics.describe(error))
             return .failure(error)
         }
     }
@@ -66,13 +68,14 @@ public extension Engine {
     @discardableResult
     func connectServer(url rawURL: String, username: String, password: String,
                        fingerprint: String) async -> String? {
-        guard let url = Self.normalizeServerURL(rawURL) else { return "that is not a URL" }
+        let urls = Self.serverAddresses(rawURL)
+        guard !urls.isEmpty else { return "that is not a URL" }
         serverBusy = true
         defer { serverBusy = false }
 
-        Log.info("connecting to \(url.absoluteString) as \(username) "
-            + "pinning \(fingerprint.lowercased())")
-        let client = ServerClient(baseURL: url, username: username, password: password,
+        Log.info("connecting to \(urls.map(\.absoluteString).joined(separator: ", ")) "
+            + "as \(username) pinning \(fingerprint.lowercased())")
+        let client = ServerClient(baseURLs: urls, username: username, password: password,
                                   fingerprint: fingerprint, proxy: settings.upstreamProxy,
                                   proxyPassword: try? ProxyPasswordStore.read(),
                                   trace: Self.logTrace)
@@ -81,7 +84,7 @@ public extension Engine {
             _ = try await client.health()
             remote = try await client.accounts()
         } catch {
-            Log.warn("connect to \(url.absoluteString) failed: "
+            Log.warn("connect failed at every address: "
                 + ServerDiagnostics.describe(error))
             return error.localizedDescription
         }
@@ -94,17 +97,63 @@ public extension Engine {
         } catch {
             return "Could not save the password to the Keychain: \(error.localizedDescription)"
         }
+        // Stored with the address that actually answered first, so a later launch on this
+        // network does not open with a timeout against one that cannot work here.
+        let answered = client.activeBaseURL
+        let rest = urls.filter { $0 != answered }.map(\.absoluteString)
         updateSettings {
-            $0.server = ServerConnection(url: url.absoluteString, username: username,
+            $0.server = ServerConnection(url: answered.absoluteString,
+                                         alternateURLs: rest, username: username,
                                          fingerprint: fingerprint)
         }
         delegationPlan = buildPlan(remote: remote)
         applyRemoteToVault()
         Task { await syncSessions() }
+        let others = rest.isEmpty ? "" : " (\(rest.count) alternate address(es))"
         banner = Banner(level: .info,
-                        text: "Connected to \(url.host() ?? url.absoluteString) · "
-                            + "\(remote.count) account(s) available.")
+                        text: "Connected to \(answered.host() ?? answered.absoluteString)"
+                            + "\(others) · \(remote.count) account(s) available.")
         return nil
+    }
+
+    /// Changes the addresses of the server already connected, keeping everything else.
+    ///
+    /// Deliberately not "disconnect and connect again": disconnecting clears the delegated
+    /// set, and a delegated account holds no refresh token on this Mac, so that route
+    /// would strand every one of them behind a fresh sign-in to add an address.
+    @discardableResult
+    func setServerAddresses(_ raw: String) -> String? {
+        guard var connection = settings.server else { return "no server is connected" }
+        let urls = Self.serverAddresses(raw).map(\.absoluteString)
+        guard !urls.isEmpty else { return "that is not a URL" }
+        connection.setAddresses(urls)
+        let primary = connection.url
+        updateSettings { $0.server = connection }
+        // The cached client is keyed on the whole connection, so this rebuilds it; the
+        // vault has to be handed the new one or delegated renewals keep using the old.
+        serverClientCache = nil
+        applyRemoteToVault()
+        Log.info("ccmuxd addresses set to " + urls.joined(separator: ", "))
+        banner = Banner(level: .info,
+                        text: urls.count == 1
+                            ? "Server address set to \(primary)."
+                            : "Server addresses set — \(primary) first, "
+                                + "\(urls.count - 1) alternate(s).")
+        return nil
+    }
+
+    /// Records which address is answering now, so the next launch starts there.
+    ///
+    /// Called from housekeeping rather than from the request path: the address changes
+    /// when a tunnel comes up or goes down, which is rare, and writing settings from
+    /// inside every request would be a file write per renewal.
+    internal func rememberReachableAddress() {
+        guard let client = serverClient, var connection = settings.server else { return }
+        let active = client.activeBaseURL.absoluteString
+        guard connection.url != active else { return }
+        connection.promote(active)
+        updateSettings { $0.server = connection }
+        Log.info("ccmuxd address preference is now \(active)")
     }
 
     /// Recomputes what connecting means, for the connect sheet.
@@ -454,6 +503,17 @@ public extension Engine {
             record(.success(remote.windows), for: accountID,
                    fetchedAt: Date().addingTimeInterval(-max(0, remote.ageSeconds)))
         }
+    }
+
+    /// Several addresses for one server, separated by commas or whitespace.
+    ///
+    /// One field rather than a list of them: they are alternates for the same thing, they
+    /// are pasted together, and every one of them is checked against the same pin.
+    nonisolated static func serverAddresses(_ raw: String) -> [URL] {
+        var seen = Set<String>()
+        return raw.split(whereSeparator: { $0 == "," || $0.isWhitespace })
+            .compactMap { normalizeServerURL(String($0)) }
+            .filter { seen.insert($0.absoluteString).inserted }
     }
 
     nonisolated static func normalizeServerURL(_ raw: String) -> URL? {

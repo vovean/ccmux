@@ -36,6 +36,45 @@ struct LiveServerTests {
         #expect(probed == (Self.env["CCMUXD_FINGERPRINT"] ?? "").lowercased())
     }
 
+    /// Nothing listens here, and a refused connection is the cheap shape of "this address
+    /// does not work on this network" — the expensive shape is a tunnel that is down,
+    /// which times out instead.
+    private static func deadAddress() throws -> URL {
+        try #require(URL(string: "https://127.0.0.1:9"))
+    }
+
+    @Test func anUnreachableAddressIsSkippedAndTheWorkingOneRemembered() async throws {
+        let live = try Self.baseURL()
+        let client = ServerClient(baseURLs: [try Self.deadAddress(), live],
+                                  username: Self.env["CCMUXD_USERNAME"] ?? "ccmux",
+                                  password: try #require(Self.env["CCMUXD_PASSWORD"]),
+                                  fingerprint: try #require(Self.env["CCMUXD_FINGERPRINT"]))
+        let health = try await client.health()
+        #expect(health.apiVersion == ServerAPI.version)
+        // Remembered, so the next request does not pay for the dead address again.
+        #expect(client.activeBaseURL == live)
+    }
+
+    /// An answer is not a failure. Walking on to the next address after a 401 would turn a
+    /// clear refusal into a confusing one, and would spend a wrong password against every
+    /// address the user listed.
+    @Test func anHTTPRefusalDoesNotFallThroughToTheNextAddress() async throws {
+        let client = ServerClient(baseURLs: [try Self.baseURL(), try Self.deadAddress()],
+                                  username: Self.env["CCMUXD_USERNAME"] ?? "ccmux",
+                                  password: "nope",
+                                  fingerprint: try #require(Self.env["CCMUXD_FINGERPRINT"]))
+        await #expect(throws: ServerClientError.unauthorized) {
+            _ = try await client.health()
+        }
+    }
+
+    @Test func theProbeReportsWhichAddressAnswered() async throws {
+        let live = try Self.baseURL()
+        let found = try await ServerClient.probe(baseURLs: [try Self.deadAddress(), live])
+        #expect(found.url == live)
+        #expect(found.fingerprint == (Self.env["CCMUXD_FINGERPRINT"] ?? "").lowercased())
+    }
+
     @Test func healthNegotiatesAndDecodes() async throws {
         let health = try await Self.client().health()
         #expect(health.apiVersion == ServerAPI.version)

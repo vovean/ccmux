@@ -78,17 +78,73 @@ public enum AutoSwitchMode: String, Codable, Equatable, CaseIterable {
 /// A ccmuxd this Mac has been told to trust. The password is not here — it lives in the
 /// Keychain, because settings.json is plaintext on disk.
 public struct ServerConnection: Codable, Equatable, Sendable {
+    /// The address to try first — the one that last worked.
     public var url: String
+    /// Other addresses the same server answers on, tried in order when `url` cannot be
+    /// reached.
+    ///
+    /// One server genuinely has no single reachable address here. The corp tunnel offers
+    /// it at a private address that only exists while that tunnel is up, and the ISP
+    /// blackholes TCP to its public address entirely, so neither one works from
+    /// everywhere and no amount of choosing better makes it so. Failing over is the only
+    /// arrangement under which one settings file is correct on every network.
+    public var alternateURLs: [String]
     public var username: String
     /// SHA-256 of the server's TLS certificate, agreed once on first connect. Checked on
     /// every request: a self-signed certificate has no CA behind it, so this pin is the
     /// only thing distinguishing the real server from anything else on that address.
+    ///
+    /// One pin covers every address, which is what makes failing over safe rather than an
+    /// invitation: an alternate has to present the same certificate to be talked to at
+    /// all, so adding one widens where the server may be found and not what may answer.
     public var fingerprint: String
 
-    public init(url: String, username: String, fingerprint: String) {
+    public init(url: String, alternateURLs: [String] = [], username: String,
+                fingerprint: String) {
         self.url = url
+        self.alternateURLs = alternateURLs
         self.username = username
         self.fingerprint = fingerprint
+    }
+
+    /// Every address to try, best first and without repeats.
+    public var addresses: [String] {
+        var seen = Set<String>()
+        return ([url] + alternateURLs).filter { seen.insert($0).inserted }
+    }
+
+    /// Records which address answered, so the next launch starts where the last one left
+    /// off instead of spending a timeout on an address that is unreachable on this
+    /// network.
+    public mutating func promote(_ address: String) {
+        guard address != url, addresses.contains(address) else { return }
+        let rest = addresses.filter { $0 != address }
+        url = address
+        alternateURLs = rest
+    }
+
+    /// Replaces the address list, keeping the one in use at the front if it survives.
+    ///
+    /// A working connection must not be moved off the address that is working for it right
+    /// now merely because the list was edited — that would cost a timeout, and on a Mac
+    /// whose other addresses are unreachable it would cost one every tick until the
+    /// preference caught up again.
+    public mutating func setAddresses(_ urls: [String]) {
+        var seen = Set<String>()
+        let unique = urls.filter { seen.insert($0).inserted }
+        guard let first = unique.first else { return }
+        let primary = unique.contains(url) ? url : first
+        self.url = primary
+        alternateURLs = unique.filter { $0 != primary }
+    }
+
+    /// `alternateURLs` is absent from every settings file written before failover existed.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        url = try c.decode(String.self, forKey: .url)
+        alternateURLs = try c.decodeIfPresent([String].self, forKey: .alternateURLs) ?? []
+        username = try c.decode(String.self, forKey: .username)
+        fingerprint = try c.decode(String.self, forKey: .fingerprint)
     }
 }
 

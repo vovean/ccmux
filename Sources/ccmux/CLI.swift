@@ -201,21 +201,19 @@ enum CLI {
             index += 1
         }
         guard let address else { fail("server-check needs an address") }
+        let urls = CCMuxKit.Engine.serverAddresses(address)
+        guard let url = urls.first else { fail("\(address) is not a URL") }
         // The trace runs on a URLSession queue while the narration runs here, and a
         // buffered stdout interleaves the two into nonsense — the first run printed every
         // trace line above the heading it belonged under.
         setvbuf(stdout, nil, _IONBF, 0)
-        guard let url = CCMuxKit.Engine.normalizeServerURL(address) else {
-            fail("\(address) is not a URL")
-        }
-
         // Never from argv: a password there is visible in `ps` to every user on the
         // machine and lands in shell history.
         let password = ProcessInfo.processInfo.environment["CCMUX_PASSWORD"]
             ?? (try? ServerPasswordStore.read()) ?? nil
 
         print("address     \(address)")
-        print("normalized  \(url.absoluteString)")
+        print("normalized  \(urls.map(\.absoluteString).joined(separator: ", "))")
         print("username    \(username)")
         print("password    \(password == nil ? "none — will stop after the probe" : "supplied")")
         print("system proxy for this URL: \(systemProxyDescription(for: url))")
@@ -232,15 +230,19 @@ enum CLI {
             defer { done.signal() }
             print("--- probe (accepts any certificate, sends no credentials) ---")
             let observed: String
+            let answered: URL
             do {
-                observed = try await ServerClient.probeFingerprint(
-                    baseURL: url, proxy: nil, proxyPassword: nil, trace: trace)
+                let found = try await ServerClient.probe(
+                    baseURLs: urls, proxy: nil, proxyPassword: nil, trace: trace)
+                observed = found.fingerprint
+                answered = found.url
             } catch {
                 await tlsMatrix(url)
                 failure = "probe failed: \(ServerDiagnostics.describe(error))"
                 return
             }
             print("  fingerprint \(ServerFingerprint.display(observed))")
+            if urls.count > 1 { print("  answered at \(answered.absoluteString)") }
             print("")
 
             guard let password else { return }
@@ -250,9 +252,9 @@ enum CLI {
             } else {
                 print("--- authenticated request (pinning \(pin)) ---")
             }
-            let client = ServerClient(baseURL: url, username: username, password: password,
-                                      fingerprint: pin, proxy: nil, proxyPassword: nil,
-                                      trace: trace)
+            let client = ServerClient(baseURLs: urls, username: username,
+                                      password: password, fingerprint: pin, proxy: nil,
+                                      proxyPassword: nil, trace: trace)
             do {
                 let health = try await client.health()
                 print("  health ok: apiVersion=\(health.apiVersion)")
