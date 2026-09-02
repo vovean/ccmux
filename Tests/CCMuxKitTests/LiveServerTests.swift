@@ -33,12 +33,25 @@ struct LiveServerTests {
     /// The whole publish loop against a real ccmuxd: a set is published, this Mac edits
     /// one file, and the Upload button's bundle goes back.
     ///
-    /// Worth a real server rather than a stub because the failure it guards against is
-    /// silent and fleet-wide: publishing the whole local tree instead of one file would
-    /// push every other unanswered edit to every Mac, and both ends would still agree on
-    /// the hash afterwards.
+    /// Worth a real server because the failure it guards against is silent and
+    /// fleet-wide: publishing the whole local tree instead of one file would push every
+    /// other unanswered edit to every Mac, and both ends would still agree on the hash.
     @Test func publishingOneEditedFileLeavesTheRestOfTheServersSetAlone() async throws {
         let client = try Self.client()
+        // PUT /hooks replaces the whole bundle, so this test overwrites whatever the
+        // server holds. Pointed at a real ccmuxd it would delete the fleet's hooks from
+        // every Mac within the minute, so the original goes back on every exit.
+        let original = try await client.hooks().files
+        do {
+            try await Self.driveThePublishLoop(client)
+        } catch {
+            _ = try? await client.pushHooks(original)
+            throw error
+        }
+        _ = try await client.pushHooks(original)
+    }
+
+    private static func driveThePublishLoop(_ client: ServerClient) async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ccmux-live-hooks-\(UUID().uuidString)",
                                     isDirectory: true)
@@ -78,7 +91,6 @@ struct LiveServerTests {
         // And the two ends agree on the hash, which is what the sync compares.
         #expect(ManagedHooks.version(of: after.files) == after.version)
 
-        // b.sh is still a question; a.sh is settled.
         let settled = HookSync.classify(local: ManagedHooks.onDisk(in: root),
                                         server: after.files,
                                         baseline: HookBaseline.load(from: baselineFile))

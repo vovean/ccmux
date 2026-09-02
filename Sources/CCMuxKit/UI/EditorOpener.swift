@@ -2,10 +2,8 @@ import AppKit
 import CCMuxCore
 import Foundation
 
-/// Opens a hook script in VS Code.
-///
-/// Three Macs run this and one of them may not have VS Code at all, so every step has a
-/// fallback and the last one — revealing the file in Finder — always works.
+/// Opens a hook script in VS Code. Every step has a fallback, and the last one —
+/// revealing the file in Finder — works on a Mac that has no VS Code at all.
 public enum EditorOpener {
     public enum Outcome: Equatable {
         case opened
@@ -22,9 +20,8 @@ public enum EditorOpener {
         }
     }
 
-    /// Off the main actor throughout: every attempt waits for a launcher to exit, and a
-    /// cold VS Code takes seconds. Run from a button action it would freeze the window for
-    /// exactly that long.
+    /// Off the main actor: every attempt waits for a launcher to exit, and a cold VS Code
+    /// takes seconds.
     @discardableResult
     public static func open(_ url: URL) async -> Outcome {
         guard FileManager.default.fileExists(atPath: url.path) else {

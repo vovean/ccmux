@@ -1,29 +1,14 @@
 import CCMuxCore
 import Foundation
 
-/// What this Mac and the server last agreed on, per file.
-///
-/// The sync exists to converge on the server's set, and until now it did that by hashing
-/// the managed directory and overwriting whenever the hash differed. That is
-/// self-healing — a hook edited or truncated by hand is restored on the next tick — but
-/// it cannot tell *which side* changed, so it treats a deliberate local edit exactly like
-/// corruption and throws it away.
-///
-/// This is the third value that makes the two distinguishable. With it, "the server moved
-/// and this Mac did not" stays automatic, and "this Mac moved" stops the sync and asks.
-/// The cost is real and deliberate: a hook quietly corrupted on disk is now an edit, and
-/// it stays corrupted until someone answers the question on the Hooks page.
-///
-/// One case keeps the old behaviour on purpose. A file that has been *deleted* locally is
-/// restored without asking. Deleting a hook is almost never a considered edit, and the
-/// failure mode is invisible — the hook simply never runs again, with nothing to notice.
-/// Withdrawing a hook is done on the server, where it takes effect on every Mac.
+/// What this Mac and the server last agreed on, per file — the third value that makes
+/// "the server moved" distinguishable from "this Mac moved". The cost is deliberate: a
+/// hook corrupted on disk now reads as an edit and stays until someone answers, where
+/// hashing the directory alone used to heal it.
 public struct HookBaseline: Codable, Equatable, Sendable {
     public struct Entry: Codable, Equatable, Sendable {
         public var digest: String
-        /// When this file's current content arrived, not when the set was last checked:
-        /// a hook untouched for a month should say so rather than claim it synced a
-        /// minute ago.
+        /// When this file's content arrived, not when the set was last checked.
         public var syncedAt: Date
 
         public init(digest: String, syncedAt: Date) {
@@ -48,12 +33,9 @@ public struct HookBaseline: Codable, Equatable, Sendable {
         JSONStore.save(self, to: url)
     }
 
-    /// The baseline after writing `tree` to disk, given what the server currently holds.
-    ///
-    /// A file is only recorded as agreed when what landed on disk is what the server has.
-    /// Resolving one conflict writes a tree that deliberately keeps *other* undecided
-    /// files as they are on this Mac; recording those as agreed would erase the very edit
-    /// the user has not answered for yet.
+    /// Records a file as agreed only when what landed on disk is what the server has:
+    /// resolving one conflict keeps *other* undecided files local, and recording those
+    /// would erase the edit nobody has answered for yet.
     public static func advance(_ previous: HookBaseline?, applied tree: [HookFile],
                                server: [HookFile], at now: Date = Date()) -> HookBaseline {
         let serverDigests = Dictionary(server.map { ($0.path, ManagedHooks.digest(of: $0)) },
@@ -84,17 +66,14 @@ public struct HookBaseline: Codable, Equatable, Sendable {
 /// One managed hook, as the Hooks page sees it.
 public struct ManagedHook: Identifiable, Equatable, Sendable {
     public enum State: String, Equatable, Sendable {
-        /// This Mac has exactly what the server has.
         case inSync
-        /// The server moved and this Mac did not — including a file the server has just
-        /// added, one it has withdrawn, and one deleted here by hand. Applied without
-        /// asking.
+        /// The server moved and this Mac did not — also a file newly published, one
+        /// withdrawn, and one deleted here by hand. Applied without asking.
         case stale
         /// This Mac moved and the server did not. Nothing is overwritten until answered.
         case editedHere
-        /// Both moved, to different content.
         case conflict
-        /// The server has not been reached yet, so nothing can be said about this file.
+        /// The server has not been reached, so nothing can be said about this file.
         case unknown
     }
 
@@ -106,11 +85,10 @@ public struct ManagedHook: Identifiable, Equatable, Sendable {
 
     public var id: String { path }
 
-    /// Only the user can settle these, and the whole sync waits while any are outstanding.
+    /// The whole sync waits while any of these are outstanding.
     public var needsDecision: Bool { state == .editedHere || state == .conflict }
 
-    /// The content to show: what is on this Mac, or the server's copy for a file that has
-    /// not landed yet.
+    /// What is on this Mac, or the server's copy for a file that has not landed yet.
     public var body: String? { local?.content ?? server?.content }
 
     public init(path: String, state: State, local: HookFile? = nil,
@@ -133,14 +111,12 @@ public enum HookResolution: String, Equatable, Sendable {
 /// The whole managed set and what the sync may do with it.
 public struct HookStatus: Equatable, Sendable {
     public var hooks: [ManagedHook] = []
-    /// When the server's set was last read. Distinct from a file's own `syncedAt`: this
-    /// moves on every tick, a file's only when its content does.
+    /// When the set was last read — unlike a file's own `syncedAt`, this moves every tick.
     public var checkedAt: Date?
     public var serverVersion: String?
 
-    /// True while at least one file is waiting on the user. Nothing is written to the
-    /// managed directory until it clears — the apply builds the whole tree at once, so
-    /// letting a stale file through would take the undecided one with it.
+    /// Nothing is written to the managed directory until this clears: the apply builds
+    /// the whole tree at once, so a stale file would take the undecided one with it.
     public var frozen: Bool { hooks.contains(where: \.needsDecision) }
 
     public var undecided: [ManagedHook] { hooks.filter(\.needsDecision) }
@@ -154,12 +130,9 @@ public struct HookStatus: Equatable, Sendable {
 }
 
 public enum HookSync {
-    /// Sorts each file into one of the five states by comparing three values: what is on
-    /// disk, what the server holds, and what the two last agreed on.
-    ///
-    /// `server` is nil when the set has not been fetched — offline, or a ccmuxd too old to
-    /// serve hooks. That is reported as `unknown` rather than guessed at: with no server
-    /// copy, "in sync" and "edited here" look identical.
+    /// Compares three values per file: disk, the server, and what the two last agreed on.
+    /// A nil `server` — offline, or a ccmuxd too old — is `unknown` rather than guessed
+    /// at, since with no server copy "in sync" and "edited here" look identical.
     public static func classify(local: [HookFile], server: [HookFile]?,
                                 baseline: HookBaseline?) -> [ManagedHook] {
         let locals = index(local)
@@ -202,33 +175,56 @@ public enum HookSync {
         }
     }
 
-    /// The tree to write when `path` is resolved in the server's favour.
-    ///
-    /// Every other file still awaiting a decision keeps what is on this Mac. The apply is
-    /// whole-tree and atomic, so answering one question must not silently answer the rest.
-    public static func treeTakingServer(_ path: String, in hooks: [ManagedHook]) -> [HookFile] {
-        var tree: [HookFile] = []
-        for hook in hooks {
-            if hook.path != path, hook.needsDecision, let local = hook.local {
-                tree.append(local)
-                continue
+    public enum Failure: Error, LocalizedError, Equatable {
+        case pathCollision(String, String)
+
+        public var errorDescription: String? {
+            switch self {
+            case .pathCollision(let a, let b):
+                return "\(a) and \(b) differ only in case, so this Mac cannot hold both. "
+                    + "Settle \(a) first."
             }
-            if let server = hook.server { tree.append(server) }
+        }
+    }
+
+    /// The tree to write when `path` is resolved in the server's favour, keeping every
+    /// other still-undecided file as it is on this Mac.
+    ///
+    /// Refuses rather than writes when a retained file and a server file differ only in
+    /// case: APFS folds them into one entry during staging, so one of the two would be
+    /// silently lost.
+    public static func treeTakingServer(_ path: String,
+                                        in hooks: [ManagedHook]) throws -> [HookFile] {
+        var tree: [HookFile] = []
+        var claimed: [String: String] = [:]
+        for hook in hooks {
+            let keepLocal = hook.path != path && hook.needsDecision
+            guard let file = keepLocal ? hook.local : hook.server else { continue }
+            if let clash = claimed.updateValue(file.path, forKey: file.path.lowercased()) {
+                throw Failure.pathCollision(clash, file.path)
+            }
+            tree.append(file)
         }
         return tree
     }
 
-    /// The bundle to publish when `path` is resolved in this Mac's favour: the server's
-    /// set with that one file swapped in.
-    ///
-    /// Not the whole local tree, though the route takes whole bundles. Pushing the tree
-    /// would publish every other unanswered edit along with the one the user actually
-    /// clicked.
+    /// The server's set with one file swapped in — not the whole local tree, though the
+    /// route takes whole bundles, because that would publish every other unanswered edit.
     public static func bundlePublishing(_ path: String, in hooks: [ManagedHook]) -> [HookFile]? {
         guard let mine = hooks.first(where: { $0.path == path })?.local else { return nil }
         var bundle = hooks.compactMap { $0.path == path ? nil : $0.server }
         bundle.append(mine)
         return bundle
+    }
+
+    @discardableResult
+    private static func record(_ baseline: HookBaseline?, local: [HookFile],
+                               server: [HookFile], to file: URL,
+                               at now: Date) -> HookBaseline? {
+        let advanced = HookBaseline.advance(baseline, applied: local, server: server, at: now)
+        guard advanced != baseline else { return baseline }
+        advanced.save(to: file)
+        return advanced
     }
 
     private static func index(_ files: [HookFile]) -> [String: HookFile] {
@@ -245,26 +241,27 @@ public enum HookSync {
         public var failure: String?
     }
 
-    /// Reads the managed directory, sorts it against the server's set, and writes the
-    /// server's copy in — but only when nothing is waiting on the user.
-    ///
-    /// All of it is filesystem work: the caller runs it off the main actor.
+    /// Writes the server's set in, but only when nothing is waiting on the user. All
+    /// filesystem work: the caller runs it off the main actor.
     public static func reconcile(server: [HookFile], serverVersion: String,
                                  root: URL = ManagedHooks.root,
                                  baselineFile: URL = Paths.hookBaselineFile,
                                  now: Date = Date()) -> Reconciliation {
         let baseline = HookBaseline.load(from: baselineFile)
         let local = ManagedHooks.onDisk(in: root)
+        // Classified against the baseline as loaded. Recording first would give a
+        // first-ever run a non-empty baseline to compare against, and every file this Mac
+        // had edited before upgrading would read as a conflict instead of taking the
+        // server's copy.
         let hooks = classify(local: local, server: server, baseline: baseline)
-        guard !hooks.contains(where: \.needsDecision) else { return Reconciliation(hooks: hooks) }
 
-        // Already right: nothing to write, but the agreement still has to be recorded.
-        // A Mac that was in sync at the moment this feature arrived would otherwise never
-        // get a baseline at all, and every edit it ever made would read as corruption.
-        guard ManagedHooks.version(of: local) != serverVersion else {
-            let advanced = HookBaseline.advance(baseline, applied: local, server: server,
-                                                at: now)
-            if advanced != baseline { advanced.save(to: baselineFile) }
+        // A file already matching the server is agreed whether or not something else is
+        // held, and a Mac that was in sync when this feature arrived never applies
+        // anything — without recording here it would never get a baseline at all.
+        guard hooks.contains(where: \.needsDecision) == false,
+              ManagedHooks.version(of: local) != serverVersion else {
+            let advanced = record(baseline, local: local, server: server,
+                                  to: baselineFile, at: now)
             return Reconciliation(hooks: classify(local: local, server: server,
                                                   baseline: advanced))
         }

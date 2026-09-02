@@ -273,7 +273,13 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
 
     @discardableResult
     public func pushHooks(_ files: [HookFile]) async throws -> HookBundle {
-        try await put(["hooks"], HookPushRequest(files: files))
+        let bundle: HookBundle = try await put(["hooks"], HookPushRequest(files: files))
+        // Checked like the GET: the answer is written to disk and recorded as agreed, so
+        // a bundle whose shape has drifted must not get in through the quieter door.
+        guard bundle.apiVersion == ServerAPI.version else {
+            throw ServerClientError.incompatible(bundle.apiVersion)
+        }
+        return bundle
     }
 
     // MARK: - Sessions across machines

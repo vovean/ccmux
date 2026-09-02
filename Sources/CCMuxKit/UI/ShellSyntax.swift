@@ -1,14 +1,9 @@
 import Foundation
 
-/// A very small shell tokenizer, enough to make a hook script readable at a glance.
-///
-/// Hand-rolled because the app has no third-party dependencies and is not about to take
-/// one for four colours. It deliberately does not understand shell — no heredocs, no
-/// arithmetic, no command substitution nesting — it recognises comments, quoted strings,
-/// variables and keywords, and calls everything else plain.
-///
-/// The one property it must hold is that it never changes the text: the runs concatenate
-/// back to the input exactly, so a mis-tokenised line is only ever mis-coloured.
+/// A very small shell tokenizer — hand-rolled, because the app takes no third-party
+/// dependency for four colours. It does not understand shell (no heredocs, no
+/// substitution nesting); it must only never change the text, so the runs concatenate
+/// back to the input exactly and a mis-tokenised line is merely mis-coloured.
 public enum ShellSyntax {
     public enum Kind: Equatable, Sendable {
         case plain

@@ -65,8 +65,17 @@ func (s *HookStore) Get() (HookBundle, error) {
 		return HookBundle{}, s.unreadable
 	}
 	out := s.bundle
-	out.Files = append([]HookFile(nil), s.bundle.Files...)
+	out.Files = copyHookFiles(s.bundle.Files)
 	return out, nil
+}
+
+// Never nil: encoding/json writes a nil slice as null, and the Mac client refuses a
+// bundle whose files are absent rather than read it as "delete everything". An empty set
+// has to arrive as [], or a ccmuxd that has never published a hook wedges every client.
+func copyHookFiles(files []HookFile) []HookFile {
+	out := make([]HookFile, len(files))
+	copy(out, files)
+	return out
 }
 
 // Replace validates and stores a whole bundle. Whole rather than incremental: a hook set
@@ -89,7 +98,7 @@ func (s *HookStore) Replace(files []HookFile, now time.Time) (HookBundle, error)
 	s.unreadable = nil
 	s.persistLocked()
 	out := s.bundle
-	out.Files = append([]HookFile(nil), s.bundle.Files...)
+	out.Files = copyHookFiles(s.bundle.Files)
 	return out, nil
 }
 

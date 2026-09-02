@@ -7,6 +7,7 @@ struct HooksPage: View {
     @ObservedObject var engine: Engine
     @State private var expanded: Set<String> = []
     @State private var note: String?
+    @State private var pendingDeletion: String?
 
     var body: some View {
         ScrollView {
@@ -19,11 +20,7 @@ struct HooksPage: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 if engine.hookStatus.hooks.isEmpty {
-                    EmptyHint(title: "No managed hooks",
-                              detail: engine.settings.server == nil
-                                  ? "Connect an account server in Settings and the hooks it "
-                                      + "holds appear here."
-                                  : "The server is not publishing any hook scripts yet.")
+                    EmptyHint(title: "No managed hooks", detail: emptyDetail)
                 } else {
                     ForEach(engine.hookStatus.hooks) { hook in
                         row(hook)
@@ -37,6 +34,17 @@ struct HooksPage: View {
         .task {
             await engine.syncHooks()
             await engine.loadHooksFromDisk()
+        }
+        .confirmationDialog("Delete this hook?",
+                            isPresented: Binding(get: { pendingDeletion != nil },
+                                                 set: { if !$0 { pendingDeletion = nil } }),
+                            presenting: pendingDeletion) { path in
+            Button("Delete \((path as NSString).lastPathComponent)", role: .destructive) {
+                Task { note = await engine.resolveHook(path, .takeServer) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { path in
+            Text("\(path) is not on the server, so this is the only copy.")
         }
     }
 
@@ -82,6 +90,16 @@ struct HooksPage: View {
                 }
             }
         }
+    }
+
+    private var emptyDetail: String {
+        if engine.settings.server == nil {
+            return "Connect an account server in Settings and the hooks it holds appear here."
+        }
+        // Only a server that answered can be said to be publishing nothing.
+        return engine.hookStatus.checkedAt == nil
+            ? "The server has not answered yet."
+            : "The server is not publishing any hook scripts yet."
     }
 
     private var summaryText: String {
@@ -161,8 +179,12 @@ struct HooksPage: View {
         }
         .controlSize(.small)
         .help("Publish this Mac's copy to the server, leaving every other hook alone")
-        Button(hook.server == nil ? "Delete" : "Download") {
-            Task { note = await engine.resolveHook(hook.path, .takeServer) }
+        Button(hook.server == nil ? "Delete…" : "Download") {
+            // A file the server does not have exists nowhere else — no bundle to pull it
+            // back from, and nothing ccmux keeps. One click beside Upload is too cheap.
+            if hook.server == nil { pendingDeletion = hook.path } else {
+                Task { note = await engine.resolveHook(hook.path, .takeServer) }
+            }
         }
         .controlSize(.small)
         .help(hook.server == nil
@@ -170,11 +192,15 @@ struct HooksPage: View {
               : "Overwrite this Mac's copy with the server's")
     }
 
+    /// Past this, laying the text out costs more than anyone gains from reading it in a
+    /// 320-point box — and nothing bounds the size of a file in the managed directory.
+    private static let displayLimit = 64_000
+
     @ViewBuilder
     private func script(_ hook: ManagedHook) -> some View {
         if let body = hook.body, !body.isEmpty {
             ScrollView(.horizontal) {
-                highlighted(body)
+                highlighted(shown(body))
                     .font(.system(size: 11, design: .monospaced))
                     .textSelection(.enabled)
                     .padding(8)
@@ -190,12 +216,14 @@ struct HooksPage: View {
         }
     }
 
+    private func shown(_ source: String) -> String {
+        guard source.utf8.count > Self.displayLimit else { return source }
+        return String(source.prefix(Self.displayLimit))
+            + "\n\n… truncated — open it in VS Code to read the rest."
+    }
+
     private func highlighted(_ source: String) -> Text {
-        // Each run becomes its own Text, and concatenating tens of thousands of them
-        // blocks the main thread for seconds. Nothing enforces a size on a published
-        // script, and a hook that large is not being read in a 320-point box anyway.
-        guard source.utf8.count <= 64_000 else { return Text(source) }
-        return ShellSyntax.highlight(source).reduce(Text("")) { text, run in
+        ShellSyntax.highlight(source).reduce(Text("")) { text, run in
             text + Text(run.text).foregroundColor(colour(run.kind))
         }
     }

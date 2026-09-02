@@ -163,7 +163,7 @@ public extension Engine {
         if serverSupportsHooks == nil, let health = try? await client.health() {
             if let features = health.features {
                 serverSupportsHooks = features.contains(ServerAPI.hooksFeature)
-                if serverSupportsHooks == false { return }
+                if serverSupportsHooks == false { clearHookState(); return }
             }
         }
 
@@ -178,8 +178,12 @@ public extension Engine {
             // Cleared here too. Latching only on the success path left the flag stuck
             // after a server downgrade, and the next genuine failure was never logged.
             clearHookSyncFailure()
+            clearHookState()
             return
         } catch {
+            // The Hooks page starts one of these and SwiftUI cancels it on navigation
+            // away, which is not an outage and must not latch one.
+            guard !Task.isCancelled, !Self.isCancellation(error) else { return }
             if !hookSyncFailing {
                 hookSyncFailing = true
                 Log.info("hook sync failed: \(error.localizedDescription)")
@@ -190,13 +194,9 @@ public extension Engine {
         await reconcileHooks(with: bundle)
     }
 
-    /// Sorts the managed directory against the server's set and writes the server's copy
-    /// in, unless something on this Mac is waiting on the user.
-    ///
     /// Off the main actor: this walks the directory, reads and hashes every hook, then
-    /// writes and swaps. Engine is @MainActor and this runs from a repeating timer, so
-    /// in-line it would stall the UI on every tick — unboundedly on a slow or network
-    /// home directory.
+    /// writes and swaps. In-line it would stall the UI on every tick — unboundedly on a
+    /// network home directory.
     private func reconcileHooks(with bundle: HookBundle) async {
         let files = bundle.files
         let version = bundle.version
@@ -229,31 +229,50 @@ public extension Engine {
         if !hookStatus.frozen { loggedHookFreeze = false }
     }
 
-    /// Settles one file the sync stopped on, in whichever direction the user picked.
-    ///
-    /// Both directions are whole-bundle operations, because both ends only deal in whole
-    /// bundles — but each is built so that answering one question leaves every other
-    /// unanswered file exactly as it was.
+    /// Settles one file the sync stopped on. Both directions are whole-bundle
+    /// operations, since both ends only deal in whole bundles, but each is built so that
+    /// answering one question leaves every other unanswered file as it was.
     @discardableResult
     func resolveHook(_ path: String, _ resolution: HookResolution) async -> String? {
         guard let client = serverClient else { return "No account server is connected." }
-        let hooks = hookStatus.hooks
-        guard let hook = hooks.first(where: { $0.path == path }), hook.needsDecision else {
-            return nil
-        }
-        // Not an error worth showing: the tick is mid-write and the button will be there
-        // a second later.
-        guard !syncingHooks else { return "Syncing right now — try again in a moment." }
         // The same latch the tick takes. Both write the whole tree in one swap, so two of
         // them in flight would each stage from a directory the other is about to replace,
         // and the baseline would end up describing neither.
+        guard !syncingHooks else { return "Syncing right now — try again in a moment." }
         syncingHooks = true
         defer { syncingHooks = false }
 
+        // Both sides are re-read here rather than taken from the page's snapshot, which
+        // can be a minute old. The snapshot's copy of an *unrelated* file would be written
+        // back over an edit made since — through the button next to this one — and
+        // recorded as agreed; and its copy of the server's set would drop a hook another
+        // Mac published in the meantime, on a route that replaces the whole bundle.
+        let fresh: HookBundle
+        do {
+            fresh = try await client.hooks()
+        } catch {
+            return "Could not read the server's hooks: \(error.localizedDescription)"
+        }
+        let hooks = await Task.detached(priority: .utility) {
+            HookSync.classify(local: ManagedHooks.onDisk(), server: fresh.files,
+                              baseline: HookBaseline.load())
+        }.value
+        hookStatus = HookStatus(hooks: hooks, checkedAt: Date(),
+                                serverVersion: fresh.version)
+        // Settled by the refresh itself — the other end already has what this would send.
+        guard let hook = hooks.first(where: { $0.path == path }), hook.needsDecision else {
+            return nil
+        }
+
         switch resolution {
         case .takeServer:
-            let tree = HookSync.treeTakingServer(path, in: hooks)
-            let server = hooks.compactMap(\.server)
+            let tree: [HookFile]
+            do {
+                tree = try HookSync.treeTakingServer(path, in: hooks)
+            } catch {
+                return error.localizedDescription
+            }
+            let server = fresh.files
             let outcome = await Task.detached(priority: .utility) { () -> Result<[ManagedHook], Error> in
                 do { return .success(try HookSync.install(tree, server: server).hooks) }
                 catch { return .failure(error) }
@@ -289,7 +308,7 @@ public extension Engine {
     }
 
     /// Lists the managed directory when the server has never been reached, so the page
-    /// has something to show offline instead of looking empty.
+    /// is not blank offline.
     func loadHooksFromDisk() async {
         guard hookStatus.hooks.isEmpty, hookStatus.checkedAt == nil else { return }
         let hooks = await Task.detached(priority: .utility) {
@@ -300,6 +319,10 @@ public extension Engine {
         hookStatus.hooks = hooks
     }
 
+    nonisolated static func isCancellation(_ error: Error) -> Bool {
+        error is CancellationError || (error as? URLError)?.code == .cancelled
+    }
+
     private func clearHookSyncFailure() {
         guard hookSyncFailing else { return }
         hookSyncFailing = false
@@ -308,7 +331,14 @@ public extension Engine {
 
     func setSyncManagedHooks(_ on: Bool) {
         updateSettings { $0.syncManagedHooks = on }
-        if on { Task { await syncHooks() } }
+        // Cleared on the way off: nothing recomputes it once the tick is disabled, so a
+        // freeze would keep the attention badge lit with no way to answer it.
+        if on { Task { await syncHooks() } } else { clearHookState() }
+    }
+
+    func clearHookState() {
+        loggedHookFreeze = false
+        if hookStatus != HookStatus() { hookStatus = HookStatus() }
     }
 
     /// Records which address is answering now, so the next launch starts there.
@@ -380,10 +410,9 @@ public extension Engine {
         if serverSupportsHooks != nil { serverSupportsHooks = nil }
         hookSyncFailing = false
         hookApplyFailing = false
-        loggedHookFreeze = false
         // The states are all relative to a server. Keeping them would have the page offer
         // to upload to a server this Mac is no longer connected to.
-        hookStatus = HookStatus()
+        clearHookState()
         banner = stranded.isEmpty
             ? Banner(level: .info, text: "Disconnected from the account server.")
             : Banner(level: .warning,

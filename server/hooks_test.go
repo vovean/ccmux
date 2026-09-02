@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -277,5 +278,40 @@ func TestTheBundleTimestampHasNoFractionalSeconds(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"updatedAt":"2026-09-02T10:53:05Z"`) {
 		t.Fatalf("timestamp is not second-precision RFC3339: %s", raw)
+	}
+}
+
+// A ccmuxd that has never published a hook must still answer with a files array. Go
+// marshals a nil slice as null, and the Mac client refuses a bundle whose files are
+// absent rather than read it as an instruction to delete every hook — so a fresh server
+// used to wedge every client's sync with a decode error it could never get past.
+func TestEmptyBundleMarshalsFilesAsAnArray(t *testing.T) {
+	store := NewHookStore(filepath.Join(t.TempDir(), "hooks.json"))
+	bundle, err := store.Get()
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	encoded, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !bytes.Contains(encoded, []byte(`"files":[]`)) {
+		t.Fatalf("empty bundle did not carry an empty array: %s", encoded)
+	}
+	if bundle.Version == "" {
+		t.Fatal("empty bundle carried no version")
+	}
+
+	// And the same after publishing an empty set deliberately.
+	replaced, err := store.Replace(nil, time.Now())
+	if err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	encoded, err = json.Marshal(replaced)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !bytes.Contains(encoded, []byte(`"files":[]`)) {
+		t.Fatalf("withdrawing every hook did not carry an empty array: %s", encoded)
 	}
 }

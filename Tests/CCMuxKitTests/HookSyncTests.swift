@@ -234,7 +234,7 @@ struct HookSyncTests {
                                       baseline: HookBaseline.load(from: baselineFile))
         #expect(hooks.allSatisfy { $0.state == .editedHere })
 
-        let tree = HookSync.treeTakingServer("a.sh", in: hooks)
+        let tree = try HookSync.treeTakingServer("a.sh", in: hooks)
         let after = try HookSync.install(tree, server: published, root: root,
                                          baselineFile: baselineFile)
         #expect(try String(contentsOf: root.appendingPathComponent("a.sh"),
@@ -303,6 +303,141 @@ struct HookSyncTests {
         #expect(result.hooks.allSatisfy { $0.state == .inSync })
         #expect(try String(contentsOf: root.appendingPathComponent("b.sh"),
                            encoding: .utf8) == "b2")
+    }
+
+    // MARK: - Review fixes
+
+    /// A stray with a name the bundle rules refuse can never be published, so treating it
+    /// as an edit held the whole sync on a file no button could settle.
+    @Test func aFileWithAnUnpublishableNameDoesNotHoldTheSync() throws {
+        let (root, baselineFile) = temp()
+        defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
+        let server = [file("a.sh", "a1")]
+        _ = try HookSync.install(server, server: server, root: root,
+                                 baselineFile: baselineFile)
+        // What Finder's Duplicate produces.
+        try "stray".write(to: root.appendingPathComponent("a copy.sh"), atomically: true,
+                          encoding: .utf8)
+
+        let result = HookSync.reconcile(server: server,
+                                        serverVersion: ManagedHooks.version(of: server),
+                                        root: root, baselineFile: baselineFile)
+        #expect(result.hooks.map(\.path) == ["a.sh"])
+        #expect(!result.hooks.contains { $0.needsDecision })
+    }
+
+    /// APFS folds case, so staging both would collapse them into one entry and lose the
+    /// held local file without a word.
+    @Test func aCaseCollisionRefusesTheResolutionRatherThanLosingAFile() throws {
+        let server = [file("A.sh", "theirs"), file("c.sh", "c")]
+        let hooks = HookSync.classify(local: [file("a.sh", "mine"), file("c.sh", "c")],
+                                      server: server,
+                                      baseline: baseline([file("a.sh", "was"),
+                                                          file("c.sh", "c")]))
+        #expect(hooks.first { $0.path == "a.sh" }?.state == .conflict)
+        #expect(throws: HookSync.Failure.pathCollision("A.sh", "a.sh")) {
+            try HookSync.treeTakingServer("c.sh", in: hooks)
+        }
+        // Settling the collided file itself is the way out, and it must still work.
+        #expect(try HookSync.treeTakingServer("a.sh", in: hooks).map(\.path).sorted()
+            == ["A.sh", "c.sh"])
+    }
+
+    /// A file that already matches the server is agreed no matter what else is held.
+    /// Skipping the record turned the next ordinary edit of it into a phantom conflict
+    /// about a server change that never happened.
+    @Test func agreementIsRecordedForSettledFilesEvenWhileAnotherIsHeld() throws {
+        let (root, baselineFile) = temp()
+        defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
+        let first = [file("a.sh", "a1"), file("b.sh", "b1")]
+        _ = try HookSync.install(first, server: first, root: root,
+                                 baselineFile: baselineFile)
+        // a.sh is published anew from this Mac while b.sh stays held.
+        try "a2".write(to: root.appendingPathComponent("a.sh"), atomically: true,
+                       encoding: .utf8)
+        try "mine".write(to: root.appendingPathComponent("b.sh"), atomically: true,
+                         encoding: .utf8)
+        let afterPush = [file("a.sh", "a2"), file("b.sh", "b1")]
+
+        _ = HookSync.reconcile(server: afterPush,
+                               serverVersion: ManagedHooks.version(of: afterPush),
+                               root: root, baselineFile: baselineFile)
+        #expect(HookBaseline.load(from: baselineFile)?.files["a.sh"]?.digest
+            == ManagedHooks.digest(of: afterPush[0]))
+
+        // So editing it again is an edit, not a conflict.
+        try "a3".write(to: root.appendingPathComponent("a.sh"), atomically: true,
+                       encoding: .utf8)
+        let hooks = HookSync.reconcile(server: afterPush,
+                                       serverVersion: ManagedHooks.version(of: afterPush),
+                                       root: root, baselineFile: baselineFile).hooks
+        #expect(hooks.first { $0.path == "a.sh" }?.state == .editedHere)
+    }
+
+    /// The record must not run before the classification on a first-ever sync: it would
+    /// hand the bootstrap a non-empty baseline, and every file edited before the upgrade
+    /// would read as a conflict instead of taking the server's copy.
+    @Test func recordingAgreementDoesNotBreakTheFirstEverSync() throws {
+        let (root, baselineFile) = temp()
+        defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
+        let server = [file("a.sh", "theirs"), file("b.sh", "same")]
+        try ManagedHooks.apply(HookBundle(version: "x",
+                                          files: [file("a.sh", "mine"),
+                                                  file("b.sh", "same")]), into: root)
+        #expect(HookBaseline.load(from: baselineFile) == nil)
+
+        let result = HookSync.reconcile(server: server,
+                                        serverVersion: ManagedHooks.version(of: server),
+                                        root: root, baselineFile: baselineFile)
+        #expect(result.applied)
+        #expect(result.hooks.allSatisfy { $0.state == .inSync })
+        #expect(try String(contentsOf: root.appendingPathComponent("a.sh"),
+                           encoding: .utf8) == "theirs")
+    }
+
+    /// Pins the pattern `resolveHook` has to follow. A tree built from the page's
+    /// snapshot writes that snapshot's copy of every *other* retained file, so an edit
+    /// made since — through the page's own open-in-VS-Code button — is silently reverted
+    /// and then recorded as agreed. Resolving has to re-read disk first.
+    @Test func aTreeMustBeBuiltFromDiskNowRatherThanTheLastSnapshot() throws {
+        let (root, baselineFile) = temp()
+        defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
+        let server = [file("a.sh", "a1"), file("b.sh", "b1")]
+        _ = try HookSync.install(server, server: server, root: root,
+                                 baselineFile: baselineFile)
+        try "mine-a".write(to: root.appendingPathComponent("a.sh"), atomically: true,
+                           encoding: .utf8)
+
+        let snapshot = HookSync.classify(local: ManagedHooks.onDisk(in: root),
+                                         server: server,
+                                         baseline: HookBaseline.load(from: baselineFile))
+        // The user then edits the other file through the page.
+        try "mine-b".write(to: root.appendingPathComponent("b.sh"), atomically: true,
+                           encoding: .utf8)
+
+        let stale = try HookSync.treeTakingServer("a.sh", in: snapshot)
+        #expect(stale.first { $0.path == "b.sh" }?.content == "b1")
+
+        let fresh = HookSync.classify(local: ManagedHooks.onDisk(in: root), server: server,
+                                      baseline: HookBaseline.load(from: baselineFile))
+        let kept = try HookSync.treeTakingServer("a.sh", in: fresh)
+        #expect(kept.first { $0.path == "b.sh" }?.content == "mine-b")
+        #expect(kept.first { $0.path == "a.sh" }?.content == "a1")
+    }
+
+    /// A server holding no hooks is a normal state, and its answer must still decode —
+    /// a fresh ccmuxd used to send `"files": null`, which the strict decode refuses, so
+    /// every Mac's sync failed with an error it could never get past.
+    @Test func aBundleWithNoFilesStillDecodes() throws {
+        let empty = Data(#"{"apiVersion":1,"version":"abc","files":[]}"#.utf8)
+        #expect(try JSONStore.decoder.decode(HookBundle.self, from: empty).files.isEmpty)
+        // Absent or null still has to fail: it decides which executable files get deleted.
+        for bad in [#"{"apiVersion":1,"version":"abc"}"#,
+                    #"{"apiVersion":1,"version":"abc","files":null}"#] {
+            #expect(throws: (any Error).self) {
+                try JSONStore.decoder.decode(HookBundle.self, from: Data(bad.utf8))
+            }
+        }
     }
 
     @Test func theBaselineSurvivesARoundTrip() {
