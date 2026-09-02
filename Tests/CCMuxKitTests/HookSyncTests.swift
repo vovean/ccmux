@@ -474,6 +474,25 @@ struct ShellSyntaxTests {
         }
     }
 
+    /// The same property over pseudo-random soup, since the shapes that break a hand-
+    /// rolled scanner are the ones nobody thinks to write down: a quote opened at the end
+    /// of the input, a backslash as the last character, `${` never closed.
+    @Test func theRunsReassembleForGeneratedInputToo() {
+        // Fixed seed: a losslessness failure has to be reproducible, not a one-off report.
+        var seed: UInt64 = 0x9E37_79B9_7F4A_7C15
+        func next() -> UInt64 {
+            seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17
+            return seed
+        }
+        let alphabet = Array("abc #'\"\\$}{;|&()\n\t 1_éд")
+        for _ in 0..<400 {
+            let length = Int(next() % 40)
+            let source = String((0..<length).map { _ in alphabet[Int(next() % UInt64(alphabet.count))] })
+            #expect(ShellSyntax.highlight(source).map(\.text).joined() == source,
+                    "mangled: \(source.debugDescription)")
+        }
+    }
+
     @Test func theObviousTokensAreRecognised() {
         let runs = ShellSyntax.highlight("if true; then echo \"$HOME\"; fi # done\n")
         #expect(runs.filter { $0.kind == .keyword }.map(\.text) == ["if", "then", "echo", "fi"])
