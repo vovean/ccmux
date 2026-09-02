@@ -77,4 +77,36 @@ struct PollPolicyTests {
             #expect(jittered >= 270 && jittered <= 330)
         }
     }
+    /// A proxied response refreshes the 5-hour and weekly windows from headers but never
+    /// the per-model ones. Gating the delegated poll on `fetchedAt` meant an account with
+    /// a live session was never re-read, and its Fable window sat at whatever it last
+    /// showed — 0% through a whole Fable session.
+    @Test func aBusySessionDoesNotSuppressTheDelegatedPoll() {
+        let now = Date()
+        let headerRefreshed = UsageSnapshot(
+            windows: [UsageWindow(kind: .weeklyScoped, label: "Weekly Fable",
+                                  percent: 0, modelName: "Fable")],
+            // What every proxied response does, seconds ago.
+            fetchedAt: now.addingTimeInterval(-5),
+            // What the endpoint last actually said, well past the floor.
+            lastEndpointFetchAt: now.addingTimeInterval(-PollPolicy.serveTTL - 60))
+        #expect(PollPolicy.shouldRefreshFromServer(headerRefreshed, now: now))
+    }
+
+    @Test func afreshEndpointReadIsServedWithoutRefetching() {
+        let now = Date()
+        let fresh = UsageSnapshot(windows: [], fetchedAt: now.addingTimeInterval(-600),
+                                  lastEndpointFetchAt: now.addingTimeInterval(-30))
+        #expect(!PollPolicy.shouldRefreshFromServer(fresh, now: now))
+    }
+
+    /// Nothing read yet, and a snapshot built only from headers, both have to fetch —
+    /// otherwise a per-model window would never arrive at all.
+    @Test func anAccountWithNoEndpointReadYetIsAlwaysFetched() {
+        let now = Date()
+        #expect(PollPolicy.shouldRefreshFromServer(nil, now: now))
+        #expect(PollPolicy.shouldRefreshFromServer(
+            UsageSnapshot(windows: [], fetchedAt: now), now: now))
+    }
+
 }

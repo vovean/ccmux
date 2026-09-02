@@ -713,8 +713,8 @@ public extension Engine {
             // The housekeeping tick is every 20s, which is far more often than these
             // numbers move. `serveTTL` is the same floor the app already applies to a
             // locally held snapshot.
-            if let fetched = store.usage(for: accountID)?.fetchedAt,
-               now.timeIntervalSince(fetched) < PollPolicy.serveTTL { continue }
+            guard PollPolicy.shouldRefreshFromServer(store.usage(for: accountID),
+                                                     now: now) else { continue }
             guard let remote = try? await client.usage(for: accountID),
                   !remote.windows.isEmpty else { continue }
             // Dated by the server's own age, not by when it arrived here. Stamping it now
