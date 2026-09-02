@@ -315,3 +315,93 @@ func TestEmptyBundleMarshalsFilesAsAnArray(t *testing.T) {
 		t.Fatalf("withdrawing every hook did not carry an empty array: %s", encoded)
 	}
 }
+
+// Absent means active: a bundle published before the flag existed must keep its scripts
+// registered rather than silently unregister them on every Mac at once.
+func TestAnAbsentActiveFlagMeansRegistered(t *testing.T) {
+	store := NewHookStore(filepath.Join(t.TempDir(), "hooks.json"))
+	if _, err := store.Replace([]HookFile{{Path: "a.sh", Content: "x"}}, time.Now()); err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	bundle, _ := store.Get()
+	if !bundle.Files[0].IsActive() {
+		t.Fatal("a file with no active flag read as inactive")
+	}
+	if bytes.Contains(mustJSON(t, bundle), []byte(`"active"`)) {
+		t.Fatalf("an untouched file should not carry the key: %s", mustJSON(t, bundle))
+	}
+}
+
+func TestActivationSurvivesARestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	store := NewHookStore(path)
+	if _, err := store.Replace([]HookFile{{Path: "a.sh", Content: "x"},
+		{Path: "b.sh", Content: "y"}}, time.Now()); err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	if _, err := store.SetActive("a.sh", false, time.Now()); err != nil {
+		t.Fatalf("SetActive: %v", err)
+	}
+	reopened := NewHookStore(path)
+	bundle, err := reopened.Get()
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	for _, f := range bundle.Files {
+		want := f.Path != "a.sh"
+		if f.IsActive() != want {
+			t.Fatalf("%s active=%v, want %v", f.Path, f.IsActive(), want)
+		}
+	}
+}
+
+// Publishing carries the flag through: a re-push of the same set must not silently
+// re-register something the user turned off.
+func TestReplacePreservesTheActiveFlag(t *testing.T) {
+	store := NewHookStore(filepath.Join(t.TempDir(), "hooks.json"))
+	off := false
+	if _, err := store.Replace([]HookFile{{Path: "a.sh", Content: "x", Active: &off}}, time.Now()); err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	bundle, _ := store.Get()
+	if bundle.Files[0].IsActive() {
+		t.Fatal("an explicitly inactive file came back active")
+	}
+}
+
+// The flag is not part of the content hash: that hash is compared against what is on
+// disk, and activation is not a property of the file. If it counted, every Mac would
+// rewrite its whole tree on a toggle and never converge.
+func TestTogglingDoesNotChangeTheContentVersion(t *testing.T) {
+	store := NewHookStore(filepath.Join(t.TempDir(), "hooks.json"))
+	first, err := store.Replace([]HookFile{{Path: "a.sh", Content: "x"}}, time.Now())
+	if err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	after, err := store.SetActive("a.sh", false, time.Now())
+	if err != nil {
+		t.Fatalf("SetActive: %v", err)
+	}
+	if first.Version != after.Version {
+		t.Fatalf("version moved on a toggle: %s -> %s", first.Version, after.Version)
+	}
+}
+
+func TestActivatingSomethingThatIsNotThereIsRefused(t *testing.T) {
+	store := NewHookStore(filepath.Join(t.TempDir(), "hooks.json"))
+	if _, err := store.SetActive("ghost.sh", true, time.Now()); err == nil {
+		t.Fatal("activating a missing hook was accepted")
+	}
+	if _, err := store.SetActive("../escape.sh", true, time.Now()); err == nil {
+		t.Fatal("a traversal path was accepted")
+	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	return b
+}

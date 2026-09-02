@@ -140,9 +140,21 @@ iTerm; because ccmux is ad-hoc signed it may ask again after an upgrade.
 its script, and when its content last arrived. Clicking a path opens it in VS Code.
 
 ccmux owns `~/.claude/hooks/managed` outright, so a hook withdrawn on the server stops
-running everywhere rather than lingering on whichever Mac had it. It writes nothing else
-— in particular never `settings.json`, so a synced hook only runs once you point a hook
-at it yourself.
+running everywhere rather than lingering on whichever Mac had it.
+
+Syncing writes those files and nothing else, so a synced script sits there inert. Each
+hook also has an **Active** switch, which is the server's answer and reaches every Mac.
+Acting on it is a separate, opt-in setting: **Register active hooks with Claude Code**,
+off by default. With it on, ccmux keeps the `hooks` section of `~/.claude/settings.json`
+equal to the active set — which does mean a script published centrally starts running
+here on its own, which is why it is a switch you have to find and turn on. It only ever
+touches entries pointing inside `hooks/managed`; every other hook and key in that file is
+copied through untouched, and turning it off removes them again. Claude Code reads hooks
+at startup, so any of this reaches new sessions only.
+
+An event directory is what makes a script registerable: `UserPromptSubmit/fable.sh`
+registers under `UserPromptSubmit`. A script at the top of the tree is a helper and has no
+Active switch.
 
 Editing a script is how you change one. When the server moves and this Mac has not, the
 new copy is written on the next tick with nothing to do. When this Mac has moved, the

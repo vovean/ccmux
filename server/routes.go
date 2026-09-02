@@ -59,6 +59,22 @@ func NewMux(registry *Registry, machines *MachineStore, hooks *HookStore,
 		writeJSON(w, http.StatusOK, bundle)
 	}))
 
+	// Registration, not content: flipping this is what decides whether a Mac points
+	// Claude Code at the script, so it is separate from publishing one.
+	mux.Handle("POST "+apiPrefix+"/hooks/activation", guard(func(w http.ResponseWriter, r *http.Request) {
+		var body HookActivationRequest
+		if !decodeBody(w, r, &body) {
+			return
+		}
+		bundle, err := hooks.SetActive(body.Path, body.Active, time.Now())
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		logInfo("hook %s %s", body.Path, map[bool]string{true: "activated", false: "deactivated"}[body.Active])
+		writeJSON(w, http.StatusOK, bundle)
+	}))
+
 	mux.Handle("GET "+apiPrefix+"/accounts", guard(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, AccountListResponse{
 			APIVersion: apiVersion,

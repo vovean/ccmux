@@ -271,6 +271,24 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
         }
     }
 
+    /// Flips one script's registration. A dedicated route because activation is the
+    /// operation that repeats, and a whole-bundle rewrite would drop whatever another Mac
+    /// published in between.
+    @discardableResult
+    public func setHookActive(_ path: String, _ active: Bool) async throws -> HookBundle {
+        let bundle: HookBundle
+        do {
+            bundle = try await post(["hooks", "activation"],
+                                    HookActivationRequest(path: path, active: active))
+        } catch {
+            throw Self.isMissingRoute(error) ? ServerClientError.unsupported : error
+        }
+        guard bundle.apiVersion == ServerAPI.version else {
+            throw ServerClientError.incompatible(bundle.apiVersion)
+        }
+        return bundle
+    }
+
     @discardableResult
     public func pushHooks(_ files: [HookFile]) async throws -> HookBundle {
         let bundle: HookBundle = try await put(["hooks"], HookPushRequest(files: files))

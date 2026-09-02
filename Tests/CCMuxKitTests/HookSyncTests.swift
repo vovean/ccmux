@@ -447,6 +447,43 @@ struct HookSyncTests {
         }
     }
 
+    /// Activation is the server's answer, and a copy read off disk has no idea about it.
+    /// Publishing an edit must not quietly re-register a script the user turned off.
+    @Test func publishingAnEditKeepsTheServersActivation() {
+        let server = [HookFile(path: "a.sh", content: "a1", executable: true, active: false),
+                      HookFile(path: "b.sh", content: "b1", executable: true)]
+        let hooks = HookSync.classify(local: [file("a.sh", "mine"), file("b.sh", "b1")],
+                                      server: server, baseline: baseline(server))
+        let bundle = HookSync.bundlePublishing("a.sh", in: hooks)
+        #expect(bundle?.first { $0.path == "a.sh" }?.active == false)
+        #expect(bundle?.first { $0.path == "a.sh" }?.content == "mine")
+        #expect(bundle?.first { $0.path == "b.sh" }?.active == true)
+    }
+
+    /// Absent means active, so a bundle published before the flag existed does not
+    /// unregister itself on every Mac at once. The key is only written when it is false.
+    @Test func theActiveFlagDefaultsOnAndIsOnlyWrittenWhenOff() throws {
+        let absent = Data(#"{"path":"a.sh","content":"x","executable":true}"#.utf8)
+        #expect(try JSONStore.decoder.decode(HookFile.self, from: absent).active)
+
+        let on = try JSONStore.encoder.encode(HookFile(path: "a.sh", content: "x",
+                                                       executable: true, active: true))
+        #expect(!String(decoding: on, as: UTF8.self).contains("active"))
+        let off = try JSONStore.encoder.encode(HookFile(path: "a.sh", content: "x",
+                                                        executable: true, active: false))
+        #expect(String(decoding: off, as: UTF8.self).contains("\"active\" : false"))
+    }
+
+    /// The flag must stay out of the content hash: that hash is compared against what is
+    /// on disk, where activation does not exist. If it counted, a toggle would make every
+    /// Mac rewrite its whole tree and never agree with the server again.
+    @Test func activationDoesNotChangeTheContentVersion() {
+        let on = [HookFile(path: "a.sh", content: "x", executable: true, active: true)]
+        let off = [HookFile(path: "a.sh", content: "x", executable: true, active: false)]
+        #expect(ManagedHooks.version(of: on) == ManagedHooks.version(of: off))
+        #expect(ManagedHooks.digest(of: on[0]) == ManagedHooks.digest(of: off[0]))
+    }
+
     @Test func theBaselineSurvivesARoundTrip() {
         let (_, baselineFile) = temp()
         defer { try? FileManager.default.removeItem(

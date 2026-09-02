@@ -28,8 +28,9 @@ const (
 // says why, instead of showing errors from routes that answer 404.
 const featureSessions = "sessions"
 const featureHooks = "hooks"
+const featureHookActivation = "hook-activation"
 
-var serverFeatures = []string{featureSessions, featureHooks}
+var serverFeatures = []string{featureSessions, featureHooks, featureHookActivation}
 
 // Time marshals as RFC 3339 with second precision.
 //
@@ -262,7 +263,16 @@ type HookFile struct {
 	Path       string `json:"path"`
 	Content    string `json:"content"`
 	Executable bool   `json:"executable"`
+	// Whether a Mac should register this script with Claude Code, as opposed to merely
+	// holding it on disk. A pointer so a bundle written before this field existed keeps
+	// its hooks registered instead of silently unregistering them on every Mac; absent
+	// means active. Never part of hookVersion — that hash is compared against what is on
+	// disk, and activation is not a property of the file.
+	Active *bool `json:"active,omitempty"`
 }
+
+// IsActive reports whether this script should be registered. Absent means yes.
+func (f HookFile) IsActive() bool { return f.Active == nil || *f.Active }
 
 // The whole hook set, with a content hash so a client can tell in one field whether it
 // has anything to do.
@@ -275,4 +285,14 @@ type HookBundle struct {
 
 type HookPushRequest struct {
 	Files []HookFile `json:"files"`
+}
+
+// HookActivationRequest flips one script's registration.
+//
+// A dedicated route rather than a whole-bundle PUT: activation is the operation a user
+// repeats, and a read-modify-write of the whole bundle would drop a script another Mac
+// published in between. The server flips the flag under its own lock.
+type HookActivationRequest struct {
+	Path   string `json:"path"`
+	Active bool   `json:"active"`
 }

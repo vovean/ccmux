@@ -235,8 +235,16 @@ enum CLI {
                     for path in result.removed { print("  removed \(path)") }
                 case "push":
                     guard arguments.count > 1 else { failure = "push needs a directory"; return }
-                    let files = try collectHookFiles(from: arguments[1])
+                    var files = try collectHookFiles(from: arguments[1])
                     guard !files.isEmpty else { failure = "no files under \(arguments[1])"; return }
+                    // Activation lives on the server and not on disk, so a directory push
+                    // would re-register everything the user had turned off.
+                    let current = (try? await client.hooks())?.files ?? []
+                    let wasActive = Dictionary(current.map { ($0.path, $0.active) },
+                                               uniquingKeysWith: { a, _ in a })
+                    for i in files.indices {
+                        files[i].active = wasActive[files[i].path] ?? true
+                    }
                     let bundle = try await client.pushHooks(files)
                     print("published \(bundle.version.prefix(12)): \(bundle.files.count) file(s)")
                     for file in bundle.files { print("  \(file.executable ? "x" : "-") \(file.path)") }

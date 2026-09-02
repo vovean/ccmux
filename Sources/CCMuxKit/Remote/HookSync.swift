@@ -219,7 +219,11 @@ public enum HookSync {
     /// The server's set with one file swapped in — not the whole local tree, though the
     /// route takes whole bundles, because that would publish every other unanswered edit.
     public static func bundlePublishing(_ path: String, in hooks: [ManagedHook]) -> [HookFile]? {
-        guard let mine = hooks.first(where: { $0.path == path })?.local else { return nil }
+        guard let hook = hooks.first(where: { $0.path == path }), var mine = hook.local
+        else { return nil }
+        // Activation is the server's, not the file's: a copy read off disk defaults to
+        // active, so publishing an edit would quietly re-register something turned off.
+        mine.active = hook.server?.active ?? true
         var bundle = hooks.compactMap { $0.path == path ? nil : $0.server }
         bundle.append(mine)
         return bundle

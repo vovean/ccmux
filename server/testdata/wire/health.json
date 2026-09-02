@@ -4,7 +4,8 @@
   "uptimeSeconds": 1234.5,
   "features": [
     "sessions",
-    "hooks"
+    "hooks",
+    "hook-activation"
   ],
   "machines": 2
 }

@@ -105,10 +105,12 @@ public final class Engine: ObservableObject {
     /// Logged once per freeze rather than every tick, for the same reason as the sync
     /// failures above.
     var loggedHookFreeze = false
+    var hookRegisterFailing = false
     /// The managed hook set as the Hooks page sees it.
     @Published public internal(set) var hookStatus = HookStatus()
     /// Nil until asked, false on a ccmuxd that predates the hook routes.
     @Published public internal(set) var serverSupportsHooks: Bool?
+    @Published public internal(set) var serverSupportsHookActivation = false
     private var controlHandler: ControlHandler?
     private var controlServer: ControlServer?
     private var timers: [Timer] = []

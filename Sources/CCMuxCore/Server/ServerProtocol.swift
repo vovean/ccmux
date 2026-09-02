@@ -20,6 +20,7 @@ public enum ServerAPI {
     /// whose new routes answer 404.
     public static let sessionsFeature = "sessions"
     public static let hooksFeature = "hooks"
+    public static let hookActivationFeature = "hook-activation"
 }
 
 /// An account as the server describes it. Deliberately not `Account`: the client's record
@@ -344,14 +345,19 @@ public struct HookFile: Codable, Equatable, Sendable {
     public var path: String
     public var content: String
     public var executable: Bool
+    /// Whether a Mac should point Claude Code at this script, as opposed to merely
+    /// holding it on disk. Absent means active, so a bundle published before the flag
+    /// existed does not unregister itself everywhere at once.
+    public var active: Bool
 
-    public init(path: String, content: String, executable: Bool) {
+    public init(path: String, content: String, executable: Bool, active: Bool = true) {
         self.path = path
         self.content = content
         self.executable = executable
+        self.active = active
     }
 
-    private enum CodingKeys: String, CodingKey { case path, content, executable }
+    private enum CodingKeys: String, CodingKey { case path, content, executable, active }
 
     /// `executable` is absent from a hand-written bundle more often than not, and a hook
     /// that arrives non-executable simply never runs.
@@ -360,6 +366,17 @@ public struct HookFile: Codable, Equatable, Sendable {
         path = try c.decode(String.self, forKey: .path)
         content = try c.decode(String.self, forKey: .content)
         executable = try c.decodeIfPresent(Bool.self, forKey: .executable) ?? false
+        active = try c.decodeIfPresent(Bool.self, forKey: .active) ?? true
+    }
+
+    /// Only `active` when it has been set away from the default, so a round trip through
+    /// this client does not start writing the key into bundles that never had it.
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(path, forKey: .path)
+        try c.encode(content, forKey: .content)
+        try c.encode(executable, forKey: .executable)
+        if !active { try c.encode(false, forKey: .active) }
     }
 }
 
@@ -408,6 +425,15 @@ public enum ServerProtocolError: Error, LocalizedError, Equatable {
 public struct HookPushRequest: Codable, Equatable, Sendable {
     public var files: [HookFile]
     public init(files: [HookFile]) { self.files = files }
+}
+
+public struct HookActivationRequest: Codable, Equatable, Sendable {
+    public var path: String
+    public var active: Bool
+    public init(path: String, active: Bool) {
+        self.path = path
+        self.active = active
+    }
 }
 
 public extension String {

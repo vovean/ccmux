@@ -102,6 +102,43 @@ func (s *HookStore) Replace(files []HookFile, now time.Time) (HookBundle, error)
 	return out, nil
 }
 
+// SetActive flips one script's registration flag and returns the whole bundle.
+//
+// Under the store's own lock, so two Macs toggling different scripts cannot lose each
+// other's change the way a read-modify-write of the whole bundle would.
+func (s *HookStore) SetActive(path string, active bool, now time.Time) (HookBundle, error) {
+	clean, err := validateHookPath(path)
+	if err != nil {
+		return HookBundle{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.unreadable != nil {
+		return HookBundle{}, s.unreadable
+	}
+	found := false
+	for i := range s.bundle.Files {
+		if s.bundle.Files[i].Path != clean {
+			continue
+		}
+		found = true
+		if s.bundle.Files[i].IsActive() == active {
+			break
+		}
+		flag := active
+		s.bundle.Files[i].Active = &flag
+		s.bundle.UpdatedAt = Time{now.UTC()}
+		s.persistLocked()
+		break
+	}
+	if !found {
+		return HookBundle{}, fmt.Errorf("no such hook: %s", clean)
+	}
+	out := s.bundle
+	out.Files = copyHookFiles(s.bundle.Files)
+	return out, nil
+}
+
 // validateHookFiles is the gate. Every rule here exists because the result is written to
 // a path on someone else's disk and then run.
 func validateHookFiles(files []HookFile) ([]HookFile, error) {
@@ -140,7 +177,8 @@ func validateHookFiles(files []HookFile) ([]HookFile, error) {
 		if total > maxHookTotal {
 			return nil, fmt.Errorf("bundle exceeds %d bytes", maxHookTotal)
 		}
-		out = append(out, HookFile{Path: clean, Content: file.Content, Executable: file.Executable})
+		out = append(out, HookFile{Path: clean, Content: file.Content,
+			Executable: file.Executable, Active: file.Active})
 	}
 	// A path that is both a file and a parent directory cannot exist. Accepting the pair
 	// wedges every Mac: one of the two writes fails, the prune never runs, and the version

@@ -178,6 +178,13 @@ public struct Settings: Codable, Equatable {
     /// hand, so syncing them is inert on a Mac that never asked for one. It is still a
     /// switch, because it is the one thing ccmux writes outside its own directory.
     public var syncManagedHooks: Bool
+    /// Whether ccmux may point Claude Code at the scripts the server marks active, by
+    /// editing the `hooks` section of ~/.claude/settings.json.
+    ///
+    /// Opt-in, unlike the sync above, and off by default. Writing a file is inert;
+    /// registering one means a housekeeping tick can make this Mac start executing
+    /// something it has never run before, which is a decision only the user can take.
+    public var registerManagedHooks: Bool
     /// Accounts whose refresh lineage now belongs to the server. This Mac holds only
     /// short-lived access tokens for them and must never run a refresh grant of its own —
     /// that is precisely the two-holders-of-one-lineage case that logs an account out.
@@ -197,6 +204,7 @@ public struct Settings: Codable, Equatable {
                 server: ServerConnection? = nil,
                 showForeignSessions: Bool = true,
                 syncManagedHooks: Bool = true,
+                registerManagedHooks: Bool = false,
                 delegatedAccountIDs: [String] = []) {
         self.warnThresholdPercent = warnThresholdPercent
         self.budgetWarnPercent = budgetWarnPercent
@@ -212,6 +220,7 @@ public struct Settings: Codable, Equatable {
         self.server = server
         self.showForeignSessions = showForeignSessions
         self.syncManagedHooks = syncManagedHooks
+        self.registerManagedHooks = registerManagedHooks
         self.delegatedAccountIDs = delegatedAccountIDs
     }
 
@@ -250,6 +259,9 @@ public struct Settings: Codable, Equatable {
             ?? d.showForeignSessions
         syncManagedHooks = try c.decodeIfPresent(Bool.self, forKey: .syncManagedHooks)
             ?? d.syncManagedHooks
+        registerManagedHooks = try c.decodeIfPresent(Bool.self,
+                                                     forKey: .registerManagedHooks)
+            ?? d.registerManagedHooks
         delegatedAccountIDs = try c.decodeIfPresent([String].self,
                                                     forKey: .delegatedAccountIDs)
             ?? d.delegatedAccountIDs

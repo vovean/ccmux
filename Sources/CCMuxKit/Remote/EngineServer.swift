@@ -163,6 +163,8 @@ public extension Engine {
         if serverSupportsHooks == nil, let health = try? await client.health() {
             if let features = health.features {
                 serverSupportsHooks = features.contains(ServerAPI.hooksFeature)
+                serverSupportsHookActivation =
+                    features.contains(ServerAPI.hookActivationFeature)
                 if serverSupportsHooks == false { clearHookState(); return }
             }
         }
@@ -222,6 +224,7 @@ public extension Engine {
             return
         }
         hookApplyFailing = false
+        await registerHooks(from: bundle, installed: result.hooks)
         if result.applied {
             Log.info("hooks synced to \(bundle.version.prefix(12)): "
                 + "\(result.written.count) written, \(result.removed.count) removed")
@@ -231,6 +234,66 @@ public extension Engine {
                 + " changed on this Mac — resolve on the Hooks page")
         }
         if !hookStatus.frozen { loggedHookFreeze = false }
+    }
+
+    /// Points Claude Code at the scripts the server marks active, and only when the user
+    /// has turned that on.
+    ///
+    /// Restricted to scripts actually on disk: registering one the sync has not written —
+    /// because it is held, or because it never arrived — would point Claude Code at a
+    /// path that does not exist.
+    private func registerHooks(from bundle: HookBundle, installed: [ManagedHook]) async {
+        guard settings.registerManagedHooks else { return }
+        let onDisk = Set(installed.compactMap { $0.local == nil ? nil : $0.path })
+        let active = bundle.files.filter { $0.active && onDisk.contains($0.path) }
+            .map(\.path)
+        await applyRegistration(active)
+    }
+
+    private func applyRegistration(_ active: [String]) async {
+        let file = Paths.claudeHome.appendingPathComponent("settings.json")
+        let outcome = await Task.detached(priority: .utility) { () -> Result<HookRegistration.Change, Error> in
+            do { return .success(try HookRegistration.reconcile(active: active,
+                                                                settingsFile: file)) }
+            catch { return .failure(error) }
+        }.value
+        switch outcome {
+        case .success(let change):
+            hookRegisterFailing = false
+            guard !change.isEmpty else { return }
+            // Worth a line every time: this is ccmux changing what Claude Code executes.
+            Log.info("hook registration: \(change.registered.count) added, "
+                + "\(change.unregistered.count) removed — takes effect in new sessions")
+        case .failure(let error):
+            if !hookRegisterFailing {
+                hookRegisterFailing = true
+                Log.warn("could not register hooks: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func setRegisterManagedHooks(_ on: Bool) {
+        updateSettings { $0.registerManagedHooks = on }
+        Task {
+            // Turning it off takes every managed entry back out, so the switch actually
+            // undoes itself rather than only stopping further changes.
+            if on { await syncHooks() } else { await applyRegistration([]) }
+        }
+    }
+
+    /// Flips one script's registration on the server, for every Mac.
+    @discardableResult
+    func setHookActive(_ path: String, _ active: Bool) async -> String? {
+        guard let client = serverClient else { return "No account server is connected." }
+        do {
+            let bundle = try await client.setHookActive(path, active)
+            await reconcileHooks(with: bundle)
+            return nil
+        } catch ServerClientError.unsupported {
+            return "This ccmuxd is too old to track which hooks are active."
+        } catch {
+            return "Could not change \(path): \(error.localizedDescription)"
+        }
     }
 
     /// Settles one file the sync stopped on. Both directions are whole-bundle
@@ -421,6 +484,7 @@ public extension Engine {
         // Reset with the rest: left set, the Settings panel keeps telling the user the
         // next server is too old to serve hooks.
         if serverSupportsHooks != nil { serverSupportsHooks = nil }
+        if serverSupportsHookActivation { serverSupportsHookActivation = false }
         hookSyncFailing = false
         hookApplyFailing = false
         // The states are all relative to a server. Keeping them would have the page offer

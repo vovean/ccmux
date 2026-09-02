@@ -167,7 +167,7 @@ struct HooksPage: View {
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                     Spacer()
-                    if hook.needsDecision { decisionButtons(hook) }
+                    if hook.needsDecision { decisionButtons(hook) } else { activeToggle(hook) }
                 }
 
                 if expanded.contains(hook.path) { script(hook) }
@@ -199,6 +199,40 @@ struct HooksPage: View {
     /// more than anyone gains from reading it in a 320-point box, and nothing bounds the
     /// size of a file in the managed directory.
     private static let displayLimit = 64_000
+
+    /// Registration, not content — and it is the server's answer, so flipping it here
+    /// reaches every Mac.
+    @ViewBuilder
+    private func activeToggle(_ hook: ManagedHook) -> some View {
+        if let event = HookRegistration.event(for: hook.path) {
+            Toggle(isOn: Binding(get: { hook.server?.active ?? true },
+                                 set: { on in
+                                     Task { note = await engine.setHookActive(hook.path, on) }
+                                 })) {
+                Text("Active").font(.caption2)
+            }
+            .toggleStyle(.checkbox)
+            .disabled(hook.server == nil || !engine.serverSupportsHookActivation)
+            .help(activeHelp(hook, event: event))
+        } else {
+            Text("not registerable")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .help("Only a script under a hook-event directory can be registered.")
+        }
+    }
+
+    private func activeHelp(_ hook: ManagedHook, event: String) -> String {
+        if hook.server == nil { return "Publish it first — this is the server's setting." }
+        if !engine.serverSupportsHookActivation {
+            return "This ccmuxd is too old to track which hooks are active."
+        }
+        if !engine.settings.registerManagedHooks {
+            return "Runs as \(event) on Macs that have registration turned on in Settings."
+        }
+        return "Registered as \(event). Claude Code reads hooks at startup, so this "
+            + "reaches new sessions only."
+    }
 
     @ViewBuilder
     private func script(_ hook: ManagedHook) -> some View {

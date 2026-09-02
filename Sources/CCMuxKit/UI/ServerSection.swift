@@ -186,6 +186,45 @@ struct ServerSection: View {
 
     // MARK: - Sessions across machines
 
+    private static let syncBlurb =
+        "Writes ~/.claude/hooks/managed and nothing else."
+    private static let syncBlurbOldServer =
+        " This server is too old to serve them."
+    /// Spelled out because it is the one switch that lets a background tick make this Mac
+    /// run something it has never run before.
+    private static let registerBlurb =
+        "Off by default. On, ccmux edits the hooks section of ~/.claude/settings.json to "
+        + "match whichever scripts are marked active on the Hooks screen — so a script "
+        + "published centrally starts running here on its own. It only ever touches "
+        + "entries pointing inside hooks/managed, and turning this off removes them "
+        + "again. Claude Code reads hooks at startup, so changes reach new sessions only."
+
+    @ViewBuilder
+    private var managedHooks: some View {
+        Toggle("Sync hook scripts from the server", isOn: Binding(
+            get: { engine.settings.syncManagedHooks },
+            set: { engine.setSyncManagedHooks($0) }))
+            .toggleStyle(.checkbox)
+            .font(.caption)
+        blurb(Self.syncBlurb
+            + (engine.serverSupportsHooks == false ? Self.syncBlurbOldServer : ""))
+
+        Toggle("Register active hooks with Claude Code", isOn: Binding(
+            get: { engine.settings.registerManagedHooks },
+            set: { engine.setRegisterManagedHooks($0) }))
+            .toggleStyle(.checkbox)
+            .font(.caption)
+            .disabled(!engine.settings.syncManagedHooks)
+        blurb(Self.registerBlurb)
+    }
+
+    private func blurb(_ text: String) -> some View {
+        Text(text)
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
     @ViewBuilder
     private var sessionSharing: some View {
         Divider()
@@ -200,20 +239,7 @@ struct ServerSection: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Toggle("Sync hook scripts from the server", isOn: Binding(
-                get: { engine.settings.syncManagedHooks },
-                set: { engine.setSyncManagedHooks($0) }))
-                .toggleStyle(.checkbox)
-                .font(.caption)
-            // Named rather than implied: this is the one thing ccmux writes outside its
-            // own directory, and the files are executable.
-            Text("Writes ~/.claude/hooks/managed and nothing else — never settings.json, "
-                 + "so a synced hook only runs once you point a hook at it yourself."
-                 + (engine.serverSupportsHooks == false
-                    ? " This server is too old to serve them." : ""))
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
+            managedHooks
 
             Toggle("Show sessions from other Macs", isOn: Binding(
                 get: { engine.settings.showForeignSessions },
