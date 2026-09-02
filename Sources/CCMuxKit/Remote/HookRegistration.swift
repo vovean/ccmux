@@ -30,7 +30,12 @@ public enum HookRegistration {
         /// them. Reported rather than dropped: silence here reads identically to a
         /// working hook.
         public var unregisterable: [String] = []
-        public var isEmpty: Bool { registered.isEmpty && unregistered.isEmpty }
+        /// A command that appeared twice under one event; one copy was dropped. Not a
+        /// removal — saying so in the log would read as ccmux unregistering a live hook.
+        public var deduplicated: [String] = []
+        public var isEmpty: Bool {
+            registered.isEmpty && unregistered.isEmpty && deduplicated.isEmpty
+        }
     }
 
     /// The event a script registers under, or nil for a helper at the root of the tree or
@@ -50,8 +55,6 @@ public enum HookRegistration {
 
     /// One spelling for the four that occur, so an entry written `~/…` or with the home
     /// directory spelled out is recognised as the same command rather than duplicated.
-    /// Anything trailing the path — an argument, a redirect — survives and makes the
-    /// command unequal, which is what keeps it out of ccmux's hands.
     static func canonical(_ command: String, home: String) -> String {
         var text = command.trimmingCharacters(in: .whitespaces)
         for prefix in ["$HOME/", "${HOME}/", "~/", home + "/"] where text.hasPrefix(prefix) {
@@ -61,23 +64,36 @@ public enum HookRegistration {
         return text
     }
 
-    /// Rewrites the `hooks` section so the entries ccmux owns are exactly `active`.
+    /// The managed script an entry registers, or nil when the entry is not one ccmux
+    /// would have written.
     ///
-    /// `known` is every script the server holds. It is what makes withdrawing one work:
-    /// a command is only ever removed when it names a script in that set, so an entry
-    /// pointing at something ccmux never published is left where it is.
-    public static func apply(to settings: [String: Any], known: [String],
-                             active: [String],
+    /// Three things have to hold, and together they are what keeps the user's own lines
+    /// out of ccmux's hands. The command must be exactly the script and nothing else —
+    /// `a.sh --verbose` fails, because the argument makes the remainder an invalid hook
+    /// path. The script must sit under an event directory, so a helper at the root of the
+    /// tree is never claimed. And that directory must be the event the entry is filed
+    /// under, so a script deliberately wired to a different event is left alone.
+    ///
+    /// Deliberately not restricted to scripts the server still holds: an entry whose
+    /// script has been withdrawn or renamed is precisely the one that has to be removable,
+    /// or it stays in the file forever pointing at nothing and fails on every event.
+    static func ownedPath(_ command: String, event: String, home: String) -> String? {
+        let canon = canonical(command, home: home)
+        let prefix = ".claude/hooks/managed/"
+        guard canon.hasPrefix(prefix) else { return nil }
+        let path = String(canon.dropFirst(prefix.count))
+        guard ManagedHooks.validate(path) == nil, self.event(for: path) == event else {
+            return nil
+        }
+        return path
+    }
+
+    /// Rewrites the `hooks` section so the entries ccmux owns are exactly `active`.
+    public static func apply(to settings: [String: Any], active: [String],
                              home: String) -> (settings: [String: Any], change: Change) {
         var change = Change()
         var hooks = settings["hooks"] as? [String: Any] ?? [:]
 
-        // event -> canonical command -> path, for scripts this could have written.
-        var owned: [String: [String: String]] = [:]
-        for path in known {
-            guard let event = event(for: path) else { continue }
-            owned[event, default: [:]][canonical(command(for: path), home: home)] = path
-        }
         var wanted: [String: [String]] = [:]
         for path in active.sorted() {
             guard let event = event(for: path) else {
@@ -88,11 +104,15 @@ public enum HookRegistration {
         }
 
         for event in Set(hooks.keys).union(wanted.keys).sorted() {
+            let existing = hooks[event]
             var matchers: [[String: Any]] = []
-            if let existing = hooks[event] {
+            if let existing {
                 // A value that is not the shape Claude Code documents is not ccmux's to
                 // rewrite, and dropping it would delete a working configuration.
-                guard let parsed = existing as? [[String: Any]] else { continue }
+                guard let parsed = existing as? [[String: Any]] else {
+                    change.unregisterable.append(contentsOf: wanted[event] ?? [])
+                    continue
+                }
                 matchers = parsed
             }
             let wantedPaths = Set(wanted[event] ?? [])
@@ -107,7 +127,7 @@ public enum HookRegistration {
                 var survivors: [[String: Any]] = []
                 for entry in entries {
                     guard let command = entry["command"] as? String,
-                          let path = owned[event]?[canonical(command, home: home)] else {
+                          let path = ownedPath(command, event: event, home: home) else {
                         survivors.append(entry)
                         continue
                     }
@@ -115,6 +135,8 @@ public enum HookRegistration {
                     // otherwise run the script twice on every event, forever.
                     if wantedPaths.contains(path), held.insert(path).inserted {
                         survivors.append(entry)
+                    } else if wantedPaths.contains(path) {
+                        change.deduplicated.append(command)
                     } else {
                         change.unregistered.append(command)
                     }
@@ -134,7 +156,14 @@ public enum HookRegistration {
                 change.registered.append(contentsOf: missing.map(command(for:)))
             }
 
-            if kept.isEmpty { hooks.removeValue(forKey: event) } else { hooks[event] = kept }
+            if kept.isEmpty {
+                // An event the user left empty stays as they left it; only one this
+                // emptied is removed.
+                if existing != nil, matchers.isEmpty { continue }
+                hooks.removeValue(forKey: event)
+            } else {
+                hooks[event] = kept
+            }
         }
 
         var out = settings
@@ -160,7 +189,7 @@ public enum HookRegistration {
     /// Reads, rewrites and replaces the file, leaving it alone entirely when nothing
     /// changes.
     @discardableResult
-    public static func reconcile(known: [String], active: [String], settingsFile: URL,
+    public static func reconcile(active: [String], settingsFile: URL,
                                  home: String = NSHomeDirectory()) throws -> Change {
         let fm = FileManager.default
         var settings: [String: Any] = [:]
@@ -179,7 +208,7 @@ public enum HookRegistration {
             return Change()
         }
 
-        let result = apply(to: settings, known: known, active: active, home: home)
+        let result = apply(to: settings, active: active, home: home)
         guard !result.change.isEmpty else { return result.change }
 
         let data: Data
@@ -221,7 +250,13 @@ public enum HookRegistration {
         let prefix = ".\(file.lastPathComponent)."
         guard let entries = try? fm.contentsOfDirectory(atPath: dir.path) else { return }
         for entry in entries where entry.hasPrefix(prefix) && entry.hasSuffix(".tmp") {
-            try? fm.removeItem(at: dir.appendingPathComponent(entry))
+            let candidate = dir.appendingPathComponent(entry)
+            // Aged, because another writer's temp is indistinguishable from a stranded
+            // one and deleting it mid-write would lose their save.
+            let written = (try? fm.attributesOfItem(atPath: candidate.path))?[.modificationDate]
+                as? Date
+            guard let written, Date().timeIntervalSince(written) > 300 else { continue }
+            try? fm.removeItem(at: candidate)
         }
     }
 }

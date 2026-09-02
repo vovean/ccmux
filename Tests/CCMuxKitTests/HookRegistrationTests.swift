@@ -51,7 +51,6 @@ struct HookRegistrationTests {
             ],
         ]
         let result = HookRegistration.apply(to: settings,
-                                            known: ["UserPromptSubmit/fable.sh"],
                                             active: ["UserPromptSubmit/fable.sh"],
                                             home: home)
         #expect(result.settings["model"] as? String == "opus")
@@ -74,8 +73,6 @@ struct HookRegistrationTests {
             ]]],
         ]]
         let result = HookRegistration.apply(to: settings,
-                                            known: ["UserPromptSubmit/a.sh",
-                                                    "UserPromptSubmit/b.sh"],
                                             active: ["UserPromptSubmit/b.sh"], home: home)
         #expect(commands(result.settings, "UserPromptSubmit")
             == ["$HOME/.claude/hooks/managed/UserPromptSubmit/b.sh"])
@@ -91,7 +88,6 @@ struct HookRegistrationTests {
                                              "command": "$HOME/.claude/hooks/managed/UserPromptSubmit/a.sh"]]]],
         ]]
         let result = HookRegistration.apply(to: settings,
-                                            known: ["UserPromptSubmit/a.sh"],
                                             active: [], home: home)
         #expect(result.settings["hooks"] == nil)
         #expect(result.settings["model"] as? String == "opus")
@@ -105,7 +101,6 @@ struct HookRegistrationTests {
                                              "command": "$HOME/.claude/hooks/managed/UserPromptSubmit/a.sh"]]]],
         ]]
         let result = HookRegistration.apply(to: settings,
-                                            known: ["UserPromptSubmit/a.sh"],
                                             active: ["UserPromptSubmit/a.sh"], home: home)
         #expect(commands(result.settings, "UserPromptSubmit").count == 1)
         #expect(result.change.isEmpty)
@@ -118,8 +113,7 @@ struct HookRegistrationTests {
             ["type": "command",
              "command": "/Users/tester/.claude/hooks/managed/UserPromptSubmit/a.sh"],
         ]]]]]
-        let result = HookRegistration.apply(to: settings, known: ["UserPromptSubmit/a.sh"],
-                                            active: ["UserPromptSubmit/a.sh"], home: home)
+        let result = HookRegistration.apply(to: settings, active: ["UserPromptSubmit/a.sh"], home: home)
         #expect(commands(result.settings, "UserPromptSubmit").count == 1)
         #expect(result.change.isEmpty)
     }
@@ -131,7 +125,7 @@ struct HookRegistrationTests {
         try original.write(to: file, atomically: true, encoding: .utf8)
         let before = try FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate]
 
-        let change = try HookRegistration.reconcile(known: [], active: [],
+        let change = try HookRegistration.reconcile(active: [],
                                                     settingsFile: file, home: home)
         #expect(change.isEmpty)
         #expect(try String(contentsOf: file, encoding: .utf8) == original)
@@ -148,8 +142,7 @@ struct HookRegistrationTests {
         try broken.write(to: file, atomically: true, encoding: .utf8)
 
         #expect(throws: HookRegistration.Failure.unreadable("it is not a JSON object")) {
-            try HookRegistration.reconcile(known: ["UserPromptSubmit/a.sh"],
-                                           active: ["UserPromptSubmit/a.sh"],
+            try HookRegistration.reconcile(active: ["UserPromptSubmit/a.sh"],
                                            settingsFile: file, home: home)
         }
         #expect(try String(contentsOf: file, encoding: .utf8) == broken)
@@ -166,8 +159,7 @@ struct HookRegistrationTests {
         ]
         try JSONSerialization.data(withJSONObject: original).write(to: file)
 
-        try HookRegistration.reconcile(known: ["UserPromptSubmit/a.sh"],
-                                       active: ["UserPromptSubmit/a.sh"],
+        try HookRegistration.reconcile(active: ["UserPromptSubmit/a.sh"],
                                        settingsFile: file, home: home)
         let after = read(file)
         #expect(after["model"] as? String == "opus")
@@ -190,7 +182,6 @@ struct HookRegistrationTests {
             ],
         ]]
         let result = HookRegistration.apply(to: settings,
-                                            known: ["UserPromptSubmit/a.sh"],
                                             active: [], home: home)
         #expect(commands(result.settings, "UserPromptSubmit") == ["$HOME/keep.sh"])
         let matchers = (result.settings["hooks"] as? [String: Any])?["UserPromptSubmit"]
@@ -206,8 +197,7 @@ struct HookRegistrationTests {
             ["type": "command",
              "command": "$HOME/.claude/hooks/managed/UserPromptSubmit/a.sh --verbose"],
         ]]]]]
-        let result = HookRegistration.apply(to: settings, known: ["UserPromptSubmit/a.sh"],
-                                            active: [], home: home)
+        let result = HookRegistration.apply(to: settings, active: [], home: home)
         #expect(commands(result.settings, "UserPromptSubmit")
             == ["$HOME/.claude/hooks/managed/UserPromptSubmit/a.sh --verbose"])
         #expect(result.change.isEmpty)
@@ -220,22 +210,24 @@ struct HookRegistrationTests {
         let settings: [String: Any] = ["hooks": ["SessionStart": [["hooks": [
             ["type": "command", "command": "$HOME/.claude/hooks/managed/helper.sh"],
         ]]]]]
-        let result = HookRegistration.apply(to: settings, known: ["helper.sh"],
-                                            active: [], home: home)
+        let result = HookRegistration.apply(to: settings, active: [], home: home)
         #expect(commands(result.settings, "SessionStart")
             == ["$HOME/.claude/hooks/managed/helper.sh"])
         #expect(result.change.isEmpty)
     }
 
-    /// An entry naming a script the server has never held is not ccmux's to remove.
-    @Test func anEntryForAScriptWeDoNotKnowIsLeftAlone() {
+    /// An entry whose script the server no longer holds is exactly the one that has to be
+    /// removable. Ownership deliberately does not depend on the live bundle: a withdrawn
+    /// or renamed script would otherwise leave a line in the file forever, pointing at
+    /// nothing and failing on every occurrence of its event.
+    @Test func anEntryForAWithdrawnScriptIsStillRemoved() {
         let settings: [String: Any] = ["hooks": ["UserPromptSubmit": [["hooks": [
-            ["type": "command", "command": "$HOME/.claude/hooks/managed/UserPromptSubmit/stranger.sh"],
+            ["type": "command", "command": "$HOME/.claude/hooks/managed/UserPromptSubmit/gone.sh"],
         ]]]]]
-        let result = HookRegistration.apply(to: settings, known: ["UserPromptSubmit/a.sh"],
-                                            active: [], home: home)
-        #expect(commands(result.settings, "UserPromptSubmit").count == 1)
-        #expect(result.change.isEmpty)
+        let result = HookRegistration.apply(to: settings, active: [], home: home)
+        #expect(result.settings["hooks"] == nil)
+        #expect(result.change.unregistered
+            == ["$HOME/.claude/hooks/managed/UserPromptSubmit/gone.sh"])
     }
 
     /// A value that is not the documented shape is a configuration ccmux cannot reason
@@ -245,8 +237,7 @@ struct HookRegistrationTests {
             "Stop": ["something", ["hooks": []]] as [Any],
             "UserPromptSubmit": [] as [Any],
         ]]
-        let result = HookRegistration.apply(to: settings, known: ["UserPromptSubmit/a.sh"],
-                                            active: ["UserPromptSubmit/a.sh"], home: home)
+        let result = HookRegistration.apply(to: settings, active: ["UserPromptSubmit/a.sh"], home: home)
         let hooks = try? #require(result.settings["hooks"] as? [String: Any])
         #expect((hooks?["Stop"] as? [Any])?.count == 2)
         #expect(commands(result.settings, "UserPromptSubmit")
@@ -259,7 +250,7 @@ struct HookRegistrationTests {
         let settings: [String: Any] = ["hooks": ["UserPromptSubmit": [
             ["matcher": "*"],
         ]]]
-        let result = HookRegistration.apply(to: settings, known: [], active: [], home: home)
+        let result = HookRegistration.apply(to: settings, active: [], home: home)
         let matchers = result.settings["hooks"].flatMap { ($0 as? [String: Any]) }
             .flatMap { $0["UserPromptSubmit"] as? [[String: Any]] }
         #expect(matchers?.first?["hooks"] == nil)
@@ -272,18 +263,19 @@ struct HookRegistrationTests {
             ["hooks": [["type": "command", "command": cmd]]],
             ["hooks": [["type": "command", "command": cmd]]],
         ]]]
-        let result = HookRegistration.apply(to: settings, known: ["UserPromptSubmit/a.sh"],
-                                            active: ["UserPromptSubmit/a.sh"], home: home)
+        let result = HookRegistration.apply(to: settings, active: ["UserPromptSubmit/a.sh"], home: home)
         #expect(commands(result.settings, "UserPromptSubmit") == [cmd])
-        #expect(result.change.unregistered == [cmd])
+        // Reported as a duplicate rather than a removal: "1 removed" in the log for a
+        // hook that is still registered reads as ccmux unregistering a live one.
+        #expect(result.change.deduplicated == [cmd])
+        #expect(result.change.unregistered.isEmpty)
     }
 
     /// Several scripts under one event belong in one matcher, which is the shape a
     /// hand-written config takes.
     @Test func severalScriptsUnderOneEventShareOneMatcher() {
         let result = HookRegistration.apply(
-            to: [:], known: ["UserPromptSubmit/a.sh", "UserPromptSubmit/b.sh"],
-            active: ["UserPromptSubmit/a.sh", "UserPromptSubmit/b.sh"], home: home)
+            to: [:], active: ["UserPromptSubmit/a.sh", "UserPromptSubmit/b.sh"], home: home)
         let matchers = (result.settings["hooks"] as? [String: Any])?["UserPromptSubmit"]
             as? [[String: Any]]
         #expect(matchers?.count == 1)
@@ -293,8 +285,7 @@ struct HookRegistrationTests {
     /// An active script under no known event is reported, not dropped in silence — that
     /// reads exactly like a hook that simply never fires.
     @Test func anActiveScriptWithNoEventIsReported() {
-        let result = HookRegistration.apply(to: [:], known: ["helper.sh"],
-                                            active: ["helper.sh"], home: home)
+        let result = HookRegistration.apply(to: [:], active: ["helper.sh"], home: home)
         #expect(result.change.unregisterable == ["helper.sh"])
         #expect(result.change.isEmpty)
     }
@@ -304,8 +295,7 @@ struct HookRegistrationTests {
         let file = settingsFile()
         defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
         try #"{"model":"opus"}"#.write(to: file, atomically: true, encoding: .utf8)
-        try HookRegistration.reconcile(known: ["UserPromptSubmit/a.sh"],
-                                       active: ["UserPromptSubmit/a.sh"],
+        try HookRegistration.reconcile(active: ["UserPromptSubmit/a.sh"],
                                        settingsFile: file, home: home)
         let text = try String(contentsOf: file, encoding: .utf8)
         #expect(!text.contains("\\/"))
@@ -321,11 +311,55 @@ struct HookRegistrationTests {
         let stranded = file.deletingLastPathComponent()
             .appendingPathComponent(".settings.json.\(UUID().uuidString).tmp")
         try Data("junk".utf8).write(to: stranded)
+        // Aged past the floor. A fresh one is left alone on purpose — it may be another
+        // writer's, mid-write.
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(-3600)],
+            ofItemAtPath: stranded.path)
+        let fresh = file.deletingLastPathComponent()
+            .appendingPathComponent(".settings.json.fresh.tmp")
+        try Data("in flight".utf8).write(to: fresh)
 
-        try HookRegistration.reconcile(known: ["UserPromptSubmit/a.sh"],
-                                       active: ["UserPromptSubmit/a.sh"],
+        try HookRegistration.reconcile(active: ["UserPromptSubmit/a.sh"],
                                        settingsFile: file, home: home)
         #expect(!FileManager.default.fileExists(atPath: stranded.path))
+        #expect(FileManager.default.fileExists(atPath: fresh.path))
+    }
+
+    /// A rename orphans the old path the same way a withdrawal does.
+    @Test func aRenamedScriptDoesNotStrandItsOldEntry() {
+        let settings: [String: Any] = ["hooks": ["PreToolUse": [["hooks": [
+            ["type": "command", "command": "$HOME/.claude/hooks/managed/PreToolUse/a.sh"],
+        ]]]]]
+        let result = HookRegistration.apply(to: settings, active: ["PreToolUse/b.sh"],
+                                            home: home)
+        #expect(commands(result.settings, "PreToolUse")
+            == ["$HOME/.claude/hooks/managed/PreToolUse/b.sh"])
+        #expect(result.change.unregistered
+            == ["$HOME/.claude/hooks/managed/PreToolUse/a.sh"])
+    }
+
+    /// An event whose value ccmux cannot parse must not swallow the scripts filed under
+    /// it in silence — that reads exactly like a hook that never fires.
+    @Test func activeScriptsUnderAnUnparseableEventAreReported() {
+        let settings: [String: Any] = ["hooks": ["Stop": ["nonsense"] as [Any]]]
+        let result = HookRegistration.apply(to: settings, active: ["Stop/a.sh"], home: home)
+        #expect(result.change.unregisterable == ["Stop/a.sh"])
+        #expect((result.settings["hooks"] as? [String: Any])?["Stop"] as? [String]
+            == ["nonsense"])
+    }
+
+    /// An event the user left as an empty array is theirs, and must not disappear as a
+    /// side effect of an unrelated registration.
+    @Test func anEventTheUserLeftEmptyIsNotDeleted() {
+        let settings: [String: Any] = ["hooks": ["Stop": [] as [Any],
+                                                 "UserPromptSubmit": [] as [Any]]]
+        let result = HookRegistration.apply(to: settings, active: ["UserPromptSubmit/a.sh"],
+                                            home: home)
+        let hooks = result.settings["hooks"] as? [String: Any]
+        #expect(hooks?["Stop"] != nil)
+        #expect(commands(result.settings, "UserPromptSubmit")
+            == ["$HOME/.claude/hooks/managed/UserPromptSubmit/a.sh"])
     }
 
 }

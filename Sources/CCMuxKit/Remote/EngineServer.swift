@@ -165,8 +165,10 @@ public extension Engine {
         // single failed health probe used to leave activation switched off for the life
         // of the app against a server that supports it perfectly well.
         if !hookFeaturesRead, let health = try? await client.health() {
+            // Set on any answer: a ccmuxd old enough to omit the key will never grow one
+            // mid-connection, and re-probing it every tick buys nothing.
+            hookFeaturesRead = true
             if let features = health.features {
-                hookFeaturesRead = true
                 serverSupportsHooks = features.contains(ServerAPI.hooksFeature)
                 serverSupportsHookActivation =
                     features.contains(ServerAPI.hookActivationFeature)
@@ -252,9 +254,8 @@ public extension Engine {
         let onDisk = Set(installed.compactMap { $0.local == nil ? nil : $0.path })
         // Only scripts actually written: registering one the sync is holding back would
         // point Claude Code at a path that does not exist.
-        let present = bundle.files.filter { onDisk.contains($0.path) }
-        await applyRegistration(known: present.map(\.path),
-                                active: present.filter(\.active).map(\.path))
+        await applyRegistration(bundle.files.filter { $0.active && onDisk.contains($0.path) }
+            .map(\.path))
     }
 
     /// Serialised through one chain. Three paths reach this — the tick, an Active toggle
@@ -262,24 +263,27 @@ public extension Engine {
     /// user owns, so unordered they lose each other's changes: the classic one being the
     /// switch turned off while a tick that already passed the guard writes the entries
     /// back in.
-    private func applyRegistration(known: [String], active: [String]) async {
+    private func applyRegistration(_ active: [String]) async {
         let previous = registrationChain
         let file = Paths.claudeHome.appendingPathComponent("settings.json")
         let task = Task { @MainActor [weak self] in
             _ = await previous?.value
             let outcome = await Task.detached(priority: .utility) { () -> Result<HookRegistration.Change, Error> in
                 do {
-                    return .success(try HookRegistration.reconcile(known: known,
-                                                                   active: active,
+                    return .success(try HookRegistration.reconcile(active: active,
                                                                    settingsFile: file))
                 } catch {
                     return .failure(error)
                 }
             }.value
             self?.recordRegistration(outcome)
+            // Cleared so the Engine does not hold the last completed task for the life of
+            // the process.
+            if self?.registrationChain == nil { return }
         }
         registrationChain = task
         await task.value
+        if registrationChain == task { registrationChain = nil }
     }
 
     private func recordRegistration(_ outcome: Result<HookRegistration.Change, Error>) {
@@ -294,8 +298,11 @@ public extension Engine {
             }
             guard !change.isEmpty else { return }
             // Worth a line every time: this is ccmux changing what Claude Code executes.
+            let deduped = change.deduplicated.isEmpty ? ""
+                : ", \(change.deduplicated.count) duplicate(s) dropped"
             Log.info("hook registration: \(change.registered.count) added, "
-                + "\(change.unregistered.count) removed — takes effect in new sessions")
+                + "\(change.unregistered.count) removed\(deduped) — takes effect in "
+                + "new sessions")
         case .failure(let error):
             if !hookRegisterFailing {
                 hookRegisterFailing = true
@@ -313,17 +320,10 @@ public extension Engine {
         }
     }
 
-    /// Removes every entry ccmux owns.
-    ///
-    /// The set of scripts comes off disk rather than from the last sync: this runs when
-    /// the switch goes off, which may be before a tick has ever populated the status —
-    /// after a relaunch, or with the server unreachable — and an empty set would leave
-    /// every registration in place.
+    /// Removes every entry ccmux owns. Ownership is read out of the file itself, so this
+    /// works with no server, no sync and nothing left on disk.
     func unregisterEverything() async {
-        let known = await Task.detached(priority: .utility) {
-            ManagedHooks.onDisk().map(\.path)
-        }.value
-        await applyRegistration(known: known, active: [])
+        await applyRegistration([])
     }
 
     /// Flips one script's registration on the server, for every Mac.
@@ -459,11 +459,11 @@ public extension Engine {
     func setSyncManagedHooks(_ on: Bool) {
         updateSettings { $0.syncManagedHooks = on }
         guard on else {
-            // The entries have to go with it. Nothing recomputes them once the tick is
-            // disabled, so they would sit in settings.json running scripts the server can
-            // no longer withdraw — and the switch that would remove them is disabled
-            // while this one is off.
-            Task { await unregisterEverything() }
+            // Only when ccmux put them there. Nothing recomputes the entries once the
+            // tick is disabled, so with registration on they would sit in settings.json
+            // running scripts the server can no longer withdraw — but with it off ccmux
+            // has never written that file, and the hooks in it are the user's own.
+            if settings.registerManagedHooks { Task { await unregisterEverything() } }
             clearHookState()
             return
         }
