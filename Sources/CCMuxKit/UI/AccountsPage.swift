@@ -77,9 +77,20 @@ struct AccountsPage: View {
     ///
     /// Hidden below two contributors: with one account this is that account's card said
     /// twice, and the word "nearest" would be describing a set of one.
-    @ViewBuilder
     private var summarySection: some View {
-        let summary = UsageSummaries.build(accounts: engine.accounts, usage: engine.usage)
+        // Ticks with the bars below it, and off one instant for the whole section: `build`
+        // drops resets already past and the label counts down to the one it kept, so two
+        // separate reads of the clock are how a row ends up counting down to a reset the
+        // pooling had already discarded.
+        TimelineView(.periodic(from: .now, by: 30)) { context in
+            summaryCard(now: context.date)
+        }
+    }
+
+    @ViewBuilder
+    private func summaryCard(now: Date) -> some View {
+        let summary = UsageSummaries.build(accounts: engine.accounts, usage: engine.usage,
+                                           now: now)
         // Gated on accounts that actually reported, not on eligible ones. A pool of one is
         // that account's own card repeated under a heading that claims to speak for
         // several — which reads as the whole fleet being exhausted when one thing is.
@@ -106,7 +117,7 @@ struct AccountsPage: View {
                         VStack(alignment: .leading, spacing: 2) {
                             UsageBar(window: row.window,
                                      threshold: engine.settings.warnThresholdPercent,
-                                     reset: resetLabel(row))
+                                     reset: resetLabel(row, now: now))
                             if let note = rowNote(row, of: summary) {
                                 Text(note)
                                     .font(.caption2)
@@ -135,14 +146,14 @@ struct AccountsPage: View {
     /// Never the bare countdown: this reset belongs to whichever account happens to be
     /// first, and one of several resetting lifts the average by a fraction rather than
     /// clearing the bar.
-    private func resetLabel(_ row: SummaryRow) -> (note: String, help: String)? {
+    private func resetLabel(_ row: SummaryRow, now: Date) -> (note: String, help: String)? {
         guard let reset = row.nearestReset else { return nil }
         let owner = row.nearestResetAccount ?? "an account"
         let others = row.accountCount > 1
             ? " The others reset later, so this bar does not empty then." : ""
-        return ("nearest reset in \(Format.countdown(to: reset))",
-                "Soonest of \(row.accountCount): \(owner) at \(Format.clock(reset))."
-                    + others)
+        return ("nearest reset in \(Format.countdown(to: reset, from: now))",
+                "Soonest of \(row.accountCount): \(owner) at "
+                    + "\(Format.clock(reset, now: now))." + others)
     }
 
     /// Says how many accounts a row actually speaks for, whenever that is not all of them

@@ -25,6 +25,19 @@ struct UsageBar: View {
     /// explanation cannot be expressed.
     var reset: (note: String, help: String)?
 
+    /// Extracted from the body so the invariant is testable without rendering: the text
+    /// has to be a function of *both* the window and the instant, because a window that
+    /// never changes is precisely the case that used to go stale.
+    static func resetText(_ window: UsageWindow, now: Date) -> String? {
+        guard let resetsAt = window.resetsAt else { return nil }
+        // Both halves from the same instant. `Format.clock` date-qualifies anything not
+        // happening today, so reading the clock separately means that just after midnight
+        // the countdown can still be measuring from yesterday while the time beside it has
+        // already moved on, and a reset at 23:59 renders as a dated tomorrow.
+        return "\(Format.countdown(to: resetsAt, from: now)) · "
+            + Format.clock(resetsAt, now: now)
+    }
+
     private var tint: Color {
         if window.headroom <= threshold { return .red }
         // The amber band sits above the red one by construction; a fixed 20% would go
@@ -33,7 +46,30 @@ struct UsageBar: View {
         return .accentColor
     }
 
+    /// Ticks itself rather than being handed the time.
+    ///
+    /// A countdown is the only thing on this bar that changes on its own, and an account
+    /// pinned at 100% hands back a byte-identical window on every poll — so with time read
+    /// ambiently SwiftUI has nothing to diff, skips the body, and the countdown freezes at
+    /// whatever it last drew. Owning the tick here keeps the redraw to the one bar that
+    /// needs it: a published clock on the engine would republish the whole object and
+    /// redraw every window, which is the discipline `Engine.reload` exists to keep.
+    ///
+    /// Scoped to the case that actually draws a countdown. With a `reset` override the
+    /// text is computed by the caller, and with no `resetsAt` there is nothing to count
+    /// down to; ticking either would be redrawing something that cannot change.
+    @ViewBuilder
     var body: some View {
+        if reset == nil, window.resetsAt != nil {
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                content(now: context.date)
+            }
+        } else {
+            content(now: .now)
+        }
+    }
+
+    private func content(now: Date) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
                 Text(window.label)
@@ -48,8 +84,8 @@ struct UsageBar: View {
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.tertiary)
                         .help(reset.help)
-                } else if let resetsAt = window.resetsAt {
-                    Text("· \(Format.countdown(to: resetsAt)) · \(Format.clock(resetsAt))")
+                } else if let text = Self.resetText(window, now: now) {
+                    Text("· \(text)")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.tertiary)
                 }
