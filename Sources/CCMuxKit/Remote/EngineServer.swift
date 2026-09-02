@@ -174,11 +174,15 @@ public extension Engine {
         } catch ServerClientError.unsupported {
             // Kept on the tick rather than latched off, like session sharing: upgrading
             // the server should start working without touching the client.
-            if serverSupportsHooks != false { serverSupportsHooks = false }
+            // Cleared on the transition only: doing it every tick blanks the page a
+            // minute after it fills itself from disk, and it only refills on appear.
+            if serverSupportsHooks != false {
+                serverSupportsHooks = false
+                clearHookState()
+            }
             // Cleared here too. Latching only on the success path left the flag stuck
             // after a server downgrade, and the next genuine failure was never logged.
             clearHookSyncFailure()
-            clearHookState()
             return
         } catch {
             // The Hooks page starts one of these and SwiftUI cancels it on navigation
@@ -233,7 +237,8 @@ public extension Engine {
     /// operations, since both ends only deal in whole bundles, but each is built so that
     /// answering one question leaves every other unanswered file as it was.
     @discardableResult
-    func resolveHook(_ path: String, _ resolution: HookResolution) async -> String? {
+    func resolveHook(_ path: String, _ resolution: HookResolution,
+                     expectingWithdrawn: Bool = false) async -> String? {
         guard let client = serverClient else { return "No account server is connected." }
         // The same latch the tick takes. Both write the whole tree in one swap, so two of
         // them in flight would each stage from a directory the other is about to replace,
@@ -259,9 +264,16 @@ public extension Engine {
         }.value
         hookStatus = HookStatus(hooks: hooks, checkedAt: Date(),
                                 serverVersion: fresh.version)
-        // Settled by the refresh itself — the other end already has what this would send.
         guard let hook = hooks.first(where: { $0.path == path }), hook.needsDecision else {
-            return nil
+            // Said rather than returned quietly: the button vanishing with no word reads
+            // as a click that did not register.
+            return "\(path) settled on its own — this Mac and the server now agree."
+        }
+        // The user confirmed deleting the only copy. Between that and this, someone
+        // published the path, so taking the server's copy would be a different act.
+        if expectingWithdrawn, hook.server != nil {
+            return "\(path) has just been published on the server, so nothing was deleted. "
+                + "Download now replaces your copy with theirs."
         }
 
         switch resolution {
@@ -280,6 +292,7 @@ public extension Engine {
             switch outcome {
             case .success(let updated):
                 hookStatus.hooks = updated
+                if !hookStatus.frozen { loggedHookFreeze = false }
                 Log.info("hook \(path) taken from the server")
                 return nil
             case .failure(let error):

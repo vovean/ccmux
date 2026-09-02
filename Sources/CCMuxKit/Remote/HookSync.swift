@@ -135,7 +135,11 @@ public enum HookSync {
     /// at, since with no server copy "in sync" and "edited here" look identical.
     public static func classify(local: [HookFile], server: [HookFile]?,
                                 baseline: HookBaseline?) -> [ManagedHook] {
-        let locals = index(local)
+        // A name the bundle rules refuse can never be published, so treating it as an edit
+        // would hold the sync on a file no button could settle. Left out of the states
+        // only — it still counts towards the installed version, so the next apply sweeps
+        // it and says so, exactly as it did before there were states at all.
+        let locals = index(local.filter { ManagedHooks.validate($0.path) == nil })
         guard let server else {
             return locals.keys.sorted().map {
                 ManagedHook(path: $0, state: .unknown, local: locals[$0],
@@ -180,9 +184,9 @@ public enum HookSync {
 
         public var errorDescription: String? {
             switch self {
-            case .pathCollision(let a, let b):
-                return "\(a) and \(b) differ only in case, so this Mac cannot hold both. "
-                    + "Settle \(a) first."
+            case .pathCollision(let held, let other):
+                return "\(held) and \(other) differ only in case, so this Mac cannot hold "
+                    + "both. Settle \(held) first."
             }
         }
     }
@@ -196,12 +200,16 @@ public enum HookSync {
     public static func treeTakingServer(_ path: String,
                                         in hooks: [ManagedHook]) throws -> [HookFile] {
         var tree: [HookFile] = []
-        var claimed: [String: String] = [:]
+        var claimed: [String: (path: String, held: Bool)] = [:]
         for hook in hooks {
             let keepLocal = hook.path != path && hook.needsDecision
             guard let file = keepLocal ? hook.local : hook.server else { continue }
-            if let clash = claimed.updateValue(file.path, forKey: file.path.lowercased()) {
-                throw Failure.pathCollision(clash, file.path)
+            let key = file.path.lowercased()
+            if let clash = claimed.updateValue((file.path, keepLocal), forKey: key) {
+                // Named held-first: only a held file has buttons, so the other one is a
+                // dead end to point the user at.
+                throw keepLocal ? Failure.pathCollision(file.path, clash.path)
+                                : Failure.pathCollision(clash.path, file.path)
             }
             tree.append(file)
         }

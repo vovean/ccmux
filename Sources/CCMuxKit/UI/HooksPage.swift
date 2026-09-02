@@ -40,7 +40,10 @@ struct HooksPage: View {
                                                  set: { if !$0 { pendingDeletion = nil } }),
                             presenting: pendingDeletion) { path in
             Button("Delete \((path as NSString).lastPathComponent)", role: .destructive) {
-                Task { note = await engine.resolveHook(path, .takeServer) }
+                Task {
+                    note = await engine.resolveHook(path, .takeServer,
+                                                    expectingWithdrawn: true)
+                }
             }
             Button("Cancel", role: .cancel) {}
         } message: { path in
@@ -192,8 +195,9 @@ struct HooksPage: View {
               : "Overwrite this Mac's copy with the server's")
     }
 
-    /// Past this, laying the text out costs more than anyone gains from reading it in a
-    /// 320-point box — and nothing bounds the size of a file in the managed directory.
+    /// Characters, matched to how the text is trimmed: past this, laying it out costs
+    /// more than anyone gains from reading it in a 320-point box, and nothing bounds the
+    /// size of a file in the managed directory.
     private static let displayLimit = 64_000
 
     @ViewBuilder
@@ -217,7 +221,7 @@ struct HooksPage: View {
     }
 
     private func shown(_ source: String) -> String {
-        guard source.utf8.count > Self.displayLimit else { return source }
+        guard source.count > Self.displayLimit else { return source }
         return String(source.prefix(Self.displayLimit))
             + "\n\n… truncated — open it in VS Code to read the rest."
     }

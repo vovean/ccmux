@@ -89,10 +89,6 @@ public enum ManagedHooks {
             let full = url.standardizedFileURL.path
             guard full.hasPrefix(prefix + "/") else { continue }
             let relative = String(full.dropFirst(prefix.count + 1))
-            // A name the bundle rules refuse can never be published, so reporting it would
-            // hold the sync on a file nothing can settle. Left alone here and swept by the
-            // next apply, which builds the tree from scratch.
-            guard validate(relative) == nil else { continue }
             guard let content = try? String(contentsOf: url, encoding: .utf8) else { continue }
             let mode = ((try? fm.attributesOfItem(atPath: full))?[.posixPermissions]
                 as? Int) ?? 0

@@ -308,22 +308,27 @@ struct HookSyncTests {
     // MARK: - Review fixes
 
     /// A stray with a name the bundle rules refuse can never be published, so treating it
-    /// as an edit held the whole sync on a file no button could settle.
-    @Test func aFileWithAnUnpublishableNameDoesNotHoldTheSync() throws {
+    /// as an edit held the whole sync on a file no button could settle. It is left out of
+    /// the states — but not out of the sweep, or it would vanish with nothing said.
+    @Test func aFileWithAnUnpublishableNameIsSweptRatherThanHeldOrHidden() throws {
         let (root, baselineFile) = temp()
         defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
         let server = [file("a.sh", "a1")]
         _ = try HookSync.install(server, server: server, root: root,
                                  baselineFile: baselineFile)
         // What Finder's Duplicate produces.
-        try "stray".write(to: root.appendingPathComponent("a copy.sh"), atomically: true,
-                          encoding: .utf8)
+        let stray = root.appendingPathComponent("a copy.sh")
+        try "stray".write(to: stray, atomically: true, encoding: .utf8)
 
         let result = HookSync.reconcile(server: server,
                                         serverVersion: ManagedHooks.version(of: server),
                                         root: root, baselineFile: baselineFile)
         #expect(result.hooks.map(\.path) == ["a.sh"])
         #expect(!result.hooks.contains { $0.needsDecision })
+        // Swept, and reported as removed so the log says where it went.
+        #expect(result.applied)
+        #expect(result.removed == ["a copy.sh"])
+        #expect(!FileManager.default.fileExists(atPath: stray.path))
     }
 
     /// APFS folds case, so staging both would collapse them into one entry and lose the
@@ -335,7 +340,9 @@ struct HookSyncTests {
                                       baseline: baseline([file("a.sh", "was"),
                                                           file("c.sh", "c")]))
         #expect(hooks.first { $0.path == "a.sh" }?.state == .conflict)
-        #expect(throws: HookSync.Failure.pathCollision("A.sh", "a.sh")) {
+        // Named held-first: A.sh is the server's and its row has no buttons, so pointing
+        // the user at it would be a dead end that looks like a wedge.
+        #expect(throws: HookSync.Failure.pathCollision("a.sh", "A.sh")) {
             try HookSync.treeTakingServer("c.sh", in: hooks)
         }
         // Settling the collided file itself is the way out, and it must still work.
