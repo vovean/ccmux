@@ -32,7 +32,12 @@ struct HooksPage: View {
             }
             .padding(14)
         }
-        .task { await engine.loadHooksFromDisk() }
+        // Opening the page checks rather than waiting out the rest of the minute; the
+        // disk read then fills the list in for a server that could not be reached.
+        .task {
+            await engine.syncHooks()
+            await engine.loadHooksFromDisk()
+        }
     }
 
     // MARK: - Summary
