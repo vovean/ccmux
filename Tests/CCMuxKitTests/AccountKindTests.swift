@@ -81,6 +81,33 @@ struct PricingTests {
         #expect(abs(cost - 36.75) < 0.0001)
     }
 
+    /// Fable 5.1 is a new model, not a dated snapshot of Fable 5, so `normalize`
+    /// deliberately declines to inherit the older entry. Without its own row it bills as
+    /// unpriced and drops out of the spend figure entirely.
+    @Test("Fable 5.1 is priced in its own right")
+    func fable51IsPriced() throws {
+        let price = try #require(Pricing.price(for: "claude-fable-5-1"))
+        #expect(price.inputPerMTok == 10)
+        #expect(price.outputPerMTok == 50)
+        #expect(Pricing.normalize("claude-fable-5-1") == "claude-fable-5-1")
+        #expect(Pricing.normalize("claude-fable-5-1[1m]") == "claude-fable-5-1")
+        // The guard that made the entry necessary still holds for the next one along.
+        #expect(Pricing.price(for: "claude-fable-5-2") == nil)
+    }
+
+    /// A cache read stopped being a flat tenth of input with Fable 5.1: $0.25/MTok
+    /// against $10 input. The uniform multiplier would bill it at four times the rate.
+    @Test("Fable 5.1 cache reads are not a tenth of input")
+    func fable51CacheReads() throws {
+        let usage = TokenUsage(cacheRead: 1_000_000)
+        let cost = try #require(Pricing.cost(model: "claude-fable-5-1", usage: usage))
+        #expect(abs(cost - 0.25) < 0.0001)
+        // Fable 5 keeps the uniform tenth, so the override is per-model and not a
+        // change of default.
+        let older = try #require(Pricing.cost(model: "claude-fable-5", usage: usage))
+        #expect(abs(older - 1.0) < 0.0001)
+    }
+
     @Test("Sonnet 5 intro pricing applies only until it lapses")
     func introPricing() throws {
         let usage = TokenUsage(input: 1_000_000)

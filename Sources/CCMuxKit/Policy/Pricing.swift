@@ -31,14 +31,20 @@ public struct ModelPrice: Equatable {
     public var introInputPerMTok: Double?
     public var introOutputPerMTok: Double?
     public var introEndsAfter: String?
+    /// Set only where a cache read is not the usual tenth of input. Claude Fable 5.1
+    /// reads cache at $0.25/MTok against $10 input, so the uniform multiplier would bill
+    /// it at four times the real rate.
+    public var cacheReadPerMTok: Double?
 
     public init(input: Double, output: Double, introInput: Double? = nil,
-                introOutput: Double? = nil, introEndsAfter: String? = nil) {
+                introOutput: Double? = nil, introEndsAfter: String? = nil,
+                cacheRead: Double? = nil) {
         inputPerMTok = input
         outputPerMTok = output
         introInputPerMTok = introInput
         introOutputPerMTok = introOutput
         self.introEndsAfter = introEndsAfter
+        cacheReadPerMTok = cacheRead
     }
 
     func rates(on date: Date) -> (input: Double, output: Double) {
@@ -55,14 +61,23 @@ public struct ModelPrice: Equatable {
 /// First-party Claude API list prices, per million tokens. Kept as data so a price change
 /// is a one-line edit rather than a hunt through the cost maths.
 public enum Pricing {
-    /// Uniform across models: a 5-minute cache write costs 1.25x input, a 1-hour write
-    /// 2x, and a cache read a tenth.
+    /// A 5-minute cache write costs 1.25x input and a 1-hour write 2x on every model. A
+    /// cache read is a tenth of input except where `ModelPrice.cacheReadPerMTok` says
+    /// otherwise — that stopped being uniform with Claude Fable 5.1.
     public static let cacheWrite5mMultiplier = 1.25
     public static let cacheWrite1hMultiplier = 2.0
     public static let cacheReadMultiplier = 0.1
 
     public static let table: [String: ModelPrice] = [
+        // Fable 5.1 is not a dated snapshot of Fable 5, so `normalize` deliberately
+        // refuses to inherit its price — the entry has to be explicit or the model bills
+        // as unpriced.
+        "claude-fable-5-1": ModelPrice(input: 10, output: 50, cacheRead: 0.25),
         "claude-fable-5": ModelPrice(input: 10, output: 50),
+        // No cache-read override: Mythos 5.1 matches Fable 5.1 on input and output, but
+        // whether it shares the cheaper cache read is unconfirmed, and the uniform tenth
+        // is the safer guess to bill against.
+        "claude-mythos-5-1": ModelPrice(input: 10, output: 50),
         "claude-mythos-5": ModelPrice(input: 10, output: 50),
         "claude-opus-5": ModelPrice(input: 5, output: 25),
         "claude-opus-4-8": ModelPrice(input: 5, output: 25),
@@ -113,9 +128,11 @@ public enum Pricing {
         guard let price = price(for: model) else { return nil }
         let rates = price.rates(on: date)
         let perToken = rates.input / 1_000_000
+        let cacheReadPerToken = price.cacheReadPerMTok.map { $0 / 1_000_000 }
+            ?? (perToken * cacheReadMultiplier)
         return perToken * Double(usage.input)
             + rates.output / 1_000_000 * Double(usage.output)
-            + perToken * cacheReadMultiplier * Double(usage.cacheRead)
+            + cacheReadPerToken * Double(usage.cacheRead)
             + perToken * cacheWrite5mMultiplier * Double(usage.cacheWrite5m)
             + perToken * cacheWrite1hMultiplier * Double(usage.cacheWrite1h)
     }

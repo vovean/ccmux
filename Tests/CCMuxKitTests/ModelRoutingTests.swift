@@ -38,6 +38,9 @@ struct ModelRoutingTests {
                                 modelName: "Fable")
         #expect(ModelRouting.window(fable, governs: "claude-fable-5"))
         #expect(ModelRouting.window(fable, governs: "claude-fable-6"))
+        // A point release lands the same way, which is why routing needed no table edit
+        // for Fable 5.1 even though pricing did.
+        #expect(ModelRouting.window(fable, governs: "claude-fable-5-1"))
         #expect(!ModelRouting.window(fable, governs: "claude-opus-5"))
 
         let notScoped = UsageWindow(kind: .session, label: "5-hour", percent: 0)
