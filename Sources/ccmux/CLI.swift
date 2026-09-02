@@ -222,8 +222,14 @@ enum CLI {
                     }
                     for hook in hooks {
                         let file = hook.local ?? hook.server
+                        // "active" is the server's registration flag, not a local state:
+                        // it says whether a Mac with registration turned on points Claude
+                        // Code at this script.
+                        let active = hook.server.map { $0.active ? "active" : "inactive" }
+                            ?? "unpublished"
                         print("  \((file?.executable ?? false) ? "x" : "-") \(hook.path)  "
-                            + "\(file?.content.utf8.count ?? 0) bytes  \(hook.state.rawValue)")
+                            + "\(file?.content.utf8.count ?? 0) bytes  "
+                            + "\(hook.state.rawValue)  \(active)")
                     }
                 case "pull":
                     // Unconditional, unlike the app's tick: this is the escape hatch for a
