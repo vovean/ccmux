@@ -234,11 +234,16 @@ public extension Engine {
     /// Both directions are whole-bundle operations, because both ends only deal in whole
     /// bundles — but each is built so that answering one question leaves every other
     /// unanswered file exactly as it was.
-    func resolveHook(_ path: String, _ resolution: HookResolution) async {
-        guard let client = serverClient else { return }
+    @discardableResult
+    func resolveHook(_ path: String, _ resolution: HookResolution) async -> String? {
+        guard let client = serverClient else { return "No account server is connected." }
         let hooks = hookStatus.hooks
-        guard let hook = hooks.first(where: { $0.path == path }), hook.needsDecision,
-              !syncingHooks else { return }
+        guard let hook = hooks.first(where: { $0.path == path }), hook.needsDecision else {
+            return nil
+        }
+        // Not an error worth showing: the tick is mid-write and the button will be there
+        // a second later.
+        guard !syncingHooks else { return "Syncing right now — try again in a moment." }
         // The same latch the tick takes. Both write the whole tree in one swap, so two of
         // them in flight would each stage from a directory the other is about to replace,
         // and the baseline would end up describing neither.
@@ -257,12 +262,17 @@ public extension Engine {
             case .success(let updated):
                 hookStatus.hooks = updated
                 Log.info("hook \(path) taken from the server")
+                return nil
             case .failure(let error):
-                Log.warn("could not take \(path) from the server: \(error.localizedDescription)")
+                Log.warn("could not take \(path) from the server: "
+                    + error.localizedDescription)
+                return "Could not write \(path): \(error.localizedDescription)"
             }
 
         case .takeLocal:
-            guard let files = HookSync.bundlePublishing(path, in: hooks) else { return }
+            guard let files = HookSync.bundlePublishing(path, in: hooks) else {
+                return "\(path) is not on this Mac any more."
+            }
             do {
                 let published = try await client.pushHooks(files)
                 Log.info("hook \(path) published as \(published.version.prefix(12))")
@@ -270,8 +280,10 @@ public extension Engine {
                 // server now holds this Mac's copy, so the file settles on its own, and
                 // any file that was only held back by the freeze can finally land.
                 await reconcileHooks(with: published)
+                return nil
             } catch {
                 Log.warn("could not publish \(path): \(error.localizedDescription)")
+                return "Could not publish \(path): \(error.localizedDescription)"
             }
         }
     }

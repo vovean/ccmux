@@ -156,11 +156,13 @@ struct HooksPage: View {
 
     @ViewBuilder
     private func decisionButtons(_ hook: ManagedHook) -> some View {
-        Button("Upload") { Task { await engine.resolveHook(hook.path, .takeLocal) } }
-            .controlSize(.small)
-            .help("Publish this Mac's copy to the server, leaving every other hook alone")
+        Button("Upload") {
+            Task { note = await engine.resolveHook(hook.path, .takeLocal) }
+        }
+        .controlSize(.small)
+        .help("Publish this Mac's copy to the server, leaving every other hook alone")
         Button(hook.server == nil ? "Delete" : "Download") {
-            Task { await engine.resolveHook(hook.path, .takeServer) }
+            Task { note = await engine.resolveHook(hook.path, .takeServer) }
         }
         .controlSize(.small)
         .help(hook.server == nil
