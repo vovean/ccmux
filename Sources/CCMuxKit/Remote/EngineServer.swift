@@ -187,39 +187,105 @@ public extension Engine {
             return
         }
         clearHookSyncFailure()
+        await reconcileHooks(with: bundle)
+    }
 
-        // Off the main actor: this walks the directory, reads and hashes every hook, then
-        // writes and swaps. Engine is @MainActor and this runs from a repeating timer, so
-        // in-line it would stall the UI on every tick — unboundedly on a slow or network
-        // home directory.
-        let outcome = await Task.detached(priority: .utility) { () -> Result<(written: [String],
-                                                                              removed: [String])?, Error> in
-            // Compared against what is actually on disk, so a hand-edited or deleted hook
-            // is restored rather than assumed present.
-            guard ManagedHooks.installedVersion() != bundle.version else { return .success(nil) }
-            do {
-                return .success(try ManagedHooks.apply(bundle))
-            } catch {
-                return .failure(error)
-            }
+    /// Sorts the managed directory against the server's set and writes the server's copy
+    /// in, unless something on this Mac is waiting on the user.
+    ///
+    /// Off the main actor: this walks the directory, reads and hashes every hook, then
+    /// writes and swaps. Engine is @MainActor and this runs from a repeating timer, so
+    /// in-line it would stall the UI on every tick — unboundedly on a slow or network
+    /// home directory.
+    private func reconcileHooks(with bundle: HookBundle) async {
+        let files = bundle.files
+        let version = bundle.version
+        let result = await Task.detached(priority: .utility) {
+            HookSync.reconcile(server: files, serverVersion: version)
         }.value
 
-        switch outcome {
-        case .success(nil):
-            if hookApplyFailing { hookApplyFailing = false }
-        case .success(let change?):
-            hookApplyFailing = false
-            Log.info("hooks synced to \(bundle.version.prefix(12)): "
-                + "\(change.written.count) written, \(change.removed.count) removed")
-        case .failure(let error):
+        hookStatus = HookStatus(hooks: result.hooks, checkedAt: Date(),
+                                serverVersion: bundle.version)
+
+        if let failure = result.failure {
             // Latched like the fetch failure. A permanent one — a path the user chmod'd,
             // the managed directory replaced by something else — would otherwise write a
             // warning every minute and bury the lines that matter.
             if !hookApplyFailing {
                 hookApplyFailing = true
-                Log.warn("could not apply hooks: \(error.localizedDescription)")
+                Log.warn("could not apply hooks: \(failure)")
+            }
+            return
+        }
+        hookApplyFailing = false
+        if result.applied {
+            Log.info("hooks synced to \(bundle.version.prefix(12)): "
+                + "\(result.written.count) written, \(result.removed.count) removed")
+        } else if hookStatus.frozen, !loggedHookFreeze {
+            loggedHookFreeze = true
+            Log.info("hook sync held: \(hookStatus.undecided.map(\.path).joined(separator: ", "))"
+                + " changed on this Mac — resolve on the Hooks page")
+        }
+        if !hookStatus.frozen { loggedHookFreeze = false }
+    }
+
+    /// Settles one file the sync stopped on, in whichever direction the user picked.
+    ///
+    /// Both directions are whole-bundle operations, because both ends only deal in whole
+    /// bundles — but each is built so that answering one question leaves every other
+    /// unanswered file exactly as it was.
+    func resolveHook(_ path: String, _ resolution: HookResolution) async {
+        guard let client = serverClient else { return }
+        let hooks = hookStatus.hooks
+        guard let hook = hooks.first(where: { $0.path == path }), hook.needsDecision,
+              !syncingHooks else { return }
+        // The same latch the tick takes. Both write the whole tree in one swap, so two of
+        // them in flight would each stage from a directory the other is about to replace,
+        // and the baseline would end up describing neither.
+        syncingHooks = true
+        defer { syncingHooks = false }
+
+        switch resolution {
+        case .takeServer:
+            let tree = HookSync.treeTakingServer(path, in: hooks)
+            let server = hooks.compactMap(\.server)
+            let outcome = await Task.detached(priority: .utility) { () -> Result<[ManagedHook], Error> in
+                do { return .success(try HookSync.install(tree, server: server).hooks) }
+                catch { return .failure(error) }
+            }.value
+            switch outcome {
+            case .success(let updated):
+                hookStatus.hooks = updated
+                Log.info("hook \(path) taken from the server")
+            case .failure(let error):
+                Log.warn("could not take \(path) from the server: \(error.localizedDescription)")
+            }
+
+        case .takeLocal:
+            guard let files = HookSync.bundlePublishing(path, in: hooks) else { return }
+            do {
+                let published = try await client.pushHooks(files)
+                Log.info("hook \(path) published as \(published.version.prefix(12))")
+                // Re-run the whole reconciliation rather than patching the status: the
+                // server now holds this Mac's copy, so the file settles on its own, and
+                // any file that was only held back by the freeze can finally land.
+                await reconcileHooks(with: published)
+            } catch {
+                Log.warn("could not publish \(path): \(error.localizedDescription)")
             }
         }
+    }
+
+    /// Lists the managed directory when the server has never been reached, so the page
+    /// has something to show offline instead of looking empty.
+    func loadHooksFromDisk() async {
+        guard hookStatus.hooks.isEmpty, hookStatus.checkedAt == nil else { return }
+        let hooks = await Task.detached(priority: .utility) {
+            HookSync.classify(local: ManagedHooks.onDisk(), server: nil,
+                              baseline: HookBaseline.load())
+        }.value
+        guard hookStatus.hooks.isEmpty, hookStatus.checkedAt == nil else { return }
+        hookStatus.hooks = hooks
     }
 
     private func clearHookSyncFailure() {
@@ -302,6 +368,10 @@ public extension Engine {
         if serverSupportsHooks != nil { serverSupportsHooks = nil }
         hookSyncFailing = false
         hookApplyFailing = false
+        loggedHookFreeze = false
+        // The states are all relative to a server. Keeping them would have the page offer
+        // to upload to a server this Mac is no longer connected to.
+        hookStatus = HookStatus()
         banner = stranded.isEmpty
             ? Banner(level: .info, text: "Disconnected from the account server.")
             : Banner(level: .warning,

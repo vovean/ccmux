@@ -102,6 +102,11 @@ public final class Engine: ObservableObject {
     var syncingHooks = false
     var hookSyncFailing = false
     var hookApplyFailing = false
+    /// Logged once per freeze rather than every tick, for the same reason as the sync
+    /// failures above.
+    var loggedHookFreeze = false
+    /// The managed hook set as the Hooks page sees it.
+    @Published public internal(set) var hookStatus = HookStatus()
     /// Nil until asked, false on a ccmuxd that predates the hook routes.
     @Published public internal(set) var serverSupportsHooks: Bool?
     private var controlHandler: ControlHandler?
@@ -137,6 +142,10 @@ public final class Engine: ObservableObject {
     public var needsAttention: Bool {
         !accountsNeedingAttention.isEmpty || !blocks.isEmpty
             || !unreachableSessions.isEmpty
+            // A held hook sync is the one state here that nothing else will clear: until
+            // it is answered this Mac stops receiving hooks entirely, and the only place
+            // that is visible is behind the menu.
+            || hookStatus.frozen
     }
 
     public init() {

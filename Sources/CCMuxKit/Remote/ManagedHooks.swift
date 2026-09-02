@@ -72,7 +72,7 @@ public enum ManagedHooks {
         version(of: onDisk(in: root))
     }
 
-    static func onDisk(in root: URL = ManagedHooks.root) -> [HookFile] {
+    public static func onDisk(in root: URL = ManagedHooks.root) -> [HookFile] {
         let fm = FileManager.default
         guard let walker = fm.enumerator(at: root,
                                          includingPropertiesForKeys: [.isRegularFileKey,
@@ -109,13 +109,20 @@ public enum ManagedHooks {
         let ordered = files.sorted {
             Array($0.path.utf8).lexicographicallyPrecedes(Array($1.path.utf8))
         }
-        for file in ordered {
-            let line = "\(file.path.utf8.count):\(file.path)\n"
-                + "\(file.content.utf8.count):\(file.content)\n"
-                + "\(file.executable)\n"
-            buffer.append(Data(line.utf8))
-        }
+        for file in ordered { buffer.append(record(file)) }
         return CryptoShim.sha256Hex(buffer)
+    }
+
+    /// One file's identity, hashed from the same record the bundle version is built from
+    /// so the two can never disagree about what "unchanged" means.
+    public static func digest(of file: HookFile) -> String {
+        CryptoShim.sha256Hex(record(file))
+    }
+
+    private static func record(_ file: HookFile) -> Data {
+        Data(("\(file.path.utf8.count):\(file.path)\n"
+            + "\(file.content.utf8.count):\(file.content)\n"
+            + "\(file.executable)\n").utf8)
     }
 
     // MARK: - Applying

@@ -19,6 +19,11 @@ public enum Paths {
     /// This Mac's identity on the account server. Kept out of settings.json so copying
     /// settings between Macs cannot give two of them the same machine id.
     public static var machineFile: URL { support.appendingPathComponent("machine.json") }
+    /// The merge base for hook syncing. Kept here rather than inside the managed
+    /// directory, which ccmux owns outright and rebuilds from scratch on every apply.
+    public static var hookBaselineFile: URL {
+        support.appendingPathComponent("hooks-baseline.json")
+    }
     /// Dropped by the shim before it launches the app, so a session started from a
     /// terminal does not pop a window over what you were doing.
     public static var headlessMarker: URL { support.appendingPathComponent(".headless") }

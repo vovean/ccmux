@@ -206,16 +206,30 @@ enum CLI {
                 case "status":
                     let remote = try await client.hooks()
                     let local = ManagedHooks.installedVersion()
+                    let hooks = HookSync.classify(local: ManagedHooks.onDisk(),
+                                                  server: remote.files,
+                                                  baseline: HookBaseline.load())
                     print("server   \(remote.version.prefix(12))  \(remote.files.count) file(s)")
                     print("this Mac \(local.prefix(12))  \(ManagedHooks.root.path)")
-                    print(local == remote.version ? "in sync" : "OUT OF SYNC — next tick will write")
-                    for file in remote.files.sorted(by: { $0.path < $1.path }) {
-                        print("  \(file.executable ? "x" : "-") \(file.path)  "
-                            + "\(file.content.utf8.count) bytes")
+                    let undecided = hooks.filter(\.needsDecision)
+                    if undecided.isEmpty {
+                        print(local == remote.version
+                              ? "in sync" : "OUT OF SYNC — next tick will write")
+                    } else {
+                        print("HELD — \(undecided.count) file(s) changed on this Mac. "
+                            + "Nothing is written until they are settled on the Hooks page, "
+                            + "or with `ccmux hooks pull` to discard them.")
+                    }
+                    for hook in hooks {
+                        let file = hook.local ?? hook.server
+                        print("  \((file?.executable ?? false) ? "x" : "-") \(hook.path)  "
+                            + "\(file?.content.utf8.count ?? 0) bytes  \(hook.state.rawValue)")
                     }
                 case "pull":
+                    // Unconditional, unlike the app's tick: this is the escape hatch for a
+                    // held sync, so it has to be able to throw local changes away.
                     let remote = try await client.hooks()
-                    let result = try ManagedHooks.apply(remote)
+                    let result = try HookSync.install(remote.files, server: remote.files)
                     print("applied \(remote.version.prefix(12)): "
                         + "\(result.written.count) written, \(result.removed.count) removed")
                     for path in result.removed { print("  removed \(path)") }

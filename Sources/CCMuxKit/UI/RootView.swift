@@ -2,7 +2,7 @@ import CCMuxCore
 import SwiftUI
 
 public enum Page: String, CaseIterable, Identifiable {
-    case accounts, sessions, settings
+    case accounts, sessions, hooks, settings
 
     public var id: String { rawValue }
 
@@ -10,6 +10,7 @@ public enum Page: String, CaseIterable, Identifiable {
         switch self {
         case .accounts: return "Accounts"
         case .sessions: return "Sessions"
+        case .hooks: return "Hooks"
         case .settings: return "Settings"
         }
     }
@@ -18,6 +19,7 @@ public enum Page: String, CaseIterable, Identifiable {
         switch self {
         case .accounts: return "person.2"
         case .sessions: return "terminal"
+        case .hooks: return "curlybraces"
         case .settings: return "gearshape"
         }
     }
@@ -99,6 +101,7 @@ public struct RootView: View {
         switch nav.page {
         case .accounts: AccountsPage(engine: engine, nav: nav)
         case .sessions: SessionsPage(engine: engine, nav: nav)
+        case .hooks: HooksPage(engine: engine)
         case .settings: SettingsPage(engine: engine)
         }
     }
@@ -142,6 +145,10 @@ public struct RootView: View {
                     ForEach(engine.blocks.all) { blocked in
                         attentionRow("\(engine.sessionLabel(blocked.sessionID)) is blocked")
                     }
+                    if engine.hookStatus.frozen {
+                        attentionRow("\(engine.hookStatus.undecided.count) hook(s) changed "
+                            + "on this Mac")
+                    }
                 }
                 .padding(14)
             }
@@ -173,6 +180,9 @@ public struct RootView: View {
                 || engine.accountsNeedingAttention.contains { account in
                     engine.sessions.contains { $0.accountID == account.id }
                 }
+        // A held sync is the one hook state the user has to act on; everything else
+        // resolves itself on the next tick.
+        case .hooks: return engine.hookStatus.frozen
         case .settings: return false
         }
     }
