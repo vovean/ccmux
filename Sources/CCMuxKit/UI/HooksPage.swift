@@ -203,13 +203,16 @@ struct HooksPage: View {
     @ViewBuilder
     private func script(_ hook: ManagedHook) -> some View {
         if let body = hook.body, !body.isEmpty {
-            ScrollView(.horizontal) {
+            // Both axes: with the horizontal one alone anything past the cap was clipped
+            // rather than reachable, and a hook is usually longer than it is wide.
+            ScrollView([.vertical, .horizontal]) {
                 highlighted(shown(body))
                     .font(.system(size: 11, design: .monospaced))
                     .textSelection(.enabled)
                     .padding(8)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+            // A cap, not a height: a four-line hook keeps a four-line box.
             .frame(maxHeight: 320)
             .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .fill(Color.primary.opacity(0.05)))
