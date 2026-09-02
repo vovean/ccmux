@@ -30,6 +30,62 @@ struct LiveServerTests {
                             password: password, fingerprint: fingerprint)
     }
 
+    /// The whole publish loop against a real ccmuxd: a set is published, this Mac edits
+    /// one file, and the Upload button's bundle goes back.
+    ///
+    /// Worth a real server rather than a stub because the failure it guards against is
+    /// silent and fleet-wide: publishing the whole local tree instead of one file would
+    /// push every other unanswered edit to every Mac, and both ends would still agree on
+    /// the hash afterwards.
+    @Test func publishingOneEditedFileLeavesTheRestOfTheServersSetAlone() async throws {
+        let client = try Self.client()
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ccmux-live-hooks-\(UUID().uuidString)",
+                                    isDirectory: true)
+            .appendingPathComponent("managed", isDirectory: true)
+        let baselineFile = root.deletingLastPathComponent()
+            .appendingPathComponent("baseline.json")
+        defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
+
+        let published = [HookFile(path: "a.sh", content: "#!/bin/sh\necho a\n",
+                                  executable: true),
+                         HookFile(path: "b.sh", content: "#!/bin/sh\necho b\n",
+                                  executable: true)]
+        _ = try await client.pushHooks(published)
+
+        // This Mac writes the set, then edits both files — one the user will answer for,
+        // one they will not.
+        let bundle = try await client.hooks()
+        _ = try HookSync.install(bundle.files, server: bundle.files, root: root,
+                                 baselineFile: baselineFile)
+        for (path, body) in [("a.sh", "#!/bin/sh\necho mine-a\n"),
+                             ("b.sh", "#!/bin/sh\necho mine-b\n")] {
+            try body.write(to: root.appendingPathComponent(path), atomically: true,
+                           encoding: .utf8)
+        }
+        let hooks = HookSync.classify(local: ManagedHooks.onDisk(in: root),
+                                      server: bundle.files,
+                                      baseline: HookBaseline.load(from: baselineFile))
+        #expect(hooks.allSatisfy { $0.state == .editedHere })
+
+        let toPublish = try #require(HookSync.bundlePublishing("a.sh", in: hooks))
+        _ = try await client.pushHooks(toPublish)
+
+        let after = try await client.hooks()
+        #expect(after.files.first { $0.path == "a.sh" }?.content == "#!/bin/sh\necho mine-a\n")
+        // The unanswered edit stayed on this Mac.
+        #expect(after.files.first { $0.path == "b.sh" }?.content == "#!/bin/sh\necho b\n")
+        // And the two ends agree on the hash, which is what the sync compares.
+        #expect(ManagedHooks.version(of: after.files) == after.version)
+
+        // b.sh is still a question; a.sh is settled.
+        let settled = HookSync.classify(local: ManagedHooks.onDisk(in: root),
+                                        server: after.files,
+                                        baseline: HookBaseline.load(from: baselineFile))
+        #expect(settled.first { $0.path == "a.sh" }?.state == .inSync)
+        #expect(settled.first { $0.path == "b.sh" }?.state == .editedHere)
+    }
+
     @Test func theProbeAgreesWithTheFingerprintWePin() async throws {
         let probed = try await ServerClient.probeFingerprint(baseURL: try Self.baseURL())
         // What install-ccmuxd.sh prints, lower-cased and unseparated.
