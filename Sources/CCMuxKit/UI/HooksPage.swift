@@ -183,7 +183,11 @@ struct HooksPage: View {
     }
 
     private func highlighted(_ source: String) -> Text {
-        ShellSyntax.highlight(source).reduce(Text("")) { text, run in
+        // Each run becomes its own Text, and concatenating tens of thousands of them
+        // blocks the main thread for seconds. Nothing enforces a size on a published
+        // script, and a hook that large is not being read in a 320-point box anyway.
+        guard source.utf8.count <= 64_000 else { return Text(source) }
+        return ShellSyntax.highlight(source).reduce(Text("")) { text, run in
             text + Text(run.text).foregroundColor(colour(run.kind))
         }
     }

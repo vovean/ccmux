@@ -136,6 +136,22 @@ it: the handle is read from the process when you press it — the UUID out of it
 feature and on ones ccmux did not launch. macOS will ask once to let ccmux control
 iTerm; because ccmux is ad-hoc signed it may ask again after an upgrade.
 
+**Hooks** — the hook scripts ccmux syncs from the account server, each with its state,
+its script, and when its content last arrived. Clicking a path opens it in VS Code.
+
+ccmux owns `~/.claude/hooks/managed` outright, so a hook withdrawn on the server stops
+running everywhere rather than lingering on whichever Mac had it. It writes nothing else
+— in particular never `settings.json`, so a synced hook only runs once you point a hook
+at it yourself.
+
+Editing a script is how you change one. When the server moves and this Mac has not, the
+new copy is written on the next tick with nothing to do. When this Mac has moved, the
+sync stops: nothing is written to the directory at all — including hooks the other Macs
+have already picked up — until you press **Upload** to publish your copy or **Download**
+to throw it away. Resolving one file leaves the others alone in both directions. A file
+you delete by hand is the exception and comes straight back, since deleting a hook is
+rarely deliberate and a missing hook fails silently.
+
 **Settings** — warning threshold, which windows it watches, auto-switch behaviour, the
 Chrome profile each account's login page opens in, and the project-to-account bindings
 below.
@@ -284,7 +300,8 @@ dependency, and token refreshes start coming from its IP rather than your laptop
 
     ~/Library/Application Support/ccmux/    accounts.json, usage.json, sessions.json,
                                             settings.json, machine.json, ccmux.log,
-                                            control.sock, ns/
+                                            control.sock, ns/, hooks-baseline.json
+    ~/.claude/hooks/managed/                the synced hook scripts — owned by ccmux
     Keychain "ccmux-credentials"             one item per account, keyed by account uuid
     Keychain "ccmux-server"                  the ccmuxd basic-auth password
 
