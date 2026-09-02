@@ -120,7 +120,8 @@ struct HooksPage: View {
                 }
 
                 Button {
-                    note = EditorOpener.open(url(of: hook)).message
+                    let target = url(of: hook)
+                    Task { note = await EditorOpener.open(target).message }
                 } label: {
                     Text(Format.shortenHome(url(of: hook).path))
                         .font(.caption.monospaced())

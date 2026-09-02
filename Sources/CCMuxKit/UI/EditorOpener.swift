@@ -22,19 +22,24 @@ public enum EditorOpener {
         }
     }
 
+    /// Off the main actor throughout: every attempt waits for a launcher to exit, and a
+    /// cold VS Code takes seconds. Run from a button action it would freeze the window for
+    /// exactly that long.
     @discardableResult
-    public static func open(_ url: URL) -> Outcome {
+    public static func open(_ url: URL) async -> Outcome {
         guard FileManager.default.fileExists(atPath: url.path) else {
             return .failed("\(url.lastPathComponent) is not on this Mac.")
         }
-        // The CLI first: it honours whichever build the user actually installed, including
-        // VSCodium symlinked as `code`, and it reuses the open window rather than
-        // launching a second one.
-        if let cli = commandLineTool(), run(cli, [url.path]) { return .opened }
-        for bundleID in bundleIDs where run("/usr/bin/open", ["-b", bundleID, url.path]) {
-            return .opened
-        }
-        NSWorkspace.shared.activateFileViewerSelecting([url])
+        let path = url.path
+        let launched = await Task.detached(priority: .userInitiated) { () -> Bool in
+            // The CLI first: it honours whichever build the user actually installed,
+            // including VSCodium symlinked as `code`, and it reuses the open window
+            // rather than launching a second one.
+            if let cli = commandLineTool(), run(cli, [path]) { return true }
+            return bundleIDs.contains { run("/usr/bin/open", ["-b", $0, path]) }
+        }.value
+        if launched { return .opened }
+        await MainActor.run { NSWorkspace.shared.activateFileViewerSelecting([url]) }
         return .revealed
     }
 
