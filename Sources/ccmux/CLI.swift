@@ -22,6 +22,8 @@ enum CLI {
         Command(name: "server-check",
                 usage: "server-check <address> [--username <u>] [--fingerprint <hex>]",
                 run: serverCheck),
+        Command(name: "hooks", usage: "hooks status | hooks push <dir> | hooks pull",
+                run: hooks),
         Command(name: "shell-init", usage: "shell-init", run: { _ in shellInit() }),
         Command(name: "install-agent", usage: "install-agent",
                 run: { _ in installAgent() }),
@@ -168,6 +170,96 @@ enum CLI {
             return candidate
         }
         return nil
+    }
+
+    // MARK: - hooks
+
+    /// Publishes and inspects the hook set ccmuxd holds for every Mac.
+    ///
+    /// A separate verb from the app's own sync so publishing stays deliberate: the tick
+    /// only ever pulls, and the one command that can change what three machines write to
+    /// disk has to be typed.
+    static func hooks(_ arguments: [String]) -> Never {
+        setvbuf(stdout, nil, _IONBF, 0)
+        let action = arguments.first ?? "status"
+        let settings = JSONStore.load(Settings.self, from: Paths.settingsFile) ?? Settings()
+        guard let connection = settings.server else {
+            fail("no account server is configured")
+        }
+        let urls = connection.addresses.compactMap(URL.init(string:))
+        guard !urls.isEmpty else { fail("the configured server address is not a URL") }
+        guard let password = ProcessInfo.processInfo.environment["CCMUX_PASSWORD"]
+            ?? ((try? ServerPasswordStore.read()) ?? nil) else {
+            fail("no server password: set CCMUX_PASSWORD or connect the server in ccmux")
+        }
+        let client = ServerClient(baseURLs: urls, username: connection.username,
+                                  password: password, fingerprint: connection.fingerprint,
+                                  proxy: settings.upstreamProxy,
+                                  proxyPassword: try? ProxyPasswordStore.read())
+
+        let done = DispatchSemaphore(value: 0)
+        var failure: String?
+        Task {
+            defer { done.signal() }
+            do {
+                switch action {
+                case "status":
+                    let remote = try await client.hooks()
+                    let local = ManagedHooks.installedVersion()
+                    print("server   \(remote.version.prefix(12))  \(remote.files.count) file(s)")
+                    print("this Mac \(local.prefix(12))  \(ManagedHooks.root.path)")
+                    print(local == remote.version ? "in sync" : "OUT OF SYNC — next tick will write")
+                    for file in remote.files.sorted(by: { $0.path < $1.path }) {
+                        print("  \(file.executable ? "x" : "-") \(file.path)  "
+                            + "\(file.content.utf8.count) bytes")
+                    }
+                case "pull":
+                    let remote = try await client.hooks()
+                    let result = try ManagedHooks.apply(remote)
+                    print("applied \(remote.version.prefix(12)): "
+                        + "\(result.written.count) written, \(result.removed.count) removed")
+                    for path in result.removed { print("  removed \(path)") }
+                case "push":
+                    guard arguments.count > 1 else { failure = "push needs a directory"; return }
+                    let files = try collectHookFiles(from: arguments[1])
+                    guard !files.isEmpty else { failure = "no files under \(arguments[1])"; return }
+                    let bundle = try await client.pushHooks(files)
+                    print("published \(bundle.version.prefix(12)): \(bundle.files.count) file(s)")
+                    for file in bundle.files { print("  \(file.executable ? "x" : "-") \(file.path)") }
+                default:
+                    failure = "unknown hooks action \(action)"
+                }
+            } catch {
+                failure = error.localizedDescription
+            }
+        }
+        done.wait()
+        if let failure { fail(failure) }
+        exit(0)
+    }
+
+    /// Reads a directory into a bundle, keeping the executable bit — a hook that arrives
+    /// non-executable never runs, and nothing about that failure says why.
+    private static func collectHookFiles(from directory: String) throws -> [HookFile] {
+        let root = URL(fileURLWithPath: directory).standardizedFileURL
+        let fm = FileManager.default
+        guard let walker = fm.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey],
+                                         options: [.skipsHiddenFiles]) else { return [] }
+        var files: [HookFile] = []
+        for case let url as URL in walker {
+            guard (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
+            else { continue }
+            let relative = String(url.standardizedFileURL.path.dropFirst(root.path.count + 1))
+            if let why = ManagedHooks.validate(relative) {
+                fail("\(relative): \(why)")
+            }
+            let content = try String(contentsOf: url, encoding: .utf8)
+            let mode = ((try? fm.attributesOfItem(atPath: url.path))?[.posixPermissions]
+                as? Int) ?? 0
+            files.append(HookFile(path: relative, content: content,
+                                  executable: (mode & 0o100) != 0))
+        }
+        return files.sorted { $0.path < $1.path }
     }
 
     // MARK: - server-check

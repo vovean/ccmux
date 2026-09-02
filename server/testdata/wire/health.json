@@ -3,7 +3,8 @@
   "accounts": 2,
   "uptimeSeconds": 1234.5,
   "features": [
-    "sessions"
+    "sessions",
+    "hooks"
   ],
   "machines": 2
 }

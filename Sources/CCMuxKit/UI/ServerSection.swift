@@ -200,6 +200,21 @@ struct ServerSection: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            Toggle("Sync hook scripts from the server", isOn: Binding(
+                get: { engine.settings.syncManagedHooks },
+                set: { engine.setSyncManagedHooks($0) }))
+                .toggleStyle(.checkbox)
+                .font(.caption)
+            // Named rather than implied: this is the one thing ccmux writes outside its
+            // own directory, and the files are executable.
+            Text("Writes ~/.claude/hooks/managed and nothing else — never settings.json, "
+                 + "so a synced hook only runs once you point a hook at it yourself."
+                 + (engine.serverSupportsHooks == false
+                    ? " This server is too old to serve them." : ""))
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
             Toggle("Show sessions from other Macs", isOn: Binding(
                 get: { engine.settings.showForeignSessions },
                 set: { engine.setShowForeignSessions($0) }))

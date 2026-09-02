@@ -142,6 +142,97 @@ public extension Engine {
         return nil
     }
 
+    // MARK: - Hooks
+
+    /// Pulls the server's hook set and writes it into `~/.claude/hooks/managed`.
+    ///
+    /// Nothing is registered and nothing is run: the files sit there inert until a hook is
+    /// pointed at one by hand. That separation is deliberate — syncing is a background
+    /// tick, and a background tick should not be able to make this Mac start executing
+    /// something new on its own.
+    func syncHooks() async {
+        guard settings.syncManagedHooks, let client = serverClient else { return }
+        guard !syncingHooks else { return }
+        syncingHooks = true
+        defer { syncingHooks = false }
+
+        // Asked once per client, through the mechanism the rest of the protocol uses:
+        // capabilities are advertised in `HealthResponse.features`, not inferred from
+        // which routes 404. The 404 path below stays as a fallback for a server that
+        // serves hooks but predates the advertisement.
+        if serverSupportsHooks == nil, let health = try? await client.health() {
+            if let features = health.features {
+                serverSupportsHooks = features.contains(ServerAPI.hooksFeature)
+                if serverSupportsHooks == false { return }
+            }
+        }
+
+        let bundle: HookBundle
+        do {
+            bundle = try await client.hooks()
+            if serverSupportsHooks != true { serverSupportsHooks = true }
+        } catch ServerClientError.unsupported {
+            // Kept on the tick rather than latched off, like session sharing: upgrading
+            // the server should start working without touching the client.
+            if serverSupportsHooks != false { serverSupportsHooks = false }
+            // Cleared here too. Latching only on the success path left the flag stuck
+            // after a server downgrade, and the next genuine failure was never logged.
+            clearHookSyncFailure()
+            return
+        } catch {
+            if !hookSyncFailing {
+                hookSyncFailing = true
+                Log.info("hook sync failed: \(error.localizedDescription)")
+            }
+            return
+        }
+        clearHookSyncFailure()
+
+        // Off the main actor: this walks the directory, reads and hashes every hook, then
+        // writes and swaps. Engine is @MainActor and this runs from a repeating timer, so
+        // in-line it would stall the UI on every tick — unboundedly on a slow or network
+        // home directory.
+        let outcome = await Task.detached(priority: .utility) { () -> Result<(written: [String],
+                                                                              removed: [String])?, Error> in
+            // Compared against what is actually on disk, so a hand-edited or deleted hook
+            // is restored rather than assumed present.
+            guard ManagedHooks.installedVersion() != bundle.version else { return .success(nil) }
+            do {
+                return .success(try ManagedHooks.apply(bundle))
+            } catch {
+                return .failure(error)
+            }
+        }.value
+
+        switch outcome {
+        case .success(nil):
+            if hookApplyFailing { hookApplyFailing = false }
+        case .success(let change?):
+            hookApplyFailing = false
+            Log.info("hooks synced to \(bundle.version.prefix(12)): "
+                + "\(change.written.count) written, \(change.removed.count) removed")
+        case .failure(let error):
+            // Latched like the fetch failure. A permanent one — a path the user chmod'd,
+            // the managed directory replaced by something else — would otherwise write a
+            // warning every minute and bury the lines that matter.
+            if !hookApplyFailing {
+                hookApplyFailing = true
+                Log.warn("could not apply hooks: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func clearHookSyncFailure() {
+        guard hookSyncFailing else { return }
+        hookSyncFailing = false
+        Log.info("hook sync recovered")
+    }
+
+    func setSyncManagedHooks(_ on: Bool) {
+        updateSettings { $0.syncManagedHooks = on }
+        if on { Task { await syncHooks() } }
+    }
+
     /// Records which address is answering now, so the next launch starts there.
     ///
     /// Called from housekeeping rather than from the request path: the address changes
@@ -206,6 +297,11 @@ public extension Engine {
         vault.setRemote(nil, delegated: [])
         delegationPlan = nil
         forgetForeignSessions()
+        // Reset with the rest: left set, the Settings panel keeps telling the user the
+        // next server is too old to serve hooks.
+        if serverSupportsHooks != nil { serverSupportsHooks = nil }
+        hookSyncFailing = false
+        hookApplyFailing = false
         banner = stranded.isEmpty
             ? Banner(level: .info, text: "Disconnected from the account server.")
             : Banner(level: .warning,

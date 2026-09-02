@@ -70,10 +70,11 @@ func run() error {
 	registry := NewRegistry(NewOAuthClient(), secrets, config.AccountsFile())
 	registry.Bootstrap()
 	machines := NewMachineStore()
+	hooks := NewHookStore(config.HooksFile())
 
 	server := &http.Server{
 		Addr:              net.JoinHostPort(config.Host, strconv.Itoa(config.Port)),
-		Handler:           NewMux(registry, machines, credential),
+		Handler:           NewMux(registry, machines, hooks, credential),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,

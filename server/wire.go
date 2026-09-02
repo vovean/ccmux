@@ -27,8 +27,9 @@ const (
 // missing — an older ccmuxd, which omits the field entirely — turns the feature off and
 // says why, instead of showing errors from routes that answer 404.
 const featureSessions = "sessions"
+const featureHooks = "hooks"
 
-var serverFeatures = []string{featureSessions}
+var serverFeatures = []string{featureSessions, featureHooks}
 
 // Time marshals as RFC 3339 with second precision.
 //
@@ -253,3 +254,25 @@ type ServerErrorDetail struct {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// One file ccmux writes under ~/.claude/hooks/managed on every Mac. Content is carried
+// inline rather than by reference: a hook set is small, and a URL would be a second thing
+// to authenticate and a second thing to be unreachable when a laptop changes network.
+type HookFile struct {
+	Path       string `json:"path"`
+	Content    string `json:"content"`
+	Executable bool   `json:"executable"`
+}
+
+// The whole hook set, with a content hash so a client can tell in one field whether it
+// has anything to do.
+type HookBundle struct {
+	APIVersion int        `json:"apiVersion"`
+	Version    string     `json:"version"`
+	UpdatedAt  Time       `json:"updatedAt"`
+	Files      []HookFile `json:"files"`
+}
+
+type HookPushRequest struct {
+	Files []HookFile `json:"files"`
+}

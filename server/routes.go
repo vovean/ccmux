@@ -14,7 +14,7 @@ import (
 
 // The HTTP surface. Every route sits behind basic auth; the paths and the JSON shapes are
 // the contract in wire.go.
-func NewMux(registry *Registry, machines *MachineStore,
+func NewMux(registry *Registry, machines *MachineStore, hooks *HookStore,
 	credential BasicAuthCredential) *http.ServeMux {
 	mux := http.NewServeMux()
 	throttle := newAuthThrottle()
@@ -26,6 +26,37 @@ func NewMux(registry *Registry, machines *MachineStore,
 		health := registry.Health()
 		health.Machines = machines.Count(time.Now())
 		writeJSON(w, http.StatusOK, health)
+	}))
+
+	// The hook set every Mac should be running. GET is on the housekeeping path, so it
+	// answers from memory; PUT is the rare, deliberate publish.
+	mux.Handle("GET "+apiPrefix+"/hooks", guard(func(w http.ResponseWriter, r *http.Request) {
+		bundle, err := hooks.Get()
+		if err != nil {
+			// Deliberately not an empty bundle: the client deletes whatever is not in the
+			// answer, so "we cannot read the set" has to be refused rather than served as
+			// "there is no set".
+			writeError(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, bundle)
+	}))
+
+	mux.Handle("PUT "+apiPrefix+"/hooks", guard(func(w http.ResponseWriter, r *http.Request) {
+		var body HookPushRequest
+		if !decodeBody(w, r, &body) {
+			return
+		}
+		bundle, err := hooks.Replace(body.Files, time.Now())
+		if err != nil {
+			// A rejected bundle is the author's mistake, not a server fault, and the
+			// reason is the only thing that makes it fixable.
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		logInfo("hook bundle replaced: %d file(s), version %s", len(bundle.Files),
+			bundle.Version[:12])
+		writeJSON(w, http.StatusOK, bundle)
 	}))
 
 	mux.Handle("GET "+apiPrefix+"/accounts", guard(func(w http.ResponseWriter, r *http.Request) {

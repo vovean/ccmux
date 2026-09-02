@@ -172,6 +172,12 @@ public struct Settings: Codable, Equatable {
     /// keeps reporting its own either way, so turning it off on a laptop does not blank
     /// that laptop's sessions everywhere else.
     public var showForeignSessions: Bool
+    /// Whether to write the account server's hook set into ~/.claude/hooks/managed.
+    ///
+    /// Opt-out rather than opt-in: the files do nothing until a hook is registered by
+    /// hand, so syncing them is inert on a Mac that never asked for one. It is still a
+    /// switch, because it is the one thing ccmux writes outside its own directory.
+    public var syncManagedHooks: Bool
     /// Accounts whose refresh lineage now belongs to the server. This Mac holds only
     /// short-lived access tokens for them and must never run a refresh grant of its own —
     /// that is precisely the two-holders-of-one-lineage case that logs an account out.
@@ -190,6 +196,7 @@ public struct Settings: Codable, Equatable {
                 directoryBindings: [DirectoryBinding] = [],
                 server: ServerConnection? = nil,
                 showForeignSessions: Bool = true,
+                syncManagedHooks: Bool = true,
                 delegatedAccountIDs: [String] = []) {
         self.warnThresholdPercent = warnThresholdPercent
         self.budgetWarnPercent = budgetWarnPercent
@@ -204,6 +211,7 @@ public struct Settings: Codable, Equatable {
         self.directoryBindings = directoryBindings
         self.server = server
         self.showForeignSessions = showForeignSessions
+        self.syncManagedHooks = syncManagedHooks
         self.delegatedAccountIDs = delegatedAccountIDs
     }
 
@@ -240,6 +248,8 @@ public struct Settings: Codable, Equatable {
         server = try c.decodeIfPresent(ServerConnection.self, forKey: .server)
         showForeignSessions = try c.decodeIfPresent(Bool.self, forKey: .showForeignSessions)
             ?? d.showForeignSessions
+        syncManagedHooks = try c.decodeIfPresent(Bool.self, forKey: .syncManagedHooks)
+            ?? d.syncManagedHooks
         delegatedAccountIDs = try c.decodeIfPresent([String].self,
                                                     forKey: .delegatedAccountIDs)
             ?? d.delegatedAccountIDs

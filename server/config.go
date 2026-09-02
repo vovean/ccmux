@@ -24,6 +24,7 @@ func (c Config) AccountsFile() string  { return filepath.Join(c.DataDir, "accoun
 func (c Config) SecretsFile() string   { return filepath.Join(c.DataDir, "secrets.sealed") }
 func (c Config) MasterKeyFile() string { return filepath.Join(c.DataDir, "master.key") }
 func (c Config) AuthFile() string      { return filepath.Join(c.DataDir, "auth") }
+func (c Config) HooksFile() string     { return filepath.Join(c.DataDir, "hooks.json") }
 
 const usage = `ccmuxd — holds ccmux's accounts and their refresh lineages.
 

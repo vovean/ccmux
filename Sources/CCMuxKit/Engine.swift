@@ -99,6 +99,11 @@ public final class Engine: ObservableObject {
     /// every tick. ccmux.log is where a credential going wrong is diagnosed; three lines a
     /// minute of "could not reach the server" would bury exactly that.
     var sessionSyncFailing = false
+    var syncingHooks = false
+    var hookSyncFailing = false
+    var hookApplyFailing = false
+    /// Nil until asked, false on a ccmuxd that predates the hook routes.
+    @Published public internal(set) var serverSupportsHooks: Bool?
     private var controlHandler: ControlHandler?
     private var controlServer: ControlServer?
     private var timers: [Timer] = []
@@ -246,7 +251,13 @@ public final class Engine: ObservableObject {
             }
         })
         timers.append(Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refreshChromeProfiles() }
+            Task { @MainActor in
+                self?.refreshChromeProfiles()
+                // A minute, not the 20s housekeeping tick: a hook set changes when
+                // someone publishes one, which is rare, and the answer is a whole bundle
+                // rather than a diff.
+                await self?.syncHooks()
+            }
         })
     }
 

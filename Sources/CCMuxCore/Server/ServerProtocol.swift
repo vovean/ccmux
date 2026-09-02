@@ -19,6 +19,7 @@ public enum ServerAPI {
     /// Cross-machine session visibility. Absent from a ccmuxd built before it existed,
     /// whose new routes answer 404.
     public static let sessionsFeature = "sessions"
+    public static let hooksFeature = "hooks"
 }
 
 /// An account as the server describes it. Deliberately not `Account`: the client's record
@@ -336,6 +337,77 @@ public struct ServerErrorResponse: Codable, Equatable, Sendable {
     public init(message: String) { self.error = Detail(message: message) }
 
     public var message: String? { error.message }
+}
+
+/// One hook script the server holds for every Mac to run.
+public struct HookFile: Codable, Equatable, Sendable {
+    public var path: String
+    public var content: String
+    public var executable: Bool
+
+    public init(path: String, content: String, executable: Bool) {
+        self.path = path
+        self.content = content
+        self.executable = executable
+    }
+
+    private enum CodingKeys: String, CodingKey { case path, content, executable }
+
+    /// `executable` is absent from a hand-written bundle more often than not, and a hook
+    /// that arrives non-executable simply never runs.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        path = try c.decode(String.self, forKey: .path)
+        content = try c.decode(String.self, forKey: .content)
+        executable = try c.decodeIfPresent(Bool.self, forKey: .executable) ?? false
+    }
+}
+
+/// The whole hook set, identified by a content hash so a Mac can tell in one comparison
+/// whether it has anything to write.
+public struct HookBundle: Codable, Equatable, Sendable {
+    public var apiVersion: Int
+    public var version: String
+    public var updatedAt: Date?
+    public var files: [HookFile]
+
+    public init(apiVersion: Int = ServerAPI.version, version: String,
+                updatedAt: Date? = nil, files: [HookFile]) {
+        self.apiVersion = apiVersion
+        self.version = version
+        self.updatedAt = updatedAt
+        self.files = files
+    }
+
+    private enum CodingKeys: String, CodingKey { case apiVersion, version, updatedAt, files }
+
+    /// `version` and `files` are required, deliberately against the leniency used
+    /// elsewhere in this file. Whatever this decodes to decides which executable files get
+    /// deleted, so a truncated or half-written answer has to fail the decode and land in
+    /// the retry path — defaulting it to an empty set would read as an authoritative
+    /// instruction to remove every hook on the machine.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        apiVersion = try c.decodeIfPresent(Int.self, forKey: .apiVersion) ?? ServerAPI.version
+        version = try c.decode(String.self, forKey: .version)
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt)
+        files = try c.decode([HookFile].self, forKey: .files)
+        if version.isEmpty { throw ServerProtocolError.emptyHookVersion }
+    }
+}
+
+public enum ServerProtocolError: Error, LocalizedError, Equatable {
+    case emptyHookVersion
+    public var errorDescription: String? {
+        switch self {
+        case .emptyHookVersion: return "the hook bundle carried no version"
+        }
+    }
+}
+
+public struct HookPushRequest: Codable, Equatable, Sendable {
+    public var files: [HookFile]
+    public init(files: [HookFile]) { self.files = files }
 }
 
 public extension String {

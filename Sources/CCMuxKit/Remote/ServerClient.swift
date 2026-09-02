@@ -253,6 +253,29 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
         try await post(["accounts", "adopt"], body)
     }
 
+    // MARK: - Hooks
+
+    /// The hook set this Mac should be running.
+    ///
+    /// Treated as unsupported rather than an error on an older ccmuxd, the same as the
+    /// session routes: upgrading the server should start working on its own.
+    public func hooks() async throws -> HookBundle {
+        do {
+            let bundle: HookBundle = try await get(["hooks"])
+            guard bundle.apiVersion == ServerAPI.version else {
+                throw ServerClientError.incompatible(bundle.apiVersion)
+            }
+            return bundle
+        } catch {
+            throw Self.isMissingRoute(error) ? ServerClientError.unsupported : error
+        }
+    }
+
+    @discardableResult
+    public func pushHooks(_ files: [HookFile]) async throws -> HookBundle {
+        try await put(["hooks"], HookPushRequest(files: files))
+    }
+
     // MARK: - Sessions across machines
 
     /// Reports this Mac's whole session list and gets everyone's back — one round trip
@@ -326,6 +349,12 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
                                                             _ body: Body) async throws
         -> Response {
         try await send(path, method: "POST", body: try JSONStore.encoder.encode(body))
+    }
+
+    private func put<Body: Encodable, Response: Decodable>(_ path: [String],
+                                                           _ body: Body) async throws
+        -> Response {
+        try await send(path, method: "PUT", body: try JSONStore.encoder.encode(body))
     }
 
     private func delete(_ path: [String]) async throws {
