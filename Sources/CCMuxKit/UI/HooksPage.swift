@@ -212,7 +212,8 @@ struct HooksPage: View {
                 Text("Active").font(.caption2)
             }
             .toggleStyle(.checkbox)
-            .disabled(hook.server == nil || !engine.serverSupportsHookActivation)
+            .disabled(hook.server == nil || hook.state == .unknown
+                      || !engine.serverSupportsHookActivation)
             .help(activeHelp(hook, event: event))
         } else {
             Text("not registerable")
@@ -223,6 +224,7 @@ struct HooksPage: View {
     }
 
     private func activeHelp(_ hook: ManagedHook, event: String) -> String {
+        if hook.state == .unknown { return "The server has not been reached yet." }
         if hook.server == nil { return "Publish it first — this is the server's setting." }
         if !engine.serverSupportsHookActivation {
             return "This ccmuxd is too old to track which hooks are active."

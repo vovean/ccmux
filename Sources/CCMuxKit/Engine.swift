@@ -106,6 +106,13 @@ public final class Engine: ObservableObject {
     /// failures above.
     var loggedHookFreeze = false
     var hookRegisterFailing = false
+    var loggedUnregisterable: Set<String> = []
+    var hookFeaturesRead = false
+    /// When this Mac last asked the server for a delegated account's usage — distinct
+    /// from how old the answer was, which is what the snapshot records.
+    var lastDelegatedAsk: [String: Date] = [:]
+    /// Serialises the settings.json read-modify-write; see `applyRegistration`.
+    var registrationChain: Task<Void, Never>?
     /// The managed hook set as the Hooks page sees it.
     @Published public internal(set) var hookStatus = HookStatus()
     /// Nil until asked, false on a ccmuxd that predates the hook routes.

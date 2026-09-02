@@ -244,8 +244,10 @@ enum CLI {
                     var files = try collectHookFiles(from: arguments[1])
                     guard !files.isEmpty else { failure = "no files under \(arguments[1])"; return }
                     // Activation lives on the server and not on disk, so a directory push
-                    // would re-register everything the user had turned off.
-                    let current = (try? await client.hooks())?.files ?? []
+                    // would re-register everything the user had turned off. A failure to
+                    // read it has to stop the push: defaulting to active would turn every
+                    // deactivated script back on, on every Mac.
+                    let current = try await client.hooks().files
                     let wasActive = Dictionary(current.map { ($0.path, $0.active) },
                                                uniquingKeysWith: { a, _ in a })
                     for i in files.indices {

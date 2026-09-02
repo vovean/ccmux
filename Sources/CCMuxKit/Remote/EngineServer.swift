@@ -160,8 +160,13 @@ public extension Engine {
         // capabilities are advertised in `HealthResponse.features`, not inferred from
         // which routes 404. The 404 path below stays as a fallback for a server that
         // serves hooks but predates the advertisement.
-        if serverSupportsHooks == nil, let health = try? await client.health() {
+        // Keyed on whether the features were ever actually read, not on
+        // `serverSupportsHooks`: that flag is also set by a successful hooks() call, so a
+        // single failed health probe used to leave activation switched off for the life
+        // of the app against a server that supports it perfectly well.
+        if !hookFeaturesRead, let health = try? await client.health() {
             if let features = health.features {
+                hookFeaturesRead = true
                 serverSupportsHooks = features.contains(ServerAPI.hooksFeature)
                 serverSupportsHookActivation =
                     features.contains(ServerAPI.hookActivationFeature)
@@ -245,21 +250,48 @@ public extension Engine {
     private func registerHooks(from bundle: HookBundle, installed: [ManagedHook]) async {
         guard settings.registerManagedHooks else { return }
         let onDisk = Set(installed.compactMap { $0.local == nil ? nil : $0.path })
-        let active = bundle.files.filter { $0.active && onDisk.contains($0.path) }
-            .map(\.path)
-        await applyRegistration(active)
+        // Only scripts actually written: registering one the sync is holding back would
+        // point Claude Code at a path that does not exist.
+        let present = bundle.files.filter { onDisk.contains($0.path) }
+        await applyRegistration(known: present.map(\.path),
+                                active: present.filter(\.active).map(\.path))
     }
 
-    private func applyRegistration(_ active: [String]) async {
+    /// Serialised through one chain. Three paths reach this — the tick, an Active toggle
+    /// and the switch itself — and each suspends over a read-modify-write of a file the
+    /// user owns, so unordered they lose each other's changes: the classic one being the
+    /// switch turned off while a tick that already passed the guard writes the entries
+    /// back in.
+    private func applyRegistration(known: [String], active: [String]) async {
+        let previous = registrationChain
         let file = Paths.claudeHome.appendingPathComponent("settings.json")
-        let outcome = await Task.detached(priority: .utility) { () -> Result<HookRegistration.Change, Error> in
-            do { return .success(try HookRegistration.reconcile(active: active,
-                                                                settingsFile: file)) }
-            catch { return .failure(error) }
-        }.value
+        let task = Task { @MainActor [weak self] in
+            _ = await previous?.value
+            let outcome = await Task.detached(priority: .utility) { () -> Result<HookRegistration.Change, Error> in
+                do {
+                    return .success(try HookRegistration.reconcile(known: known,
+                                                                   active: active,
+                                                                   settingsFile: file))
+                } catch {
+                    return .failure(error)
+                }
+            }.value
+            self?.recordRegistration(outcome)
+        }
+        registrationChain = task
+        await task.value
+    }
+
+    private func recordRegistration(_ outcome: Result<HookRegistration.Change, Error>) {
         switch outcome {
         case .success(let change):
             hookRegisterFailing = false
+            for path in change.unregisterable where !loggedUnregisterable.contains(path) {
+                loggedUnregisterable.insert(path)
+                // Otherwise indistinguishable from a hook that simply never fires.
+                Log.warn("hook \(path) is active but sits under no known hook event, "
+                    + "so nothing was registered for it")
+            }
             guard !change.isEmpty else { return }
             // Worth a line every time: this is ccmux changing what Claude Code executes.
             Log.info("hook registration: \(change.registered.count) added, "
@@ -277,14 +309,33 @@ public extension Engine {
         Task {
             // Turning it off takes every managed entry back out, so the switch actually
             // undoes itself rather than only stopping further changes.
-            if on { await syncHooks() } else { await applyRegistration([]) }
+            if on { await syncHooks() } else { await unregisterEverything() }
         }
+    }
+
+    /// Removes every entry ccmux owns.
+    ///
+    /// The set of scripts comes off disk rather than from the last sync: this runs when
+    /// the switch goes off, which may be before a tick has ever populated the status —
+    /// after a relaunch, or with the server unreachable — and an empty set would leave
+    /// every registration in place.
+    func unregisterEverything() async {
+        let known = await Task.detached(priority: .utility) {
+            ManagedHooks.onDisk().map(\.path)
+        }.value
+        await applyRegistration(known: known, active: [])
     }
 
     /// Flips one script's registration on the server, for every Mac.
     @discardableResult
     func setHookActive(_ path: String, _ active: Bool) async -> String? {
         guard let client = serverClient else { return "No account server is connected." }
+        // The same latch the tick and a resolution take: reconcileHooks below stages and
+        // swaps the whole tree, and two of those in flight leave the baseline describing
+        // neither.
+        guard !syncingHooks else { return "Syncing right now — try again in a moment." }
+        syncingHooks = true
+        defer { syncingHooks = false }
         do {
             let bundle = try await client.setHookActive(path, active)
             await reconcileHooks(with: bundle)
@@ -407,9 +458,16 @@ public extension Engine {
 
     func setSyncManagedHooks(_ on: Bool) {
         updateSettings { $0.syncManagedHooks = on }
-        // Cleared on the way off: nothing recomputes it once the tick is disabled, so a
-        // freeze would keep the attention badge lit with no way to answer it.
-        if on { Task { await syncHooks() } } else { clearHookState() }
+        guard on else {
+            // The entries have to go with it. Nothing recomputes them once the tick is
+            // disabled, so they would sit in settings.json running scripts the server can
+            // no longer withdraw — and the switch that would remove them is disabled
+            // while this one is off.
+            Task { await unregisterEverything() }
+            clearHookState()
+            return
+        }
+        Task { await syncHooks() }
     }
 
     func clearHookState() {
@@ -485,6 +543,10 @@ public extension Engine {
         // next server is too old to serve hooks.
         if serverSupportsHooks != nil { serverSupportsHooks = nil }
         if serverSupportsHookActivation { serverSupportsHookActivation = false }
+        hookFeaturesRead = false
+        hookRegisterFailing = false
+        loggedUnregisterable.removeAll()
+        lastDelegatedAsk.removeAll()
         hookSyncFailing = false
         hookApplyFailing = false
         // The states are all relative to a server. Keeping them would have the page offer
@@ -777,8 +839,15 @@ public extension Engine {
             // The housekeeping tick is every 20s, which is far more often than these
             // numbers move. `serveTTL` is the same floor the app already applies to a
             // locally held snapshot.
-            guard PollPolicy.shouldRefreshFromServer(store.usage(for: accountID),
-                                                     now: now) else { continue }
+            // Counted from when this Mac last asked, not from the age of the answer.
+            // ccmuxd caches each account for up to ten minutes, so gating on the data's
+            // own age satisfies the floor on every 20s tick — hammering the server and
+            // replacing header-fresh numbers with older ones each time.
+            guard PollPolicy.shouldAskServer(lastAsked: lastDelegatedAsk[accountID],
+                                             now: now) else { continue }
+            // Stamped before the round trip so a slow or failing server is not re-asked
+            // by the next tick.
+            lastDelegatedAsk[accountID] = now
             guard let remote = try? await client.usage(for: accountID),
                   !remote.windows.isEmpty else { continue }
             // Dated by the server's own age, not by when it arrived here. Stamping it now

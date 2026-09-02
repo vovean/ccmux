@@ -58,16 +58,16 @@ public enum PollPolicy {
         return Plan(interval: interval, nextPollAt: now.addingTimeInterval(jitter(interval)))
     }
 
-    /// Whether a delegated account's numbers should be re-read from the server.
+    /// Whether to ask the server again for a delegated account's usage.
     ///
-    /// Gated on the endpoint's own age, never on `fetchedAt`: a proxied response
-    /// refreshes the 5-hour and weekly windows from headers but never the per-model
-    /// ones, so an account with a live session would never be re-read and its Fable
-    /// window would sit at whatever it last showed.
-    public static func shouldRefreshFromServer(_ snapshot: UsageSnapshot?,
-                                               now: Date = Date()) -> Bool {
-        guard let endpoint = snapshot?.lastEndpointFetchAt else { return true }
-        return now.timeIntervalSince(endpoint) >= serveTTL
+    /// Counted from when this Mac last asked. Not from `fetchedAt`, which every proxied
+    /// response pushes forward from headers that never carry the per-model windows — an
+    /// account with a live session would then never be re-read at all. And not from the
+    /// answer's own age either: the server caches each account for minutes, so that
+    /// clears this floor on every tick.
+    public static func shouldAskServer(lastAsked: Date?, now: Date = Date()) -> Bool {
+        guard let lastAsked else { return true }
+        return now.timeIntervalSince(lastAsked) >= serveTTL
     }
 
     static func movement(from previous: UsageSnapshot?, to current: UsageSnapshot) -> Double {

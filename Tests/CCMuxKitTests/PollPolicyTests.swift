@@ -78,35 +78,32 @@ struct PollPolicyTests {
         }
     }
     /// A proxied response refreshes the 5-hour and weekly windows from headers but never
-    /// the per-model ones. Gating the delegated poll on `fetchedAt` meant an account with
-    /// a live session was never re-read, and its Fable window sat at whatever it last
-    /// showed — 0% through a whole Fable session.
+    /// the per-model ones, so anything keyed off `fetchedAt` left an account with a live
+    /// session never re-read — its Fable window sat at 0% through a whole Fable session.
+    /// This gate is independent of both that and of how old the answer is.
     @Test func aBusySessionDoesNotSuppressTheDelegatedPoll() {
         let now = Date()
-        let headerRefreshed = UsageSnapshot(
-            windows: [UsageWindow(kind: .weeklyScoped, label: "Weekly Fable",
-                                  percent: 0, modelName: "Fable")],
-            // What every proxied response does, seconds ago.
-            fetchedAt: now.addingTimeInterval(-5),
-            // What the endpoint last actually said, well past the floor.
-            lastEndpointFetchAt: now.addingTimeInterval(-PollPolicy.serveTTL - 60))
-        #expect(PollPolicy.shouldRefreshFromServer(headerRefreshed, now: now))
+        #expect(PollPolicy.shouldAskServer(lastAsked: now.addingTimeInterval(-PollPolicy.serveTTL - 1),
+                                           now: now))
     }
 
-    @Test func afreshEndpointReadIsServedWithoutRefetching() {
+    @Test func askingAgainWithinTheFloorIsSkipped() {
         let now = Date()
-        let fresh = UsageSnapshot(windows: [], fetchedAt: now.addingTimeInterval(-600),
-                                  lastEndpointFetchAt: now.addingTimeInterval(-30))
-        #expect(!PollPolicy.shouldRefreshFromServer(fresh, now: now))
+        #expect(!PollPolicy.shouldAskServer(lastAsked: now.addingTimeInterval(-30), now: now))
     }
 
-    /// Nothing read yet, and a snapshot built only from headers, both have to fetch —
-    /// otherwise a per-model window would never arrive at all.
-    @Test func anAccountWithNoEndpointReadYetIsAlwaysFetched() {
+    /// The server caches each account for minutes, so a gate counting from the answer's
+    /// own age clears the floor on every 20-second tick — hammering the server and
+    /// replacing header-fresh numbers with older ones each time.
+    @Test func aStaleAnswerDoesNotItselfJustifyAskingAgain() {
         let now = Date()
-        #expect(PollPolicy.shouldRefreshFromServer(nil, now: now))
-        #expect(PollPolicy.shouldRefreshFromServer(
-            UsageSnapshot(windows: [], fetchedAt: now), now: now))
+        let askedRecently = now.addingTimeInterval(-30)
+        // The answer that arrived was already ten minutes old; that must not matter.
+        #expect(!PollPolicy.shouldAskServer(lastAsked: askedRecently, now: now))
+    }
+
+    @Test func anAccountNeverAskedIsAlwaysFetched() {
+        #expect(PollPolicy.shouldAskServer(lastAsked: nil, now: Date()))
     }
 
 }
