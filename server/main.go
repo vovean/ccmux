@@ -71,10 +71,12 @@ func run() error {
 	registry.Bootstrap()
 	machines := NewMachineStore()
 	hooks := NewHookStore(config.HooksFile())
+	series := NewSeriesStore(config.SeriesDir(),
+		time.Duration(config.UsageRetentionDays)*24*time.Hour)
 
 	server := &http.Server{
 		Addr:              net.JoinHostPort(config.Host, strconv.Itoa(config.Port)),
-		Handler:           NewMux(registry, machines, hooks, credential),
+		Handler:           NewMux(registry, machines, hooks, series, credential),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,
@@ -106,12 +108,14 @@ func run() error {
 		ticker := time.NewTicker(tickInterval)
 		defer ticker.Stop()
 		registry.Tick(ctx)
+		series.Sweep(time.Now())
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				registry.Tick(ctx)
+				series.Sweep(time.Now())
 			}
 		}
 	}()

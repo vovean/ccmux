@@ -14,6 +14,8 @@ type Config struct {
 	KeyPath  string
 	Host     string
 	Port     int
+	// How long a day of usage buckets is kept, in days.
+	UsageRetentionDays int
 	// Off only for tests and for a run behind something else terminating TLS. Basic auth
 	// over cleartext hands over the credential and every access token with it, so the
 	// flag is deliberately awkward to reach for.
@@ -26,6 +28,10 @@ func (c Config) MasterKeyFile() string { return filepath.Join(c.DataDir, "master
 func (c Config) AuthFile() string      { return filepath.Join(c.DataDir, "auth") }
 func (c Config) HooksFile() string     { return filepath.Join(c.DataDir, "hooks.json") }
 
+// The append-only usage log, one file per UTC day. A directory rather than a file
+// because retention is enforced by deleting whole days.
+func (c Config) SeriesDir() string { return filepath.Join(c.DataDir, "series") }
+
 const usage = `ccmuxd — holds ccmux's accounts and their refresh lineages.
 
   --data-dir PATH   accounts, sealed secrets and the auth file (default /var/lib/ccmuxd)
@@ -34,6 +40,7 @@ const usage = `ccmuxd — holds ccmux's accounts and their refresh lineages.
   --host ADDR       bind address (default 0.0.0.0)
   --port N          bind port (default 8443)
   --insecure        serve plain HTTP — tests and TLS-terminating front ends only
+  --usage-days N    how long per-minute usage is kept (default 30)
 
 The auth file is ` + "`username:sha256-hex-of-password`" + `, one line, mode 0600.
 scripts/install-ccmuxd.sh writes one and prints the password once.`
@@ -45,6 +52,8 @@ func ParseConfig(args []string, env func(string) string) (Config, error) {
 		KeyPath:  "/etc/ccmuxd/key.pem",
 		Host:     "0.0.0.0",
 		Port:     8443,
+
+		UsageRetentionDays: 30,
 	}
 	if raw := env("CCMUXD_DATA_DIR"); raw != "" {
 		config.DataDir = raw
@@ -85,6 +94,15 @@ func ParseConfig(args []string, env func(string) string) (Config, error) {
 					err = fmt.Errorf("--port must be 1-65535, got %s", raw)
 				} else {
 					config.Port = parsed
+				}
+			}
+		case "--usage-days":
+			if raw, err = value(); err == nil {
+				parsed, convErr := strconv.Atoi(raw)
+				if convErr != nil || parsed < 1 || parsed > 365 {
+					err = fmt.Errorf("--usage-days must be 1-365, got %s", raw)
+				} else {
+					config.UsageRetentionDays = parsed
 				}
 			}
 		case "--insecure":

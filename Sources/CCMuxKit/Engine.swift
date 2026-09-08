@@ -107,17 +107,37 @@ public final class Engine: ObservableObject {
     var loggedHookFreeze = false
     var hookRegisterFailing = false
     var loggedUnregisterable: Set<String> = []
-    var hookFeaturesRead = false
+    /// When this Mac last read `HealthResponse.features`. One stamp for every capability
+    /// flag: they all come from one array, and asking twice for one answer is what let
+    /// the two readers disagree about how long it stayed true.
+    var serverFeaturesAskedAt: Date?
     /// When this Mac last asked the server for a delegated account's usage — distinct
     /// from how old the answer was, which is what the snapshot records.
     var lastDelegatedAsk: [String: Date] = [:]
     /// Serialises the settings.json read-modify-write; see `applyRegistration`.
     var registrationChain: Task<Void, Never>?
+    /// Minutes counted on this Mac and not yet handed over. The one piece of state the
+    /// hot path writes to on every request.
+    var usageLedger = UsageLedger()
+    var pushingUsage = false
+    var usageReportFailing = false
+    var fetchingStats = false
+    /// Set by the Stats page while it is on screen. Nothing is fetched otherwise.
+    var statsVisible = false
     /// The managed hook set as the Hooks page sees it.
     @Published public internal(set) var hookStatus = HookStatus()
     /// Nil until asked, false on a ccmuxd that predates the hook routes.
     @Published public internal(set) var serverSupportsHooks: Bool?
     @Published public internal(set) var serverSupportsHookActivation = false
+    /// Nil until asked, false on a ccmuxd that does not collect usage — at which point
+    /// nothing is recorded, so a spool cannot grow with nowhere to send it.
+    @Published public internal(set) var serverSupportsUsageSeries: Bool?
+    /// The fleet's usage as the server last aggregated it, and when that answer arrived.
+    /// Held only while the Stats page is up.
+    @Published public internal(set) var stats: UsageStatsResponse?
+    @Published public internal(set) var statsFetchedAt: Date?
+    @Published public internal(set) var statsError: String?
+    @Published public internal(set) var statsRange: UsageRange = .day
     private var controlHandler: ControlHandler?
     private var controlServer: ControlServer?
     private var timers: [Timer] = []
@@ -186,6 +206,7 @@ public final class Engine: ObservableObject {
         // deferring.
         vault.load(accountIDs: store.accounts.all().map(\.id))
 
+        loadUsageSpool()
         repairAccountKinds()
         applyUpstreamProxy()
         applyRemoteToVault()
@@ -203,6 +224,7 @@ public final class Engine: ObservableObject {
             await pollDueAccounts()
             await pollDelegatedUsage()
             await syncSessions()
+            await flushUsage()
         }
     }
 
@@ -210,6 +232,9 @@ public final class Engine: ObservableObject {
         for timer in timers { timer.invalidate() }
         timers = []
         controlServer?.stop()
+        // The open minute goes to the spool still open, so a restart resumes it rather
+        // than sending a half-minute the second half would replace.
+        saveUsageSpoolIfNeeded()
         sessionManager.stopAll()
     }
 
@@ -220,6 +245,7 @@ public final class Engine: ObservableObject {
         for timer in timers { timer.invalidate() }
         timers = []
         controlServer?.stop()
+        saveUsageSpoolIfNeeded()
         sessionManager.quiesceAll()
     }
 
@@ -264,6 +290,7 @@ public final class Engine: ObservableObject {
                 await self?.pollDelegatedUsage()
                 await self?.keepWindowsRolling()
                 await self?.syncSessions()
+                await self?.flushUsage()
                 // Last, so it records the address whatever the tick above ended up using.
                 self?.rememberReachableAddress()
             }
@@ -275,6 +302,7 @@ public final class Engine: ObservableObject {
                 // someone publishes one, which is rare, and the answer is a whole bundle
                 // rather than a diff.
                 await self?.syncHooks()
+                await self?.refreshStats()
             }
         })
     }
@@ -457,6 +485,8 @@ public final class Engine: ObservableObject {
         // A usage observation is the tail of a request that already reported its head.
         // It carries no headers and no verdict — only what the request cost.
         if let billed = observation.usage {
+            recordUsage(billed, model: observation.model,
+                        accountID: observation.accountID, sessionID: sessionID)
             recordSpend(billed, model: observation.model,
                         accountID: observation.accountID, sessionID: sessionID)
             return
@@ -588,6 +618,28 @@ public final class Engine: ObservableObject {
         if !blocks.isEmpty {
             Log.info("restored \(blocks.count) blocked session(s) after launch")
         }
+    }
+
+    /// Adds one request to the minute it landed in.
+    ///
+    /// Separate from `recordSpend` and ahead of it: that one keeps a running dollar total
+    /// and only for an API key, while this counts tokens for every account — a
+    /// subscription pays in quota, and quota is the thing the page is about.
+    private func recordUsage(_ billed: TokenUsage, model: String?, accountID: String,
+                             sessionID: String) {
+        guard recordsUsage, let model, !model.isEmpty else { return }
+        // The same rule the card, the banner and the curtain row use. A line named
+        // differently from the session it came from is worse here than anywhere else:
+        // the name is frozen into buckets already handed to the server, so it cannot be
+        // corrected on the next redraw.
+        usageLedger.record(billed, identity: UsageLedger.Identity(
+            sessionID: sessionID,
+            sessionName: sessionLabel(sessionID),
+            accountID: accountID,
+            accountFingerprint: apiKeyFingerprints.byAccount[accountID],
+            accountLabel: displayName(accountID),
+            kind: store.accounts.get(accountID)?.kind ?? .subscription,
+            model: model))
     }
 
     private func recordSpend(_ billed: TokenUsage, model: String?,

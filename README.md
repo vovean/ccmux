@@ -136,6 +136,23 @@ it: the handle is read from the process when you press it — the UUID out of it
 feature and on ones ccmux did not launch. macOS will ask once to let ccmux control
 iTerm; because ccmux is ad-hoc signed it may ask again after an upgrade.
 
+**Stats** — what the fleet has spent, in tokens, over time. Three cards: the range's
+totals with the split between input, output and cache; a line per (session, model) with
+multi-select filters for accounts and models; and a row per account. Hovering the chart
+gives the tokens and dollars every line spent in that bucket.
+
+This screen needs an account server, and shows nothing without one. Each Mac counts its
+own requests a minute at a time and hands over a minute once it has ended; ccmuxd pools
+them and does every sum, so all three Macs read the same numbers instead of three
+separate running totals nobody can reconcile. Recording starts when you install it —
+there is no history to backfill, and the running spend on the Accounts screen is a
+different, older figure that is not merged in.
+
+Only an API key is billed per token. A subscription pays in quota, so its dollars are
+what the same traffic would list at, and the page says so rather than quietly implying a
+bill. A model with no listed price contributes its tokens and is named as unpriced, so
+the cost reads as a floor instead of as complete.
+
 **Hooks** — the hook scripts ccmux syncs from the account server, each with its state,
 its script, and when its content last arrived. Clicking a path opens it in VS Code.
 
@@ -305,6 +322,14 @@ verifier and the code exchange are the server's, so the refresh token is born th
 redirect stays on this Mac's loopback, which is why none of it needs Anthropic to accept a
 public redirect URI.
 
+It also pools usage. Every Mac posts the minutes it has closed to
+`/v1/machines/<id>/usage`, and ccmuxd keeps them in an append-only log under
+`/var/lib/ccmuxd/series/`, one file per UTC day, kept 30 days (`--usage-days`). A minute
+is sent only after it has ended, so a re-send after an outage replaces rather than adds —
+which is what makes the retry safe. Minutes counted while the server is unreachable wait
+in `usage-spool.json` on the Mac, including the minute still running, so an upgrade that
+restarts the app mid-minute resumes it rather than splitting it in two.
+
 See [docs/server.md](docs/server.md), including what it costs: the server becomes a
 dependency, and token refreshes start coming from its IP rather than your laptop's.
 
@@ -312,7 +337,8 @@ dependency, and token refreshes start coming from its IP rather than your laptop
 
     ~/Library/Application Support/ccmux/    accounts.json, usage.json, sessions.json,
                                             settings.json, machine.json, ccmux.log,
-                                            control.sock, ns/, hooks-baseline.json
+                                            control.sock, ns/, hooks-baseline.json,
+                                            usage-spool.json
     ~/.claude/hooks/managed/                the synced hook scripts — owned by ccmux
     Keychain "ccmux-credentials"             one item per account, keyed by account uuid
     Keychain "ccmux-server"                  the ccmuxd basic-auth password

@@ -5,7 +5,8 @@
   "features": [
     "sessions",
     "hooks",
-    "hook-activation"
+    "hook-activation",
+    "usage-series"
   ],
   "machines": 2
 }

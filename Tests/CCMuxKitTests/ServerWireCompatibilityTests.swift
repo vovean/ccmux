@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import CCMuxCore
+@testable import CCMuxKit
 
 /// The other half of the cross-language contract.
 ///
@@ -131,6 +132,7 @@ struct ServerWireCompatibilityTests {
     @Test func healthAdvertisesTheSessionFeature() throws {
         let health = try Self.decode(HealthResponse.self, "health.json")
         #expect(health.supports(ServerAPI.sessionsFeature))
+        #expect(health.supports(ServerAPI.usageSeriesFeature))
         #expect(health.machines == 2)
 
         let older = Data(#"{"apiVersion":1,"accounts":0,"uptimeSeconds":1}"#.utf8)
@@ -169,6 +171,78 @@ struct ServerWireCompatibilityTests {
 
         // Go marshals a nil slice as null, which this non-optional array throws on.
         #expect(response.machines[0].sessions.isEmpty)
+    }
+
+    /// The stats view. Unlike the session view this carries real timestamps, so it walks
+    /// straight into the fractional-seconds trap the server's custom time type exists to
+    /// avoid — and a chart drawn from dates that failed to decode is a blank page.
+    @Test func theStatsViewDecodes() throws {
+        let stats = try Self.decode(UsageStatsResponse.self, "stats.json")
+        #expect(stats.apiVersion == ServerAPI.version)
+        #expect(stats.range == .day)
+        #expect(stats.bucketSeconds == UsageRange.day.bucketSeconds)
+        #expect(stats.to.timeIntervalSince(stats.from) == 24 * 3600)
+        #expect(stats.totals.tokens == 59_100)
+        #expect(stats.totals.costUSD == 1.875)
+        #expect(stats.totals.unpricedModels == ["claude-unknown-9"])
+        #expect(!stats.truncated)
+
+        #expect(stats.accounts.count == 2)
+        let subscription = try #require(stats.accounts.first)
+        #expect(subscription.kind == .subscription)
+        #expect(subscription.accountFingerprint == nil)
+        let keyed = stats.accounts[1]
+        #expect(keyed.kind == .apiKey)
+        // What matches one key account across two Macs, and so what the account filter
+        // groups on.
+        #expect(keyed.accountFingerprint == "sk-ant-fixture".apiKeyFingerprint)
+        #expect(keyed.id == "sk-ant-fixture".apiKeyFingerprint)
+
+        #expect(stats.series.count == 2)
+        let first = try #require(stats.series.first)
+        #expect(first.machineLabel == "studio")
+        #expect(first.sessionName == "api-gateway")
+        #expect(first.model == "claude-opus-5")
+        #expect(first.points.count == 2)
+        #expect(first.points[0].tokens == 24_200)
+        #expect(!first.points[0].unpriced)
+        #expect(first.points[0].at < first.points[1].at)
+
+        // A model with no listed price marks its point rather than costing it at zero.
+        #expect(stats.series[1].points[0].unpriced)
+        #expect(stats.series[1].totals.unpricedModels == ["claude-unknown-9"])
+        // Go marshals a nil slice as null, which these plain arrays throw on.
+        #expect(stats.accounts[0].totals.unpricedModels.isEmpty)
+    }
+
+    @Test func theUsageIngestAcknowledgementDecodes() throws {
+        let ack = try Self.decode(UsageIngestResponse.self, "usage-ingest.json")
+        #expect(ack.apiVersion == ServerAPI.version)
+        #expect(ack.accepted == 7)
+    }
+
+    /// The two ends of the push bound. The server refuses an oversized report rather than
+    /// truncating it, so a client that outgrew these limits would have every push
+    /// refused — pinned here beside the range table for the same reason.
+    @Test func aPushStaysInsideWhatTheServerAccepts() {
+        // server/series.go: maxBucketsPerReport
+        #expect(UsageLedger.maxPerPush <= 4000)
+        // server/routes.go: decodeBody caps a request body at 1 MiB.
+        #expect(UsageLedger.maxPushBytes < 1_048_576)
+        // A backlog has to be able to drain, so a push must carry more than one bucket.
+        #expect(UsageLedger.maxPerPush > 1)
+        #expect(UsageLedger.maxPending > UsageLedger.maxPerPush)
+    }
+
+    /// The grid the client draws on is the server's; a disagreement puts points at the
+    /// wrong spacing rather than failing.
+    @Test func theRangeTableMatchesTheServers() {
+        #expect(UsageRange.day.rawValue == "24h")
+        #expect(UsageRange.week.rawValue == "7d")
+        #expect(UsageRange.month.rawValue == "30d")
+        #expect(UsageRange.day.seconds == 24 * 3600)
+        #expect(UsageRange.week.bucketSeconds == 1800)
+        #expect(UsageRange.month.bucketSeconds == 7200)
     }
 
     @Test func theLoginStartResponseDecodes() throws {

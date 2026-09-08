@@ -15,7 +15,7 @@ import (
 // The HTTP surface. Every route sits behind basic auth; the paths and the JSON shapes are
 // the contract in wire.go.
 func NewMux(registry *Registry, machines *MachineStore, hooks *HookStore,
-	credential BasicAuthCredential) *http.ServeMux {
+	series *SeriesStore, credential BasicAuthCredential) *http.ServeMux {
 	mux := http.NewServeMux()
 	throttle := newAuthThrottle()
 	guard := func(handler http.HandlerFunc) http.Handler {
@@ -187,6 +187,51 @@ func NewMux(registry *Registry, machines *MachineStore, hooks *HookStore,
 			Machines:   machines.Snapshots(time.Now()),
 		})
 	}))
+
+	// Token counts, minute by minute. A Mac sends only minutes that have already
+	// ended, so this upserts rather than adds and a re-send after a failed push costs
+	// nothing. The answer is a count, not the stats: every Mac posts on its
+	// housekeeping tick, and the aggregation is wanted only while someone is looking.
+	mux.Handle("POST "+apiPrefix+"/machines/{id}/usage",
+		guard(func(w http.ResponseWriter, r *http.Request) {
+			id := r.PathValue("id")
+			if !ValidMachineID(id) {
+				writeError(w, http.StatusBadRequest, "that is not a usable machine id")
+				return
+			}
+			var body UsageReport
+			if !decodeBody(w, r, &body) {
+				return
+			}
+			accepted, err := series.Ingest(id, body, time.Now())
+			if err != nil {
+				// Refused rather than acknowledged: the Mac drops its spool on a
+				// success, so a report that only reached memory would be lost the next
+				// time this restarts. It re-sends, and the upsert makes that free.
+				status := http.StatusServiceUnavailable
+				if errors.Is(err, ErrReportTooLarge) {
+					status = http.StatusBadRequest
+				}
+				writeError(w, status, err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, UsageIngestResponse{
+				APIVersion: apiVersion, Accepted: accepted,
+			})
+		}))
+
+	// The range is a path segment rather than a query, so the client reaches it through
+	// the same path-component builder as every other route and nothing has to learn to
+	// carry a query string.
+	mux.Handle("GET "+apiPrefix+"/stats/{range}",
+		guard(func(w http.ResponseWriter, r *http.Request) {
+			stats, err := series.Stats(r.PathValue("range"), time.Now())
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, stats)
+		}))
 
 	mux.Handle("DELETE "+apiPrefix+"/machines/{id}",
 		guard(func(w http.ResponseWriter, r *http.Request) {

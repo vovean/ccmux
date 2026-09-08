@@ -156,24 +156,13 @@ public extension Engine {
         syncingHooks = true
         defer { syncingHooks = false }
 
-        // Asked once per client, through the mechanism the rest of the protocol uses:
-        // capabilities are advertised in `HealthResponse.features`, not inferred from
-        // which routes 404. The 404 path below stays as a fallback for a server that
-        // serves hooks but predates the advertisement.
-        // Keyed on whether the features were ever actually read, not on
-        // `serverSupportsHooks`: that flag is also set by a successful hooks() call, so a
-        // single failed health probe used to leave activation switched off for the life
-        // of the app against a server that supports it perfectly well.
-        if !hookFeaturesRead, let health = try? await client.health() {
-            // Set on any answer: a ccmuxd old enough to omit the key will never grow one
-            // mid-connection, and re-probing it every tick buys nothing.
-            hookFeaturesRead = true
-            if let features = health.features {
-                serverSupportsHooks = features.contains(ServerAPI.hooksFeature)
-                serverSupportsHookActivation =
-                    features.contains(ServerAPI.hookActivationFeature)
-                if serverSupportsHooks == false { clearHookState(); return }
-            }
+        // Capabilities come from `HealthResponse.features`, not from which routes 404.
+        // The 404 path below stays as a fallback for a server that serves hooks but
+        // predates the advertisement.
+        await refreshServerFeatures(client)
+        if serverSupportsHooks == false {
+            clearHookState()
+            return
         }
 
         let bundle: HookBundle
@@ -470,6 +459,32 @@ public extension Engine {
         Task { await syncHooks() }
     }
 
+    /// Reads what the server can do, at most once per interval however many callers ask.
+    ///
+    /// One probe for every flag rather than one per feature: they all come from a single
+    /// `features` array, and two probes meant two round trips for one answer and two
+    /// policies that disagreed about how long it stayed true.
+    ///
+    /// Re-read rather than latched, because the answer changes: upgrading ccmuxd used to
+    /// leave hook activation switched off on every Mac until someone quit the app.
+    internal func refreshServerFeatures(_ client: ServerClient,
+                                        now: Date = Date()) async {
+        guard PollPolicy.isDue(lastAsked: serverFeaturesAskedAt,
+                               after: ServerAPI.featureProbeInterval, now: now) else {
+            return
+        }
+        // Stamped whether or not it answers, so an unreachable server is not asked on
+        // every tick. Nothing is lost by waiting: until an answer arrives the flags stay
+        // as they were, and each caller's own route reports an older server itself.
+        serverFeaturesAskedAt = now
+        guard let health = try? await client.health(), let features = health.features
+        else { return }
+        serverSupportsHooks = features.contains(ServerAPI.hooksFeature)
+        serverSupportsHookActivation =
+            features.contains(ServerAPI.hookActivationFeature)
+        serverSupportsUsageSeries = features.contains(ServerAPI.usageSeriesFeature)
+    }
+
     func clearHookState() {
         loggedHookFreeze = false
         if hookStatus != HookStatus() { hookStatus = HookStatus() }
@@ -543,7 +558,15 @@ public extension Engine {
         // next server is too old to serve hooks.
         if serverSupportsHooks != nil { serverSupportsHooks = nil }
         if serverSupportsHookActivation { serverSupportsHookActivation = false }
-        hookFeaturesRead = false
+        if serverSupportsUsageSeries != nil { serverSupportsUsageSeries = nil }
+        serverFeaturesAskedAt = nil
+        usageReportFailing = false
+        stats = nil
+        statsFetchedAt = nil
+        statsError = nil
+        // Counted against a server this Mac is no longer talking to, and the next one is
+        // a different fleet's ledger.
+        stopRecordingUsage()
         hookRegisterFailing = false
         loggedUnregisterable.removeAll()
         lastDelegatedAsk.removeAll()

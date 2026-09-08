@@ -29,8 +29,10 @@ const (
 const featureSessions = "sessions"
 const featureHooks = "hooks"
 const featureHookActivation = "hook-activation"
+const featureUsageSeries = "usage-series"
 
-var serverFeatures = []string{featureSessions, featureHooks, featureHookActivation}
+var serverFeatures = []string{featureSessions, featureHooks, featureHookActivation,
+	featureUsageSeries}
 
 // Time marshals as RFC 3339 with second precision.
 //
@@ -295,4 +297,134 @@ type HookPushRequest struct {
 type HookActivationRequest struct {
 	Path   string `json:"path"`
 	Active bool   `json:"active"`
+}
+
+// UsageBucket is one minute of one session's traffic on one model, as the Mac that served
+// it counted.
+//
+// The one place an absolute timestamp crosses a machine boundary, against the rule the
+// session view follows. A series has to be comparable between three Macs and stable
+// across a retry, and an age is neither: it is measured afresh on every send, so the same
+// bucket would land in a different slot each time. A minute in the future or older than
+// retention is dropped rather than trusted.
+//
+// A Mac sends only a minute that has ended, so a bucket never changes after it is sent —
+// which is what lets this be upserted instead of added.
+type UsageBucket struct {
+	Minute    Time   `json:"minute"`
+	SessionID string `json:"sessionID"`
+	// What the session was called when the tokens were spent. Carried rather than looked
+	// up: the session is gone from the reporting Mac's own state the moment it ends.
+	SessionName string `json:"sessionName"`
+	AccountID   string `json:"accountID"`
+	// SHA-256 of the API key when the account is one, for the same reason as a session
+	// report: such an account's id is minted per Mac.
+	AccountFingerprint *string `json:"accountFingerprint,omitempty"`
+	AccountLabel       string  `json:"accountLabel"`
+	// Carried rather than inferred from the fingerprint: a Keychain read that fails
+	// leaves a key account with no fingerprint, and a subscription is exactly what that
+	// would then look like — with the page calling real billed dollars notional.
+	Kind         AccountKind `json:"kind"`
+	Model        string      `json:"model"`
+	Requests     int         `json:"requests"`
+	Input        int         `json:"input"`
+	Output       int         `json:"output"`
+	CacheRead    int         `json:"cacheRead"`
+	CacheWrite5m int         `json:"cacheWrite5m"`
+	CacheWrite1h int         `json:"cacheWrite1h"`
+	// Nil when the model carries no listed price. Priced on the Mac that served the
+	// request, so a later change to the price table does not rewrite history.
+	CostUSD *float64 `json:"costUSD,omitempty"`
+}
+
+func (b UsageBucket) Tokens() int {
+	return b.Input + b.Output + b.CacheRead + b.CacheWrite5m + b.CacheWrite1h
+}
+
+func (t UsageTotals) Tokens() int {
+	return t.Input + t.Output + t.CacheRead + t.CacheWrite5m + t.CacheWrite1h
+}
+
+// UsageReport is what one Mac has counted since it last managed to hand anything over.
+type UsageReport struct {
+	Label   string        `json:"label"`
+	Buckets []UsageBucket `json:"buckets"`
+}
+
+// UsageIngestResponse is deliberately thin: every Mac posts on the housekeeping tick, and
+// the stats it could carry are wanted only while someone is looking at them.
+type UsageIngestResponse struct {
+	APIVersion int `json:"apiVersion"`
+	Accepted   int `json:"accepted"`
+}
+
+type UsageTotals struct {
+	Requests     int     `json:"requests"`
+	Input        int     `json:"input"`
+	Output       int     `json:"output"`
+	CacheRead    int     `json:"cacheRead"`
+	CacheWrite5m int     `json:"cacheWrite5m"`
+	CacheWrite1h int     `json:"cacheWrite1h"`
+	CostUSD      float64 `json:"costUSD"`
+	// Models that contributed tokens but no price, so the figure beside them can say what
+	// it is missing. Never nil: the client's array is not optional.
+	UnpricedModels []string `json:"unpricedModels"`
+}
+
+// UsagePoint is one plotted point: everything that landed in one series inside one bucket
+// of the grid. At is the start of the bucket.
+type UsagePoint struct {
+	At           Time    `json:"at"`
+	Requests     int     `json:"requests"`
+	Input        int     `json:"input"`
+	Output       int     `json:"output"`
+	CacheRead    int     `json:"cacheRead"`
+	CacheWrite5m int     `json:"cacheWrite5m"`
+	CacheWrite1h int     `json:"cacheWrite1h"`
+	CostUSD      float64 `json:"costUSD"`
+	// Set when something here had no listed price: the cost beside it is then a floor.
+	Unpriced bool `json:"unpriced"`
+}
+
+// UsageSeries is one line on the chart: a session on a model, on the Mac that ran it.
+//
+// The model is part of the identity rather than a property of the session because a
+// session switches model mid-flight — that is the whole point of ccmux — and one line
+// averaging two prices would be a line about nothing.
+type UsageSeries struct {
+	ID                 string       `json:"id"`
+	MachineID          string       `json:"machineID"`
+	MachineLabel       string       `json:"machineLabel"`
+	SessionID          string       `json:"sessionID"`
+	SessionName        string       `json:"sessionName"`
+	AccountID          string       `json:"accountID"`
+	AccountFingerprint *string      `json:"accountFingerprint,omitempty"`
+	AccountLabel       string       `json:"accountLabel"`
+	Model              string       `json:"model"`
+	Totals             UsageTotals  `json:"totals"`
+	Points             []UsagePoint `json:"points"`
+}
+
+// UsageAccountTotals is everything one account spent in range, pooled across every Mac
+// that used it.
+type UsageAccountTotals struct {
+	AccountID          string      `json:"accountID"`
+	AccountFingerprint *string     `json:"accountFingerprint,omitempty"`
+	AccountLabel       string      `json:"accountLabel"`
+	Kind               AccountKind `json:"kind"`
+	Totals             UsageTotals `json:"totals"`
+}
+
+type UsageStatsResponse struct {
+	APIVersion    int                  `json:"apiVersion"`
+	Range         string               `json:"range"`
+	BucketSeconds int                  `json:"bucketSeconds"`
+	From          Time                 `json:"from"`
+	To            Time                 `json:"to"`
+	Totals        UsageTotals          `json:"totals"`
+	Accounts      []UsageAccountTotals `json:"accounts"`
+	Series        []UsageSeries        `json:"series"`
+	// Set when the store is at its ceiling and dropped the oldest buckets to stay inside
+	// it, so the page can say the far end of the range is incomplete.
+	Truncated bool `json:"truncated"`
 }

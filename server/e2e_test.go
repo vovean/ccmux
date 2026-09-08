@@ -39,19 +39,29 @@ func startTestServer(t *testing.T, registry *Registry) (*httptest.Server, string
 func startTestServerWith(t *testing.T, registry *Registry,
 	machines *MachineStore) (*httptest.Server, string, *http.Client) {
 	t.Helper()
-	return startTestServerFull(t, registry, machines, NewHookStore(""))
+	return startTestServerFull(t, registry, machines, NewHookStore(""), nil)
 }
 
 func startTestServerWithHooks(t *testing.T, registry *Registry,
 	hooks *HookStore) (*httptest.Server, string, *http.Client) {
 	t.Helper()
-	return startTestServerFull(t, registry, NewMachineStore(), hooks)
+	return startTestServerFull(t, registry, NewMachineStore(), hooks, nil)
+}
+
+func startTestServerWithSeries(t *testing.T, registry *Registry,
+	series *SeriesStore) (*httptest.Server, string, *http.Client) {
+	t.Helper()
+	return startTestServerFull(t, registry, NewMachineStore(), NewHookStore(""), series)
 }
 
 func startTestServerFull(t *testing.T, registry *Registry, machines *MachineStore,
-	hooks *HookStore) (*httptest.Server, string, *http.Client) {
+	hooks *HookStore, series *SeriesStore) (*httptest.Server, string, *http.Client) {
 	t.Helper()
-	server := httptest.NewTLSServer(NewMux(registry, machines, hooks, testCredential()))
+	if series == nil {
+		series = NewSeriesStore("", 0)
+	}
+	server := httptest.NewTLSServer(NewMux(registry, machines, hooks, series,
+		testCredential()))
 	t.Cleanup(server.Close)
 
 	leaf := server.Certificate()

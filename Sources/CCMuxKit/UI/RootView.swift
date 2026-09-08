@@ -2,7 +2,7 @@ import CCMuxCore
 import SwiftUI
 
 public enum Page: String, CaseIterable, Identifiable {
-    case accounts, sessions, hooks, settings
+    case accounts, sessions, stats, hooks, settings
 
     public var id: String { rawValue }
 
@@ -10,6 +10,7 @@ public enum Page: String, CaseIterable, Identifiable {
         switch self {
         case .accounts: return "Accounts"
         case .sessions: return "Sessions"
+        case .stats: return "Stats"
         case .hooks: return "Hooks"
         case .settings: return "Settings"
         }
@@ -19,6 +20,7 @@ public enum Page: String, CaseIterable, Identifiable {
         switch self {
         case .accounts: return "person.2"
         case .sessions: return "terminal"
+        case .stats: return "chart.xyaxis.line"
         case .hooks: return "curlybraces"
         case .settings: return "gearshape"
         }
@@ -101,6 +103,7 @@ public struct RootView: View {
         switch nav.page {
         case .accounts: AccountsPage(engine: engine, nav: nav)
         case .sessions: SessionsPage(engine: engine, nav: nav)
+        case .stats: StatsPage(engine: engine)
         case .hooks: HooksPage(engine: engine)
         case .settings: SettingsPage(engine: engine)
         }
@@ -180,6 +183,7 @@ public struct RootView: View {
                 || engine.accountsNeedingAttention.contains { account in
                     engine.sessions.contains { $0.accountID == account.id }
                 }
+        case .stats: return false
         // A held sync is the one hook state the user has to act on; everything else
         // resolves itself on the next tick.
         case .hooks: return engine.hookStatus.frozen

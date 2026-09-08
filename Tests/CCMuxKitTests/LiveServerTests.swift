@@ -196,6 +196,50 @@ struct LiveServerTests {
 
     /// And a genuine HTTP error still arrives as a readable message rather than raw JSON.
     /// The full exchange: one request reports this machine's list and returns everyone's.
+    /// The usage path end to end: a closed minute goes up, and the stats route hands it
+    /// back folded onto the range's grid.
+    ///
+    /// Worth a real server because both halves are new wire shapes with real timestamps
+    /// in them — the case the session view is deliberately built to avoid — and a date
+    /// that fails to decode shows up as an empty chart rather than as an error.
+    @Test func reportingUsageRoundTrips() async throws {
+        let client = try Self.client()
+        let machineID = "test-\(UUID().uuidString)"
+        let minute = UsageLedger.minute(containing: Date().addingTimeInterval(-180))
+        let bucket = UsageBucket(minute: minute, sessionID: "s1", sessionName: "api",
+                                 accountID: "acct-1",
+                                 accountLabel: "Work", kind: .subscription,
+                                 model: "claude-opus-5", requests: 2, input: 1200,
+                                 output: 340, cacheRead: 5000, costUSD: 0.25)
+        let ack = try await client.reportUsage(
+            machineID: machineID,
+            UsageReport(label: "test-machine", buckets: [bucket]))
+        #expect(ack.apiVersion == ServerAPI.version)
+        #expect(ack.accepted == 1)
+
+        let stats = try await client.stats(.day)
+        #expect(stats.range == .day)
+        #expect(stats.bucketSeconds == UsageRange.day.bucketSeconds)
+        let mine = try #require(stats.series.first { $0.machineID == machineID })
+        #expect(mine.sessionName == "api")
+        #expect(mine.model == "claude-opus-5")
+        #expect(mine.totals.input == 1200)
+        #expect(mine.totals.tokens == 6540)
+        let point = try #require(mine.points.first)
+        #expect(!point.unpriced)
+        #expect(abs(point.costUSD - 0.25) < 0.0001)
+        // The point sits on the grid, not on the minute it was recorded in.
+        #expect(Int(point.at.timeIntervalSince1970) % UsageRange.day.bucketSeconds == 0)
+
+        // Sending it again is an upsert, not an addition — the whole retry story.
+        _ = try await client.reportUsage(
+            machineID: machineID,
+            UsageReport(label: "test-machine", buckets: [bucket]))
+        let again = try await client.stats(.week)
+        let repeated = try #require(again.series.first { $0.machineID == machineID })
+        #expect(repeated.totals.input == 1200)
+    }
+
     @Test func reportingSessionsRoundTrips() async throws {
         let client = try Self.client()
         let machineID = "test-\(UUID().uuidString)"

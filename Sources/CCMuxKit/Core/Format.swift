@@ -70,3 +70,17 @@ public extension Format {
         return String(format: "$%.2f", usd)
     }
 }
+
+public extension Format {
+    /// Token counts run to eight digits, which no axis label and no table column can
+    /// carry. Three significant figures is what a reader takes from one anyway.
+    static func tokens(_ count: Int) -> String {
+        let value = Double(count)
+        switch abs(value) {
+        case 0..<1_000: return "\(count)"
+        case 1_000..<1_000_000: return String(format: "%.1fk", value / 1_000)
+        case 1_000_000..<1_000_000_000: return String(format: "%.1fM", value / 1_000_000)
+        default: return String(format: "%.1fB", value / 1_000_000_000)
+        }
+    }
+}

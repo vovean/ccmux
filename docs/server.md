@@ -147,11 +147,19 @@ DELETE /accounts/{id}
 POST   /machines/{id}/sessions     this Mac's whole session list → every machine's
 GET    /sessions                   every machine's, without reporting
 DELETE /machines/{id}              forget a Mac that is gone for good
+POST   /machines/{id}/usage        minutes this Mac has closed → how many were kept
+GET    /stats/{24h|7d|30d}         the fleet's tokens, folded onto that range's grid
 ```
 
 `expiresIn` is **seconds, not a timestamp**. A laptop and a server do not agree on the wall
 clock, and a client trusting a remote absolute time would treat dead tokens as live. The
 session routes carry ages for the same reason and have no dates on them at all.
+
+The usage routes are the deliberate exception: a bucket carries the UTC minute it covers.
+A series has to be comparable between three Macs and stable across a retry, and an age is
+neither — it is measured afresh on every send, so the same bucket would land somewhere
+new each time. A minute in the future by more than five, or older than retention, is
+dropped rather than trusted.
 
 New routes do **not** bump `apiVersion`. The client's check is an equality test, so a bump
 strands every Mac still on the old build. Capability is advertised through
@@ -214,16 +222,44 @@ Worth knowing before you rely on it.
 2. **Refresh and inference come from different IPs.** Anthropic sees token refreshes from
    the server and inference from laptops, on the same account. On company accounts under a
    CISO's eye, that is the limitation to weigh hardest.
-3. **Two Macs still rank independently.** Both will pick the account with the most headroom
+3. **Usage is the one thing that grows.** Everything else here is a fixed set or a
+   snapshot that replaces itself. The series is capped at 120,000 minute buckets in
+   memory — past that the oldest go, and the answer says the far end of the range is
+   incomplete — while the log on disk keeps its full retention. Thirty days of a
+   three-Mac fleet is a couple of megabytes.
+4. **Two Macs still rank independently.** Both will pick the account with the most headroom
    and drain it together. Sessions elsewhere are now *visible*, but nothing acts on them:
    ranking is still per machine, and usage snapshots are not shared.
-4. **One shared credential.** Basic auth means revoking one Mac rotates the password for all
+5. **One shared credential.** Basic auth means revoking one Mac rotates the password for all
    of them.
-5. **Back up `data/`.** It holds every refresh lineage, sealed with `master.key` sitting
+6. **Back up `data/`.** It holds every refresh lineage, sealed with `master.key` sitting
    beside it. Losing it means signing every account in again. Both files are 0600 in a 0700
    directory; the sealing protects a stray copy of the sealed file, not much more.
-6. **Connectors are unaffected.** They are organisation-scoped and resolved when Claude Code
+7. **Connectors are unaffected.** They are organisation-scoped and resolved when Claude Code
    starts. Pulling the credential from a server changes nothing there.
+
+## Usage across machines
+
+Each Mac counts every proxied request into the minute it landed in, keyed by session and
+model, and posts the minutes that have **ended** on the housekeeping tick. That one rule
+is what makes the rest simple: a bucket never changes after it is sent, so the server
+upserts a re-send instead of adding it twice, and a Mac that could not reach the server
+just sends the same buckets again later.
+
+The store is an append-only log, one file per UTC day under `<data-dir>/series/`, replayed
+into memory on start. A half-written last line — an append-only log plus a crash — costs
+that one bucket, not the day. Retention deletes whole day files; the memory ceiling drops
+the oldest minutes and never touches the log, so raising the ceiling gets them back on
+the next start.
+
+`GET /stats/<range>` folds the minutes onto the range's grid (5 minutes for 24h, 30 for
+7d, 2 hours for 30d) and returns one line per (machine, session, model) plus totals
+overall and per account. An API key is one account however many Macs minted their own id
+for it — the fingerprint is what pools it, exactly as in the session view. The answer is
+cached for 15 seconds so three Macs with the page open do not each walk every bucket.
+
+Pricing happens on the Mac that served the request, not here: the server would have to
+carry a price table and a change to it would silently rewrite history.
 
 ## Disconnecting
 

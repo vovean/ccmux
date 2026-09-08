@@ -21,6 +21,14 @@ public enum ServerAPI {
     public static let sessionsFeature = "sessions"
     public static let hooksFeature = "hooks"
     public static let hookActivationFeature = "hook-activation"
+    /// Per-minute token counts pooled across the fleet, and the stats route that reads
+    /// them back.
+    public static let usageSeriesFeature = "usage-series"
+
+    /// How often a client re-reads what the server can do. Re-read rather than answered
+    /// once, because the answer changes when ccmuxd is upgraded — and long, because that
+    /// happens about once a release.
+    public static let featureProbeInterval: TimeInterval = 600
 }
 
 /// An account as the server describes it. Deliberately not `Account`: the client's record
@@ -433,6 +441,282 @@ public struct HookActivationRequest: Codable, Equatable, Sendable {
     public init(path: String, active: Bool) {
         self.path = path
         self.active = active
+    }
+}
+
+// MARK: - Usage over time
+
+/// How far back a stats request reaches, and how coarse the answer comes back.
+///
+/// Fixed rather than free-form: the server aggregates on this grid and caches one answer
+/// per range, so an arbitrary window would be a fresh pass over every bucket for each of
+/// three Macs.
+public enum UsageRange: String, Codable, CaseIterable, Sendable, Identifiable {
+    case day = "24h"
+    case week = "7d"
+    case month = "30d"
+
+    public var id: String { rawValue }
+
+    public var seconds: TimeInterval {
+        switch self {
+        case .day: return 24 * 3600
+        case .week: return 7 * 24 * 3600
+        case .month: return 30 * 24 * 3600
+        }
+    }
+
+    /// Sized so every range draws roughly 300 points per line.
+    public var bucketSeconds: Int {
+        switch self {
+        case .day: return 300
+        case .week: return 1800
+        case .month: return 7200
+        }
+    }
+
+    public var label: String {
+        switch self {
+        case .day: return "24 hours"
+        case .week: return "7 days"
+        case .month: return "30 days"
+        }
+    }
+}
+
+/// One minute of one session's traffic on one model, as the Mac that served it counted.
+///
+/// This is the one place an absolute timestamp crosses a machine boundary, against the
+/// rule the session view follows. A series has to be comparable between three Macs and
+/// stable across a retry, and an age is neither: it is measured afresh on every send, so
+/// the same bucket would land in a different slot each time. The server clamps a minute
+/// that is in the future or older than retention rather than trusting one blindly.
+///
+/// Only a minute that has ended is ever sent, so a bucket never changes after it leaves
+/// the Mac that made it — which is what lets the server upsert a re-send instead of
+/// adding it twice.
+public struct UsageBucket: Codable, Equatable, Sendable {
+    /// Start of the UTC minute.
+    public var minute: Date
+    public var sessionID: String
+    /// What the session was called when the tokens were spent. Carried rather than looked
+    /// up: a session is gone from `sessions.json` the moment it ends, and a line labelled
+    /// with eight characters of UUID is a line nobody can read.
+    public var sessionName: String
+    public var accountID: String
+    /// SHA-256 of the API key when the account is one, for the same reason as a session
+    /// report: such an account's id is minted per Mac.
+    public var accountFingerprint: String?
+    public var accountLabel: String
+    /// Carried rather than inferred from the fingerprint: a Keychain read that fails
+    /// leaves a key account with no fingerprint, and a subscription is exactly what that
+    /// would then look like — with the page calling real billed dollars notional.
+    public var kind: AccountKind
+    public var model: String
+    public var requests: Int
+    public var input: Int
+    public var output: Int
+    public var cacheRead: Int
+    public var cacheWrite5m: Int
+    public var cacheWrite1h: Int
+    /// Nil when the model carries no listed price, so an incomplete total can admit it
+    /// rather than reading as exact. Priced on the Mac that served the request, so a
+    /// later change to the price table does not silently rewrite history.
+    public var costUSD: Double?
+
+    public init(minute: Date, sessionID: String, sessionName: String,
+                accountID: String,
+                accountFingerprint: String? = nil, accountLabel: String,
+                kind: AccountKind = .subscription, model: String,
+                requests: Int = 0, input: Int = 0, output: Int = 0, cacheRead: Int = 0,
+                cacheWrite5m: Int = 0, cacheWrite1h: Int = 0, costUSD: Double? = nil) {
+        self.minute = minute
+        self.sessionID = sessionID
+        self.sessionName = sessionName
+        self.accountID = accountID
+        self.accountFingerprint = accountFingerprint
+        self.accountLabel = accountLabel
+        self.kind = kind
+        self.model = model
+        self.requests = requests
+        self.input = input
+        self.output = output
+        self.cacheRead = cacheRead
+        self.cacheWrite5m = cacheWrite5m
+        self.cacheWrite1h = cacheWrite1h
+        self.costUSD = costUSD
+    }
+
+    public var tokens: Int { input + output + cacheRead + cacheWrite5m + cacheWrite1h }
+}
+
+/// What one Mac has counted since it last managed to hand anything over.
+public struct UsageReport: Codable, Equatable, Sendable {
+    public var label: String
+    public var buckets: [UsageBucket]
+
+    public init(label: String, buckets: [UsageBucket]) {
+        self.label = label
+        self.buckets = buckets
+    }
+}
+
+/// Deliberately thin. Every Mac posts this on the housekeeping tick, and the stats it
+/// would otherwise carry are wanted only while someone is looking at them.
+public struct UsageIngestResponse: Codable, Equatable, Sendable {
+    public var apiVersion: Int
+    public var accepted: Int
+
+    public init(apiVersion: Int = ServerAPI.version, accepted: Int) {
+        self.apiVersion = apiVersion
+        self.accepted = accepted
+    }
+}
+
+public struct UsageTotals: Codable, Equatable, Sendable {
+    public var requests: Int
+    public var input: Int
+    public var output: Int
+    public var cacheRead: Int
+    public var cacheWrite5m: Int
+    public var cacheWrite1h: Int
+    public var costUSD: Double
+    /// Models that contributed tokens but no price, so the figure beside them can say
+    /// what it is missing instead of implying it is complete.
+    public var unpricedModels: [String]
+
+    public init(requests: Int = 0, input: Int = 0, output: Int = 0, cacheRead: Int = 0,
+                cacheWrite5m: Int = 0, cacheWrite1h: Int = 0, costUSD: Double = 0,
+                unpricedModels: [String] = []) {
+        self.requests = requests
+        self.input = input
+        self.output = output
+        self.cacheRead = cacheRead
+        self.cacheWrite5m = cacheWrite5m
+        self.cacheWrite1h = cacheWrite1h
+        self.costUSD = costUSD
+        self.unpricedModels = unpricedModels
+    }
+
+    public var tokens: Int { input + output + cacheRead + cacheWrite5m + cacheWrite1h }
+}
+
+/// One plotted point: everything that landed in one series inside one bucket of the grid.
+public struct UsagePoint: Codable, Equatable, Sendable, Identifiable {
+    /// Start of the bucket, so a point sits at the left edge of the span it covers.
+    public var at: Date
+    public var requests: Int
+    public var input: Int
+    public var output: Int
+    public var cacheRead: Int
+    public var cacheWrite5m: Int
+    public var cacheWrite1h: Int
+    public var costUSD: Double
+    /// Set when something here had no listed price: the cost beside it is then a floor.
+    public var unpriced: Bool
+
+    public init(at: Date, requests: Int = 0, input: Int = 0, output: Int = 0,
+                cacheRead: Int = 0, cacheWrite5m: Int = 0, cacheWrite1h: Int = 0,
+                costUSD: Double = 0, unpriced: Bool = false) {
+        self.at = at
+        self.requests = requests
+        self.input = input
+        self.output = output
+        self.cacheRead = cacheRead
+        self.cacheWrite5m = cacheWrite5m
+        self.cacheWrite1h = cacheWrite1h
+        self.costUSD = costUSD
+        self.unpriced = unpriced
+    }
+
+    public var id: Date { at }
+    public var tokens: Int { input + output + cacheRead + cacheWrite5m + cacheWrite1h }
+}
+
+/// One line on the chart: a session on a model, on the Mac that ran it.
+///
+/// The model is part of the identity rather than a property of the session because a
+/// session switches model mid-flight — that is the whole point of ccmux — and one line
+/// averaging two prices would be a line about nothing.
+public struct UsageSeries: Codable, Equatable, Sendable, Identifiable {
+    public var id: String
+    public var machineID: String
+    public var machineLabel: String
+    public var sessionID: String
+    public var sessionName: String
+    public var accountID: String
+    public var accountFingerprint: String?
+    public var accountLabel: String
+    public var model: String
+    public var totals: UsageTotals
+    public var points: [UsagePoint]
+
+    public init(id: String, machineID: String, machineLabel: String, sessionID: String,
+                sessionName: String, accountID: String, accountFingerprint: String? = nil,
+                accountLabel: String, model: String, totals: UsageTotals,
+                points: [UsagePoint]) {
+        self.id = id
+        self.machineID = machineID
+        self.machineLabel = machineLabel
+        self.sessionID = sessionID
+        self.sessionName = sessionName
+        self.accountID = accountID
+        self.accountFingerprint = accountFingerprint
+        self.accountLabel = accountLabel
+        self.model = model
+        self.totals = totals
+        self.points = points
+    }
+}
+
+/// Everything one account spent in range, pooled across every Mac that used it.
+public struct UsageAccountTotals: Codable, Equatable, Sendable, Identifiable {
+    public var accountID: String
+    public var accountFingerprint: String?
+    public var accountLabel: String
+    public var kind: AccountKind
+    public var totals: UsageTotals
+
+    public init(accountID: String, accountFingerprint: String? = nil,
+                accountLabel: String, kind: AccountKind = .subscription,
+                totals: UsageTotals) {
+        self.accountID = accountID
+        self.accountFingerprint = accountFingerprint
+        self.accountLabel = accountLabel
+        self.kind = kind
+        self.totals = totals
+    }
+
+    /// A key account is one account however many Macs minted their own id for it.
+    public var id: String { accountFingerprint ?? accountID }
+}
+
+public struct UsageStatsResponse: Codable, Equatable, Sendable {
+    public var apiVersion: Int
+    public var range: UsageRange
+    public var bucketSeconds: Int
+    public var from: Date
+    public var to: Date
+    public var totals: UsageTotals
+    public var accounts: [UsageAccountTotals]
+    public var series: [UsageSeries]
+    /// Set when the store is at its ceiling and dropped the oldest buckets to stay
+    /// inside it, so the page can say the far end of the range is incomplete.
+    public var truncated: Bool
+
+    public init(apiVersion: Int = ServerAPI.version, range: UsageRange,
+                bucketSeconds: Int, from: Date, to: Date, totals: UsageTotals,
+                accounts: [UsageAccountTotals], series: [UsageSeries],
+                truncated: Bool = false) {
+        self.apiVersion = apiVersion
+        self.range = range
+        self.bucketSeconds = bucketSeconds
+        self.from = from
+        self.to = to
+        self.totals = totals
+        self.accounts = accounts
+        self.series = series
+        self.truncated = truncated
     }
 }
 

@@ -300,6 +300,42 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
         return bundle
     }
 
+    // MARK: - Usage over time
+
+    /// Hands over the minutes this Mac has closed since the last successful push.
+    ///
+    /// The answer is a count rather than the stats: every Mac posts this on the
+    /// housekeeping tick, and the aggregation is wanted only while someone is looking
+    /// at it.
+    @discardableResult
+    public func reportUsage(machineID: String,
+                            _ report: UsageReport) async throws -> UsageIngestResponse {
+        let response: UsageIngestResponse
+        do {
+            response = try await post(["machines", machineID, "usage"], report)
+        } catch {
+            throw Self.isMissingRoute(error) ? ServerClientError.unsupported : error
+        }
+        guard response.apiVersion == ServerAPI.version else {
+            throw ServerClientError.incompatible(response.apiVersion)
+        }
+        return response
+    }
+
+    /// The fleet's usage on one range's grid, aggregated by the server.
+    public func stats(_ range: UsageRange) async throws -> UsageStatsResponse {
+        let response: UsageStatsResponse
+        do {
+            response = try await get(["stats", range.rawValue])
+        } catch {
+            throw Self.isMissingRoute(error) ? ServerClientError.unsupported : error
+        }
+        guard response.apiVersion == ServerAPI.version else {
+            throw ServerClientError.incompatible(response.apiVersion)
+        }
+        return response
+    }
+
     // MARK: - Sessions across machines
 
     /// Reports this Mac's whole session list and gets everyone's back — one round trip

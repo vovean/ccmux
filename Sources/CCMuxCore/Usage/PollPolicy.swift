@@ -66,8 +66,15 @@ public enum PollPolicy {
     /// answer's own age either: the server caches each account for minutes, so that
     /// clears this floor on every tick.
     public static func shouldAskServer(lastAsked: Date?, now: Date = Date()) -> Bool {
+        isDue(lastAsked: lastAsked, after: serveTTL, now: now)
+    }
+
+    /// Whether enough time has passed since something was last asked. Nil has never been
+    /// asked, which is always due.
+    public static func isDue(lastAsked: Date?, after interval: TimeInterval,
+                             now: Date = Date()) -> Bool {
         guard let lastAsked else { return true }
-        return now.timeIntervalSince(lastAsked) >= serveTTL
+        return now.timeIntervalSince(lastAsked) >= interval
     }
 
     static func movement(from previous: UsageSnapshot?, to current: UsageSnapshot) -> Double {

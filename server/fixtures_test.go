@@ -70,6 +70,72 @@ func TestWireFixturesMatchWhatWeEmit(t *testing.T) {
 		"error.json": ServerErrorResponse{
 			Error: ServerErrorDetail{Message: "no usable credential for acct-1"},
 		},
+		// The stats view. Invented names and paths, like the session fixture below.
+		"stats.json": UsageStatsResponse{
+			APIVersion:    apiVersion,
+			Range:         "24h",
+			BucketSeconds: 300,
+			From:          Time{reset.Add(-24 * time.Hour)},
+			To:            Time{reset},
+			Totals: UsageTotals{
+				Requests: 12, Input: 4200, Output: 900, CacheRead: 51000,
+				CacheWrite5m: 3000, CacheWrite1h: 0, CostUSD: 1.875,
+				UnpricedModels: []string{"claude-unknown-9"},
+			},
+			Accounts: []UsageAccountTotals{
+				{
+					AccountID:    "11111111-2222-3333-4444-555555555555",
+					AccountLabel: "Work", Kind: KindSubscription,
+					Totals: UsageTotals{Requests: 9, Input: 3000, Output: 700,
+						CacheRead: 50000, CacheWrite5m: 3000, CostUSD: 1.5,
+						UnpricedModels: []string{}},
+				},
+				{
+					AccountID: "local-uuid", AccountLabel: "Billing", Kind: KindAPIKey,
+					AccountFingerprint: ptr(APIKeyFingerprint("sk-ant-fixture")),
+					Totals: UsageTotals{Requests: 3, Input: 1200, Output: 200,
+						CacheRead: 1000, CostUSD: 0.375,
+						UnpricedModels: []string{"claude-unknown-9"}},
+				},
+			},
+			Series: []UsageSeries{
+				{
+					ID:           "8f0f1b64-0000-4000-8000-000000000001/sess-1/claude-opus-5",
+					MachineID:    "8f0f1b64-0000-4000-8000-000000000001",
+					MachineLabel: "studio", SessionID: "sess-1",
+					SessionName:  "api-gateway",
+					AccountID:    "11111111-2222-3333-4444-555555555555",
+					AccountLabel: "Work", Model: "claude-opus-5",
+					Totals: UsageTotals{Requests: 9, Input: 3000, Output: 700,
+						CacheRead: 50000, CacheWrite5m: 3000, CostUSD: 1.5,
+						UnpricedModels: []string{}},
+					Points: []UsagePoint{
+						{At: Time{reset.Add(-10 * time.Minute)}, Requests: 4, Input: 1000,
+							Output: 200, CacheRead: 20000, CacheWrite5m: 3000,
+							CostUSD: 0.6},
+						{At: Time{reset.Add(-5 * time.Minute)}, Requests: 5, Input: 2000,
+							Output: 500, CacheRead: 30000, CostUSD: 0.9},
+					},
+				},
+				{
+					ID:           "8f0f1b64-0000-4000-8000-000000000002/sess-2/claude-unknown-9",
+					MachineID:    "8f0f1b64-0000-4000-8000-000000000002",
+					MachineLabel: "laptop", SessionID: "sess-2", SessionName: "batch",
+					AccountID:          "local-uuid",
+					AccountFingerprint: ptr(APIKeyFingerprint("sk-ant-fixture")),
+					AccountLabel:       "Billing", Model: "claude-unknown-9",
+					Totals: UsageTotals{Requests: 3, Input: 1200, Output: 200,
+						CacheRead: 1000, CostUSD: 0.375,
+						UnpricedModels: []string{"claude-unknown-9"}},
+					Points: []UsagePoint{
+						{At: Time{reset.Add(-5 * time.Minute)}, Requests: 3, Input: 1200,
+							Output: 200, CacheRead: 1000, CostUSD: 0.375, Unpriced: true},
+					},
+				},
+			},
+			Truncated: false,
+		},
+		"usage-ingest.json": UsageIngestResponse{APIVersion: apiVersion, Accepted: 7},
 		// Invented machine names and paths. A real hostname or a real working directory in
 		// a tracked file is the kind of thing the pre-push scan exists to catch.
 		"sessions.json": SessionsResponse{

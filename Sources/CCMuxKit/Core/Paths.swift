@@ -24,6 +24,12 @@ public enum Paths {
     public static var hookBaselineFile: URL {
         support.appendingPathComponent("hooks-baseline.json")
     }
+    /// Minutes counted here but not yet handed to the account server. Holds the minute
+    /// still running too, so a restart mid-minute resumes it rather than starting a
+    /// second bucket that would replace the first.
+    public static var usageSpoolFile: URL {
+        support.appendingPathComponent("usage-spool.json")
+    }
     /// Dropped by the shim before it launches the app, so a session started from a
     /// terminal does not pop a window over what you were doing.
     public static var headlessMarker: URL { support.appendingPathComponent(".headless") }
