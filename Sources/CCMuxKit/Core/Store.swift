@@ -120,6 +120,12 @@ public final class Store {
         sessions.filter { $0.accountID == accountID }
     }
 
+    /// Sessions whose namespace holds this account's credential, which after a
+    /// cross-organisation rotation is not the same set as the ones it serves.
+    public func sessions(seededBy accountID: String) -> [SessionRecord] {
+        sessions.filter { $0.seededAccountID == accountID }
+    }
+
     /// Whether any live session is using this account. The poller, the threshold check
     /// and the Accounts screen all need the same answer.
     public func isInUse(_ accountID: String) -> Bool {

@@ -9,6 +9,9 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
     public var pid: Int32
     public var port: UInt16
     public var accountID: String
+    /// Whose credential is in this session's namespace, which after a rotation is not
+    /// the account serving it. This is what Claude Code reads to decide its organisation.
+    public var seededAccountID: String
     public var policyName: String
     public var cwd: String
     public var startedAt: Date
@@ -22,11 +25,13 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
 
     public init(id: String, pid: Int32, port: UInt16, accountID: String,
                 policyName: String, cwd: String, startedAt: Date = Date(),
-                autoSwitchOverride: Bool? = nil, spendUSD: Double = 0) {
+                autoSwitchOverride: Bool? = nil, spendUSD: Double = 0,
+                seededAccountID: String? = nil) {
         self.id = id
         self.pid = pid
         self.port = port
         self.accountID = accountID
+        self.seededAccountID = seededAccountID ?? accountID
         self.policyName = policyName
         self.cwd = cwd
         self.startedAt = startedAt
@@ -42,6 +47,10 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
         pid = try c.decode(Int32.self, forKey: .pid)
         port = try c.decode(UInt16.self, forKey: .port)
         accountID = try c.decode(String.self, forKey: .accountID)
+        // A session written before this field existed was last seeded with whatever it
+        // was serving, so that is the honest value to carry forward.
+        seededAccountID = try c.decodeIfPresent(String.self, forKey: .seededAccountID)
+            ?? accountID
         policyName = try c.decode(String.self, forKey: .policyName)
         cwd = try c.decode(String.self, forKey: .cwd)
         startedAt = try c.decodeIfPresent(Date.self, forKey: .startedAt) ?? Date()

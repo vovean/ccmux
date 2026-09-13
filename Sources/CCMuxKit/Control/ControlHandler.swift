@@ -40,7 +40,8 @@ public final class ControlHandler {
 
         case .assign(let sessionID, let accountID):
             do {
-                try sessions.assign(sessionID: sessionID, accountID: accountID)
+                try sessions.assign(sessionID: sessionID, accountID: accountID,
+                                    reason: .explicit)
                 return .ok
             } catch {
                 return .failure(error.localizedDescription)

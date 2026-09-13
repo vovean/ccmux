@@ -969,16 +969,22 @@ public final class Engine: ObservableObject {
     private func backfillMissingPlans() async {
         for account in store.accounts.all()
         where account.kind == .subscription
-            && (account.subscriptionType == nil || account.rateLimitTier == nil) {
+            && (account.subscriptionType == nil || account.rateLimitTier == nil
+                || account.organizationUUID == nil) {
             guard account.health != .needsRelogin,
                   let token = vault.cachedBearerToken(for: account.id),
                   let identity = try? await client.profile(accessToken: token),
                   identity.subscriptionType != nil || identity.rateLimitTier != nil
+                    || identity.organizationUUID != nil
             else { continue }
 
             store.accounts.mutate(account.id) {
                 $0.subscriptionType = $0.subscriptionType ?? identity.subscriptionType
                 $0.rateLimitTier = $0.rateLimitTier ?? identity.rateLimitTier
+                // Added from an older build, this is missing — and it is what decides
+                // whether a rotation may carry a session's identity with it.
+                $0.organizationUUID = $0.organizationUUID ?? identity.organizationUUID
+                $0.organizationName = $0.organizationName ?? identity.organizationName
             }
             Log.info("backfilled plan for \(displayName(account.id)): "
                      + "\(identity.subscriptionType ?? "?")")
@@ -997,7 +1003,9 @@ public final class Engine: ObservableObject {
             ?? Account(id: identity.uuid, label: label ?? identity.email ?? identity.uuid)
         if let label, !label.isEmpty { account.label = label }
         account.email = identity.email ?? account.email
-        account.organizationUUID = identity.organizationUUID
+        // Never cleared by a profile that simply did not carry one: an absent
+        // organisation now decides whether a session's identity may rotate.
+        account.organizationUUID = identity.organizationUUID ?? account.organizationUUID
         account.organizationName = identity.organizationName ?? account.organizationName
         // The profile is the fallback, not an afterthought: a token exchange can hand
         // back a credential with no plan on it at all, and an account left without one
@@ -1149,8 +1157,13 @@ public final class Engine: ObservableObject {
     }
 
     public func removeAccount(_ accountID: String) {
-        for record in store.sessions(forAccount: accountID) {
-            sessionManager.endSession(record.id)
+        // Seeded as well as served: a session rotated across organisations still holds
+        // this account's credential, and once the lineage is forgotten nothing refreshes
+        // it and nothing can re-seed it either.
+        let affected = Set((store.sessions(forAccount: accountID)
+                            + store.sessions(seededBy: accountID)).map(\.id))
+        for id in affected {
+            sessionManager.endSession(id)
         }
         vault.forget(accountID)
         // Leaving the key behind would keep a working credential in the Keychain for an
@@ -1212,7 +1225,8 @@ public final class Engine: ObservableObject {
 
     public func assign(sessionID: String, to accountID: String) {
         do {
-            try sessionManager.assign(sessionID: sessionID, accountID: accountID)
+            try sessionManager.assign(sessionID: sessionID, accountID: accountID,
+                                      reason: .explicit)
             pendingSwitch.removeValue(forKey: sessionID)
             unblock(sessionID: sessionID)
         } catch {

@@ -64,8 +64,11 @@ public final class SessionManager: SessionRouting {
     }
 
     /// Namespaces of every live session on this account.
+    /// Keyed on what a session is seeded as, not on what serves it: those differ after a
+    /// cross-organisation rotation, and seeding from the serving account would move the
+    /// identity `assign` deliberately left alone.
     private func liveNamespaces(accountID: String) -> [URL] {
-        store.sessions(forAccount: accountID)
+        store.sessions(seededBy: accountID)
             .filter { ClaudeSessions.isAlive($0.pid) }
             .map(\.namespaceDir)
     }
@@ -381,6 +384,12 @@ public final class SessionManager: SessionRouting {
         return vault.credential(for: accountID) != nil
     }
 
+    /// The only way a namespace is written after launch. Every caller takes the account
+    /// from the record, so no site can re-derive it and drift.
+    private func seed(for record: SessionRecord) throws {
+        try seed(accountID: record.seededAccountID, into: record.namespaceDir)
+    }
+
     private func seed(accountID: String, into namespace: URL) throws {
         if store.accounts.get(accountID)?.kind == .apiKey {
             // Claude Code refuses to start without a credential in its namespace, but an
@@ -416,7 +425,17 @@ public final class SessionManager: SessionRouting {
 
     /// Points a session at a different account. The proxy reads the assignment per
     /// request, so this takes effect on the session's very next call.
-    public func assign(sessionID: String, accountID: String) throws {
+    /// Why a session is moving, which is what decides whether its identity moves too.
+    public enum AssignmentReason {
+        /// Failover or a rebalance. The point is to keep serving, so the identity stays.
+        case rotation
+        /// The user picked this account for this session. They asked for the move, so it
+        /// is taken whole.
+        case explicit
+    }
+
+    public func assign(sessionID: String, accountID: String,
+                       reason: AssignmentReason = .rotation) throws {
         guard store.accounts.get(accountID) != nil else {
             throw SessionError.unknownAccount(accountID)
         }
@@ -429,16 +448,56 @@ public final class SessionManager: SessionRouting {
         guard existing.accountID != accountID else { return }
 
         store.sessions.mutate(sessionID) { $0.accountID = accountID }
-        // Re-seed so a restart of this session boots on the new account too. A failure
-        // here is not fatal — the proxy already serves the new account — but it must
-        // not be silent.
+
+        // Claude Code reads the seeded credential to decide which organisation it is in,
+        // and an organisation is what mandates managed plugins — so carrying the identity
+        // across that boundary makes a plugin that never loaded at startup suddenly
+        // required, blocking every model switch for the rest of the session.
+        guard Self.mayReseed(reason: reason,
+                             seededOrg: organisation(of: existing.seededAccountID),
+                             targetOrg: organisation(of: accountID))
+                || accountID == existing.seededAccountID else {
+            Log.info("session \(sessionID) is now served by \(displayName(accountID)); "
+                     + "it stays seeded as \(displayName(existing.seededAccountID))")
+            return
+        }
+        // Recorded before the write, not after: `seed` can block for twenty seconds
+        // refreshing an expired credential, and a refresh of the old account landing in
+        // that window would otherwise re-seed a session this has already moved on.
+        let moved = store.sessions.mutate(sessionID) { $0.seededAccountID = accountID }
         do {
-            try seed(accountID: accountID, into: Paths.namespace(sessionID))
+            try seed(for: moved ?? existing)
         } catch {
+            // The record now points at an account the namespace does not hold, which the
+            // next refresh of that account repairs on its own.
             Log.warn("session \(sessionID) moved to \(accountID) but its namespace could "
                      + "not be re-seeded: \(error)")
         }
         Log.info("session \(sessionID) reassigned to account \(accountID)")
+    }
+
+    private func organisation(of accountID: String) -> String? {
+        store.accounts.get(accountID)?.organizationUUID
+    }
+
+    private func displayName(_ accountID: String) -> String {
+        store.accounts.get(accountID)?.displayName ?? accountID
+    }
+
+    /// Whether a move may take the session's seeded identity with it. Pure, so the one
+    /// rule that decides it is testable without a Store.
+    static func mayReseed(reason: AssignmentReason, seededOrg: String?,
+                          targetOrg: String?) -> Bool {
+        if reason == .explicit { return true }
+        return sameOrganisation(seededOrg, targetOrg)
+    }
+
+    /// Unknown counts as different: an account with no organisation on record cannot be
+    /// shown to leave the identity where it was, and leaving it alone is the safe way to
+    /// be wrong.
+    static func sameOrganisation(_ left: String?, _ right: String?) -> Bool {
+        guard let left, let right, !left.isEmpty, !right.isEmpty else { return false }
+        return left == right
     }
 
     /// Moves a session off an account that just hit a limit. Returns what happened so
@@ -511,7 +570,11 @@ public final class SessionManager: SessionRouting {
         // would still have one; its Claude Code could rotate the lineage with nothing
         // adopting the result, killing the account's stored refresh token.
         for record in store.sessions.all() {
-            guard let credential = vault.credential(for: record.accountID) else { continue }
+            // By what the session is seeded as, not what serves it, or every restart
+            // would drag a rotated session's identity into the serving account's
+            // organisation — the move `assign` refused to make.
+            guard let credential = vault.credential(for: record.seededAccountID)
+            else { continue }
             let seeded = credential.neuteredForSession()
             if let existing = (try? ClaudeCredentialStore.read(namespace: record.namespaceDir))
                 ?? nil, existing.refreshToken == nil,
