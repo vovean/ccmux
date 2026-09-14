@@ -70,6 +70,11 @@ func run() error {
 	registry := NewRegistry(NewOAuthClient(), secrets, config.AccountsFile())
 	registry.Bootstrap()
 	machines := NewMachineStore()
+	// What the Macs report they are running decides how often their accounts are polled.
+	// Wired here rather than inside the registry so neither store has to know the other.
+	registry.SetActivitySource(func(accountID string) bool {
+		return machines.HasLiveSession(accountID, time.Now())
+	})
 	hooks := NewHookStore(config.HooksFile())
 	series := NewSeriesStore(config.SeriesDir(),
 		time.Duration(config.UsageRetentionDays)*24*time.Hour)

@@ -33,6 +33,9 @@ const (
 	// A machine that has gone quiet for this long is forgotten. Clients stop showing one
 	// long before that; this is only about not holding a laptop that never comes back.
 	machineTTL = 24 * time.Hour
+	// Past this a machine's report is too old to say anything about what is running now.
+	// A Mac reports every 20 seconds, so this is many missed reports, not a tight race.
+	machineActivityWindow = 5 * time.Minute
 	// Ceilings, because the daemon runs under MemoryMax=192M next to the VPN processes.
 	// The body cap in decodeBody bounds one request; these bound the accumulation.
 	maxMachines           = 32
@@ -102,6 +105,31 @@ func (s *MachineStore) Snapshots(now time.Time) []MachineSnapshot {
 		return out[i].MachineID < out[j].MachineID
 	})
 	return out
+}
+
+// HasLiveSession reports whether any machine that has spoken recently is running a
+// session on this account.
+//
+// A far better liveness signal than a token request: a delegated client caches its access
+// token for hours, so a Mac working flat out on one account asks for a token about once a
+// day — and the account then looks idle and is polled as rarely as possible.
+func (s *MachineStore) HasLiveSession(accountID string, now time.Time) bool {
+	if accountID == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, entry := range s.machines {
+		if now.Sub(entry.reportedAt) > machineActivityWindow {
+			continue
+		}
+		for _, session := range entry.sessions {
+			if session.AccountID == accountID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *MachineStore) Forget(machineID string) bool {

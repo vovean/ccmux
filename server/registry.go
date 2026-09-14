@@ -41,6 +41,8 @@ type Registry struct {
 	// When a client last asked for this account's token. The server has no session
 	// knowledge, so this stands in for "in use" when choosing a poll cadence.
 	lastTokenRequest map[string]time.Time
+	// A second opinion on whether an account is in use, supplied by the session store.
+	activity func(accountID string) bool
 }
 
 type pendingLogin struct {
@@ -88,6 +90,15 @@ func NewRegistry(client *OAuthClient, secrets SecretStore, accountsFile string) 
 		logins:           map[string]*pendingLogin{},
 		lastTokenRequest: map[string]time.Time{},
 	}
+}
+
+// SetActivitySource supplies a second opinion on whether an account is in use. Called
+// once at startup; nil leaves the registry on token requests alone. The callback is
+// invoked without the registry lock held, so it may not reach back into the registry.
+func (r *Registry) SetActivitySource(inUse func(accountID string) bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.activity = inUse
 }
 
 func (r *Registry) Bootstrap() {
@@ -528,6 +539,13 @@ func (r *Registry) poll(ctx context.Context, accountID string) {
 }
 
 func (r *Registry) record(accountID string, windows []UsageWindow, err error) {
+	// Asked before the lock is taken. The callback is supplied from outside, and one that
+	// reached back into the registry would block on a mutex this already holds.
+	r.mu.Lock()
+	activity := r.activity
+	r.mu.Unlock()
+	hasSession := activity != nil && activity(accountID)
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -549,11 +567,21 @@ func (r *Registry) record(accountID string, windows []UsageWindow, err error) {
 		snapshot.LastError = ""
 	}
 
-	inUse := false
+	askedForToken := false
 	if last, ok := r.lastTokenRequest[accountID]; ok {
-		inUse = time.Since(last) < inUseWindow
+		askedForToken = time.Since(last) < inUseWindow
 	}
-	plan := PlanPoll(inUse, previous, snapshot, pollThreshold, rateLimited, time.Now())
+	// A delegated client caches its access token for hours, so a token request is a poor
+	// liveness signal on its own; a reported session is a direct one.
+	plan := PlanPoll(askedForToken || hasSession, previous, snapshot, pollThreshold,
+		rateLimited, time.Now())
+	// But only a token request earns the 60s branch. This is the sole poller for a
+	// delegated account, and 60s is roughly double what the endpoint budgets per token —
+	// spending it is what makes every window stale for an hour instead of five minutes.
+	if hasSession && !askedForToken && plan.Interval < pollMinInterval {
+		plan = PollPlan{Interval: pollMinInterval,
+			NextPollAt: time.Now().Add(jitter(pollMinInterval))}
+	}
 	snapshot.NextPollAt = plan.NextPollAt
 	r.usage[accountID] = &snapshot
 }

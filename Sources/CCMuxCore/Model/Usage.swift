@@ -43,6 +43,18 @@ public struct UsageWindow: Codable, Equatable, Identifiable, Sendable {
 
     public var id: String { "\(kind.rawValue)/\(modelName ?? label)" }
 
+    /// Whether a proxied response header can carry this window. The per-model ones cannot
+    /// be: they exist solely in the usage endpoint's answer. Pinned against what
+    /// `UsageParser` actually builds from headers, for subscriptions and API keys alike.
+    public var isReportedByHeaders: Bool {
+        switch kind {
+        case .session, .weeklyAll: return true
+        case .apiRequests, .apiTokens, .apiInputTokens, .apiOutputTokens: return true
+        // `budget` is spend against the monthly figure, written by neither source.
+        case .weeklyScoped, .budget, .other: return false
+        }
+    }
+
     /// A per-minute ceiling refills continuously, so it says nothing about whether an
     /// account is worth choosing — only whether a request would be throttled right now.
     public var isPerMinute: Bool {
@@ -84,6 +96,31 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         self.lastEndpointFetchAt = lastEndpointFetchAt
         self.lastError = lastError
         self.nextPollAt = nextPollAt
+    }
+
+    /// Folds an endpoint answer into what is already held.
+    ///
+    /// A delegated answer is served from ccmuxd's cache and arrives minutes stale, while
+    /// headers refresh the 5-hour and weekly windows seconds after every request. Taking
+    /// it wholesale is what made those two travel backwards.
+    public static func folding(_ windows: [UsageWindow], into previous: UsageSnapshot?,
+                               observedAt: Date) -> UsageSnapshot {
+        guard let previous, observedAt < previous.fetchedAt else {
+            // At least as fresh as anything held, so it is authoritative — a window it
+            // no longer reports is one the account no longer has.
+            return UsageSnapshot(windows: windows, fetchedAt: observedAt,
+                                 lastEndpointFetchAt: observedAt)
+        }
+        let lastEndpoint = previous.lastEndpointFetchAt ?? .distantPast
+        guard observedAt >= lastEndpoint else { return previous }
+        // The endpoint still owns the windows headers cannot carry, including whether
+        // they exist at all: keeping one it has stopped reporting would hold a model at
+        // its last percent forever and route every request for it away from a healthy
+        // account, with nothing able to clear it.
+        let merged = previous.windows.filter(\.isReportedByHeaders)
+            + windows.filter { !$0.isReportedByHeaders }
+        return UsageSnapshot(windows: merged, fetchedAt: previous.fetchedAt,
+                             lastEndpointFetchAt: observedAt)
     }
 
     /// Windows of a kind, optionally narrowed to one model. The model filter only

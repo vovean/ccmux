@@ -512,3 +512,98 @@ func TestTheSessionRoutesNeedAuth(t *testing.T) {
 		}
 	}
 }
+
+// A delegated client caches its access token for hours, so a Mac working flat out on one
+// account asks for a token about once a day. What it reports it is running is the signal
+// that actually tracks use.
+func TestAReportedSessionCountsAsAccountActivity(t *testing.T) {
+	store := NewMachineStore()
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	store.Report("mac-1", MachineReport{Label: "studio", Sessions: []MachineSession{
+		{ID: "s1", AccountID: "acct-emcd", AccountLabel: "Emcd"},
+	}}, now)
+
+	if !store.HasLiveSession("acct-emcd", now) {
+		t.Error("an account with a reported session does not read as in use")
+	}
+	if store.HasLiveSession("acct-other", now) {
+		t.Error("an account nobody is running read as in use")
+	}
+	if store.HasLiveSession("", now) {
+		t.Error("an empty account id read as in use")
+	}
+	// A machine that stopped reporting says nothing about what is running now.
+	if store.HasLiveSession("acct-emcd", now.Add(machineActivityWindow+time.Minute)) {
+		t.Error("a stale report still counted as activity")
+	}
+}
+
+// Without this an account being worked flat out polls at the idle ceiling, and the
+// per-model windows — which only the usage endpoint reports — freeze for ten minutes.
+func TestAnAccountWithASessionIsPolledAsInUse(t *testing.T) {
+	registry, _ := newTestRegistry(t, newStub(nil))
+	registry.accounts["acct-1"] = RemoteAccount{ID: "acct-1", Kind: KindSubscription}
+	windows := []UsageWindow{{Kind: WindowSession, Label: "5-hour", Percent: 10}}
+
+	// Twice, so the second lands with nothing moved — the case the interval turns on.
+	registry.record("acct-1", windows, nil)
+	registry.record("acct-1", windows, nil)
+	idle := time.Until(registry.usage["acct-1"].NextPollAt)
+
+	registry.SetActivitySource(func(string) bool { return true })
+	registry.record("acct-1", windows, nil)
+	active := time.Until(registry.usage["acct-1"].NextPollAt)
+
+	if idle <= active {
+		t.Fatalf("a reported session did not shorten the interval: idle %s, active %s",
+			idle, active)
+	}
+	// Jitter is a tenth either way, so these bounds cannot overlap.
+	if idle < 450*time.Second {
+		t.Errorf("idle interval is %s, expected about %s", idle, pollIdleMax)
+	}
+	if active > 400*time.Second {
+		t.Errorf("active interval is %s, expected about %s", active, pollActiveMax)
+	}
+}
+
+// The 60s branch costs roughly double what the endpoint budgets per token, and this is
+// the only poller for a delegated account — so a reported session must never reach it.
+// Spending the budget is what makes every window stale for an hour instead of five
+// minutes, exactly when an account near exhaustion most needs to be read.
+func TestASessionNeverEarnsTheUrgentPollInterval(t *testing.T) {
+	registry, _ := newTestRegistry(t, newStub(nil))
+	registry.accounts["acct-1"] = RemoteAccount{ID: "acct-1", Kind: KindSubscription}
+	registry.SetActivitySource(func(string) bool { return true })
+
+	// Near the threshold and moving, which is the combination that unlocks 60s.
+	registry.record("acct-1", []UsageWindow{
+		{Kind: WindowSession, Label: "5-hour", Percent: 90}}, nil)
+	registry.record("acct-1", []UsageWindow{
+		{Kind: WindowSession, Label: "5-hour", Percent: 95}}, nil)
+
+	interval := time.Until(registry.usage["acct-1"].NextPollAt)
+	// Jitter is a tenth either way, so 60s could reach 66s and 180s never falls below 162s.
+	if interval < 150*time.Second {
+		t.Fatalf("a reported session earned a %s interval; the floor is %s",
+			interval, pollMinInterval)
+	}
+}
+
+// A token request still earns it: that signal means a client just started work, and it is
+// rare enough not to sustain the spend.
+func TestATokenRequestStillEarnsTheUrgentInterval(t *testing.T) {
+	registry, _ := newTestRegistry(t, newStub(nil))
+	registry.accounts["acct-1"] = RemoteAccount{ID: "acct-1", Kind: KindSubscription}
+	registry.lastTokenRequest["acct-1"] = time.Now()
+
+	registry.record("acct-1", []UsageWindow{
+		{Kind: WindowSession, Label: "5-hour", Percent: 90}}, nil)
+	registry.record("acct-1", []UsageWindow{
+		{Kind: WindowSession, Label: "5-hour", Percent: 95}}, nil)
+
+	interval := time.Until(registry.usage["acct-1"].NextPollAt)
+	if interval > 100*time.Second {
+		t.Fatalf("a token request gave %s, expected about %s", interval, pollUrgentInterval)
+	}
+}

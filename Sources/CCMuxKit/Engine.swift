@@ -422,8 +422,7 @@ public final class Engine: ObservableObject {
 
         switch result {
         case .success(let windows):
-            snapshot = UsageSnapshot(windows: windows, fetchedAt: fetchedAt,
-                                     lastEndpointFetchAt: fetchedAt)
+            snapshot = UsageSnapshot.folding(windows, into: previous, observedAt: fetchedAt)
             markHealthy(accountID)
         case .failure(let error):
             snapshot = UsageSnapshot(windows: previous?.windows ?? [],
