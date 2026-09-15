@@ -29,12 +29,28 @@ build-server:
 test-server:
 	cd server && go test -race ./...
 
+# The Linux agent is its own module and imports ccmuxd/wire through a replace, so it
+# needs its own build, vet and test.
+build-agent:
+	cd agent && go build ./... && go vet ./...
+
+test-agent:
+	cd agent && go test -race ./...
+
 # The artifact that actually ships. ~7 MB, statically linked, no runtime on the target.
 ccmuxd-linux:
 	@mkdir -p dist
 	cd server && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
 	  go build -trimpath -ldflags="-s -w" -o ../dist/ccmuxd-linux-amd64 .
 	@ls -lh dist/ccmuxd-linux-amd64 | awk '{print "  dist/ccmuxd-linux-amd64", $$5}'
+
+# The agent binary that ships to a Linux box, alongside its unit file.
+ccmux-linux:
+	@mkdir -p dist
+	cd agent && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+	  go build -trimpath -ldflags="-s -w -X main.Version=$(VERSION)" \
+	  -o ../dist/ccmux-linux-amd64 ./cmd/ccmux
+	@ls -lh dist/ccmux-linux-amd64 | awk '{print "  dist/ccmux-linux-amd64", $$5}'
 
 ccmuxd-image:
 	docker build -f server/Dockerfile -t ccmuxd:latest server

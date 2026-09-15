@@ -1,0 +1,581 @@
+{
+  "cases": [
+    {
+      "name": "the most drained eligible account comes first",
+      "model": "claude-opus-5",
+      "accounts": [
+        {
+          "id": "fresh",
+          "label": "Fresh",
+          "kind": "subscription",
+          "health": "ok"
+        },
+        {
+          "id": "half",
+          "label": "Half",
+          "kind": "subscription",
+          "health": "ok"
+        },
+        {
+          "id": "nearly",
+          "label": "Nearly",
+          "kind": "subscription",
+          "health": "ok"
+        }
+      ],
+      "usage": {
+        "fresh": {
+          "windows": [
+            {
+              "kind": "session",
+              "label": "5-hour",
+              "percent": 5
+            },
+            {
+              "kind": "weeklyAll",
+              "label": "Weekly",
+              "percent": 5
+            }
+          ],
+          "fetchedAt": "2026-09-15T12:00:00Z",
+          "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+        },
+        "half": {
+          "windows": [
+            {
+              "kind": "session",
+              "label": "5-hour",
+              "percent": 5
+            },
+            {
+              "kind": "weeklyAll",
+              "label": "Weekly",
+              "percent": 50
+            }
+          ],
+          "fetchedAt": "2026-09-15T12:00:00Z",
+          "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+        },
+        "nearly": {
+          "windows": [
+            {
+              "kind": "session",
+              "label": "5-hour",
+              "percent": 5
+            },
+            {
+              "kind": "weeklyAll",
+              "label": "Weekly",
+              "percent": 90
+            }
+          ],
+          "fetchedAt": "2026-09-15T12:00:00Z",
+          "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+        }
+      },
+      "excluded": null,
+      "expectedOrder": [
+        "nearly",
+        "half",
+        "fresh"
+      ],
+      "expectedCanServe": {
+        "fresh": true,
+        "half": true,
+        "nearly": true
+      }
+    },
+    {
+      "name": "a fable request will not take an account with no fable week left",
+      "model": "claude-fable-5-1",
+      "accounts": [
+        {
+          "id": "a",
+          "label": "A",
+          "kind": "subscription",
+          "health": "ok"
+        },
+        {
+          "id": "b",
+          "label": "B",
+          "kind": "subscription",
+          "health": "ok"
+        }
+      ],
+      "usage": {
+        "a": {
+          "windows": [
+            {
+              "kind": "session",
+              "label": "5-hour",
+              "percent": 10
+            },
+            {
+              "kind": "weeklyAll",
+              "label": "Weekly",
+              "percent": 10
+            },
+            {
+              "kind": "weeklyScoped",
+              "label": "Weekly Fable",
+              "percent": 100,
+              "modelName": "Fable"
+            }
+          ],
+          "fetchedAt": "2026-09-15T12:00:00Z",
+          "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+        },
+        "b": {
+          "windows": [
+            {
+              "kind": "session",
+              "label": "5-hour",
+              "percent": 10
+            },
+            {
+              "kind": "weeklyAll",
+              "label": "Weekly",
+              "percent": 80
+            },
+            {
+              "kind": "weeklyScoped",
+              "label": "Weekly Fable",
+              "percent": 20,
+              "modelName": "Fable"
+            }
+          ],
+          "fetchedAt": "2026-09-15T12:00:00Z",
+          "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+        }
+      },
+      "excluded": null,
+      "expectedOrder": [
+        "b"
+      ],
+      "expectedCanServe": {
+        "a": false,
+        "b": true
+      }
+    },
+    {
+      "name": "a spent fable week does not stop an opus request",
+      "model": "claude-opus-5",
+      "accounts": [
+        {
+          "id": "a",
+          "label": "A",
+          "kind": "subscription",
+          "health": "ok"
+        },
+        {
+          "id": "b",
+          "label": "B",
+          "kind": "subscription",
+          "health": "ok"
+        }
+      ],
+      "usage": {
+        "a": {
+          "windows": [
+            {
+              "kind": "session",
+              "label": "5-hour",
+              "percent": 10
+            },
+            {
+              "kind": "weeklyAll",
+              "label": "Weekly",
+              "percent": 10
+            },
+            {
+              "kind": "weeklyScoped",
+              "label": "Weekly Fable",
+              "percent": 100,
+              "modelName": "Fable"
+            }
+          ],
+          "fetchedAt": "2026-09-15T12:00:00Z",
+          "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+        },
+        "b": {
+          "windows": [
+            {
+              "kind": "session",
+              "label": "5-hour",
+              "percent": 10
+            },
+            {
+              "kind": "weeklyAll",
+              "label": "Weekly",
+              "percent": 80
+            }
+          ],
+          "fetchedAt": "2026-09-15T12:00:00Z",
+          "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+        }
+      },
+      "excluded": null,
+      "expectedOrder": [
+        "b",
+        "a"
+      ],
+      "expectedCanServe": {
+        "a": true,
+        "b": true
+      }
+    },
+    {
+      "name": "an unmeasured account sorts mid-pack rather than first or last",
+      "model": "claude-opus-5",
+      "accounts": [
+        {
+          "id": "drained",
+          "label": "Drained",
+          "kind": "subscription",
+          "health": "ok"
+        },
+        {
+          "id": "unknown",
+          "label": "Unknown",
+          "kind": "subscription",
+          "health": "ok"
+        },
+        {
+          "id": "fresh",
+          "label": "Fresh",
+          "kind": "subscription",
+          "health": "ok"
+        }
+      ],
+      "usage": {
+        "drained": {
+          "windows": [
+            {
+              "kind": "weeklyAll",
+              "label": "Weekly",
+              "percent": 80
+            }
+          ],
+          "fetchedAt": "2026-09-15T12:00:00Z",
+          "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+        },
+        "fresh": {
+          "windows": [
+            {
+              "kind": "weeklyAll",
+              "label": "Weekly",
+              "percent": 10
+            }
+          ],
+          "fetchedAt": "2026-09-15T12:00:00Z",
+          "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+        }
+      },
+      "excluded": null,
+      "expectedOrder": [
+        "drained",
+        "unknown",
+        "fresh"
+      ],
+      "expectedCanServe": {
+        "drained": true,
+        "fresh": true,
+        "unknown": true
+      }
+    },
+    {
+      "name": "an account needing re-login is never ranked",
+      "model": "claude-opus-5",
+      "accounts": [
+        {
+          "id": "dead",
+          "label": "Dead",
+          "kind": "subscription",
+          "health": "needsRelogin"
+        },
+        {
+          "id": "live",
+          "label": "Live",
+          "kind": "subscription",
+          "health": "ok"
+        }
+      ],
+      "usage": {
+        "dead": {
+          "windows": [
+            {
+              "kind": "weeklyAll",
+              "label": "Weekly",
+              "percent": 1
+            }
+          ],
+          "fetchedAt": "2026-09-15T12:00:00Z",
+          "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+        },
+        "live": {
+          "windows": [
+            {
+              "kind": "weeklyAll",
+              "label": "Weekly",
+              "percent": 50
+            }
+          ],
+          "fetchedAt": "2026-09-15T12:00:00Z",
+          "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+        }
+      },
+      "excluded": null,
+      "expectedOrder": [
+        "live"
+      ],
+      "expectedCanServe": {
+        "dead": true,
+        "live": true
+      }
+    },
+    {
+      "name": "an excluded account is skipped even with headroom",
+      "model": "claude-opus-5",
+      "accounts": [
+        {
+          "id": "fresh",
+          "label": "Fresh",
+          "kind": "subscription",
+          "health": "ok"
+        },
+        {
+          "id": "half",
+          "label": "Half",
+          "kind": "subscription",
+          "health": "ok"
+        },
+        {
+          "id": "nearly",
+          "label": "Nearly",
+          "kind": "subscription",
+          "health": "ok"
+        }
+      ],
+      "usage": {
+        "fresh": {
+          "windows": [
+            {
+              "kind": "session",
+              "label": "5-hour",
+              "percent": 5
+            },
+            {
+              "kind": "weeklyAll",
+              "label": "Weekly",
+              "percent": 5
+            }
+          ],
+          "fetchedAt": "2026-09-15T12:00:00Z",
+          "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+        },
+        "half": {
+          "windows": [
+            {
+              "kind": "session",
+              "label": "5-hour",
+              "percent": 5
+            },
+            {
+              "kind": "weeklyAll",
+              "label": "Weekly",
+              "percent": 50
+            }
+          ],
+          "fetchedAt": "2026-09-15T12:00:00Z",
+          "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+        },
+        "nearly": {
+          "windows": [
+            {
+              "kind": "session",
+              "label": "5-hour",
+              "percent": 5
+            },
+            {
+              "kind": "weeklyAll",
+              "label": "Weekly",
+              "percent": 90
+            }
+          ],
+          "fetchedAt": "2026-09-15T12:00:00Z",
+          "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+        }
+      },
+      "excluded": [
+        "nearly"
+      ],
+      "expectedOrder": [
+        "half",
+        "fresh"
+      ],
+      "expectedCanServe": {
+        "fresh": true,
+        "half": true,
+        "nearly": true
+      }
+    },
+    {
+      "name": "ranking is on the weekly window, never the five-hour one",
+      "model": "claude-opus-5",
+      "accounts": [
+        {
+          "id": "a",
+          "label": "A",
+          "kind": "subscription",
+          "health": "ok"
+        },
+        {
+          "id": "b",
+          "label": "B",
+          "kind": "subscription",
+          "health": "ok"
+        }
+      ],
+      "usage": {
+        "a": {
+          "windows": [
+            {
+              "kind": "session",
+              "label": "5-hour",
+              "percent": 95
+            },
+            {
+              "kind": "weeklyAll",
+              "label": "Weekly",
+              "percent": 10
+            }
+          ],
+          "fetchedAt": "2026-09-15T12:00:00Z",
+          "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+        },
+        "b": {
+          "windows": [
+            {
+              "kind": "session",
+              "label": "5-hour",
+              "percent": 5
+            },
+            {
+              "kind": "weeklyAll",
+              "label": "Weekly",
+              "percent": 60
+            }
+          ],
+          "fetchedAt": "2026-09-15T12:00:00Z",
+          "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+        }
+      },
+      "excluded": null,
+      "expectedOrder": [
+        "b",
+        "a"
+      ],
+      "expectedCanServe": {
+        "a": true,
+        "b": true
+      }
+    },
+    {
+      "name": "an exhausted five-hour window still makes an account ineligible",
+      "model": "claude-opus-5",
+      "accounts": [
+        {
+          "id": "a",
+          "label": "A",
+          "kind": "subscription",
+          "health": "ok"
+        },
+        {
+          "id": "b",
+          "label": "B",
+          "kind": "subscription",
+          "health": "ok"
+        }
+      ],
+      "usage": {
+        "a": {
+          "windows": [
+            {
+              "kind": "session",
+              "label": "5-hour",
+              "percent": 100
+            },
+            {
+              "kind": "weeklyAll",
+              "label": "Weekly",
+              "percent": 1
+            }
+          ],
+          "fetchedAt": "2026-09-15T12:00:00Z",
+          "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+        },
+        "b": {
+          "windows": [
+            {
+              "kind": "session",
+              "label": "5-hour",
+              "percent": 5
+            },
+            {
+              "kind": "weeklyAll",
+              "label": "Weekly",
+              "percent": 60
+            }
+          ],
+          "fetchedAt": "2026-09-15T12:00:00Z",
+          "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+        }
+      },
+      "excluded": null,
+      "expectedOrder": [
+        "b"
+      ],
+      "expectedCanServe": {
+        "a": false,
+        "b": true
+      }
+    },
+    {
+      "name": "a per-minute ceiling never makes an account the wrong choice",
+      "model": "claude-opus-5",
+      "accounts": [
+        {
+          "id": "a",
+          "label": "A",
+          "kind": "subscription",
+          "health": "ok"
+        }
+      ],
+      "usage": {
+        "a": {
+          "windows": [
+            {
+              "kind": "other",
+              "label": "Other",
+              "percent": 100
+            },
+            {
+              "kind": "weeklyAll",
+              "label": "Weekly",
+              "percent": 10
+            }
+          ],
+          "fetchedAt": "2026-09-15T12:00:00Z",
+          "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+        }
+      },
+      "excluded": null,
+      "expectedOrder": [
+        "a"
+      ],
+      "expectedCanServe": {
+        "a": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,229 @@
+{
+  "cases": [
+    {
+      "name": "a late answer does not lower a header-fresh window",
+      "previous": {
+        "windows": [
+          {
+            "kind": "session",
+            "label": "5-hour",
+            "percent": 36
+          }
+        ],
+        "fetchedAt": "2026-09-15T12:00:00Z",
+        "lastEndpointFetchAt": "2026-09-15T11:50:00Z"
+      },
+      "windows": [
+        {
+          "kind": "session",
+          "label": "5-hour",
+          "percent": 27
+        }
+      ],
+      "observedAt": "2026-09-15T11:55:20Z",
+      "expected": {
+        "windows": [
+          {
+            "kind": "session",
+            "label": "5-hour",
+            "percent": 36
+          }
+        ],
+        "fetchedAt": "2026-09-15T12:00:00Z",
+        "lastEndpointFetchAt": "2026-09-15T11:55:20Z"
+      }
+    },
+    {
+      "name": "a late answer still carries the windows only it reports",
+      "previous": {
+        "windows": [
+          {
+            "kind": "session",
+            "label": "5-hour",
+            "percent": 36
+          }
+        ],
+        "fetchedAt": "2026-09-15T12:00:00Z",
+        "lastEndpointFetchAt": "2026-09-15T11:50:00Z"
+      },
+      "windows": [
+        {
+          "kind": "session",
+          "label": "5-hour",
+          "percent": 27
+        },
+        {
+          "kind": "weeklyScoped",
+          "label": "Weekly Fable",
+          "percent": 17,
+          "modelName": "Fable"
+        }
+      ],
+      "observedAt": "2026-09-15T11:55:20Z",
+      "expected": {
+        "windows": [
+          {
+            "kind": "session",
+            "label": "5-hour",
+            "percent": 36
+          },
+          {
+            "kind": "weeklyScoped",
+            "label": "Weekly Fable",
+            "percent": 17,
+            "modelName": "Fable"
+          }
+        ],
+        "fetchedAt": "2026-09-15T12:00:00Z",
+        "lastEndpointFetchAt": "2026-09-15T11:55:20Z"
+      }
+    },
+    {
+      "name": "a late answer drops a per-model window it no longer reports",
+      "previous": {
+        "windows": [
+          {
+            "kind": "session",
+            "label": "5-hour",
+            "percent": 36
+          },
+          {
+            "kind": "weeklyScoped",
+            "label": "Weekly Fable",
+            "percent": 100,
+            "modelName": "Fable"
+          }
+        ],
+        "fetchedAt": "2026-09-15T12:00:00Z",
+        "lastEndpointFetchAt": "2026-09-15T11:50:00Z"
+      },
+      "windows": [
+        {
+          "kind": "session",
+          "label": "5-hour",
+          "percent": 27
+        }
+      ],
+      "observedAt": "2026-09-15T11:55:20Z",
+      "expected": {
+        "windows": [
+          {
+            "kind": "session",
+            "label": "5-hour",
+            "percent": 36
+          }
+        ],
+        "fetchedAt": "2026-09-15T12:00:00Z",
+        "lastEndpointFetchAt": "2026-09-15T11:55:20Z"
+      }
+    },
+    {
+      "name": "an answer older than the last endpoint read changes nothing",
+      "previous": {
+        "windows": [
+          {
+            "kind": "session",
+            "label": "5-hour",
+            "percent": 36
+          },
+          {
+            "kind": "weeklyScoped",
+            "label": "Weekly Fable",
+            "percent": 50,
+            "modelName": "Fable"
+          }
+        ],
+        "fetchedAt": "2026-09-15T12:00:00Z",
+        "lastEndpointFetchAt": "2026-09-15T11:58:20Z"
+      },
+      "windows": [
+        {
+          "kind": "weeklyScoped",
+          "label": "Weekly Fable",
+          "percent": 17,
+          "modelName": "Fable"
+        }
+      ],
+      "observedAt": "2026-09-15T11:53:20Z",
+      "expected": {
+        "windows": [
+          {
+            "kind": "session",
+            "label": "5-hour",
+            "percent": 36
+          },
+          {
+            "kind": "weeklyScoped",
+            "label": "Weekly Fable",
+            "percent": 50,
+            "modelName": "Fable"
+          }
+        ],
+        "fetchedAt": "2026-09-15T12:00:00Z",
+        "lastEndpointFetchAt": "2026-09-15T11:58:20Z"
+      }
+    },
+    {
+      "name": "a current answer replaces what is held, including a window that is gone",
+      "previous": {
+        "windows": [
+          {
+            "kind": "session",
+            "label": "5-hour",
+            "percent": 36
+          },
+          {
+            "kind": "weeklyScoped",
+            "label": "Weekly Fable",
+            "percent": 50,
+            "modelName": "Fable"
+          }
+        ],
+        "fetchedAt": "2026-09-15T11:59:00Z",
+        "lastEndpointFetchAt": "2026-09-15T11:59:00Z"
+      },
+      "windows": [
+        {
+          "kind": "session",
+          "label": "5-hour",
+          "percent": 99
+        }
+      ],
+      "observedAt": "2026-09-15T12:00:00Z",
+      "expected": {
+        "windows": [
+          {
+            "kind": "session",
+            "label": "5-hour",
+            "percent": 99
+          }
+        ],
+        "fetchedAt": "2026-09-15T12:00:00Z",
+        "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+      }
+    },
+    {
+      "name": "with nothing held the answer is taken whole",
+      "previous": null,
+      "windows": [
+        {
+          "kind": "session",
+          "label": "5-hour",
+          "percent": 12
+        }
+      ],
+      "observedAt": "2026-09-15T12:00:00Z",
+      "expected": {
+        "windows": [
+          {
+            "kind": "session",
+            "label": "5-hour",
+            "percent": 12
+          }
+        ],
+        "fetchedAt": "2026-09-15T12:00:00Z",
+        "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+      }
+    }
+  ]
+}

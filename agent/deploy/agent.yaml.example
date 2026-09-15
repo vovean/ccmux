@@ -1,0 +1,44 @@
+# ccmux agent settings. Every value here can be overridden by an environment variable
+# (CCMUX_URL, CCMUX_PASSWORD, CCMUX_LABEL, …) and then by a command-line flag.
+#
+# Install at /etc/ccmux/agent.yaml. If it holds `password:` below, it must be mode 0600 —
+# the agent refuses to start otherwise.
+
+server:
+  # ccmuxd's base URL.
+  url: https://ccmuxd.example:8443
+
+  username: ccmux
+
+  # One of these three. `password_file` is a 0600 file holding just the password;
+  # the systemd unit's LoadCredential= is the third way and needs nothing here.
+  # password: ...
+  password_file: /etc/ccmux/password
+
+  # SHA-256 of ccmuxd's leaf certificate, hex. ccmuxd is self-signed, so this is the
+  # whole of the trust decision. Take it from the Mac app's server page, or:
+  #   openssl s_client -connect host:8443 </dev/null 2>/dev/null \
+  #     | openssl x509 -outform der | shasum -a 256
+  pin: 0000000000000000000000000000000000000000000000000000000000000000
+
+agent:
+  # How this box is named on the Mac's Sessions and Stats pages. Defaults to the hostname.
+  label: build-box-1
+
+  # Sessions, per-session credential namespaces and the usage spool.
+  state_dir: /var/lib/ccmux
+
+  socket: /run/ccmux/control.sock
+
+  upstream: https://api.anthropic.com
+
+  # Leave empty to resolve `claude` on PATH at launch.
+  claude_bin: ""
+
+  # Report sessions and per-minute usage so this box appears alongside the Macs.
+  report_fleet: true
+
+  # One proxy port per live session. Deliberately outside the ephemeral range: a port is
+  # baked into a running session's ANTHROPIC_BASE_URL and has to survive an agent restart.
+  port_first: 18000
+  port_last: 18999

@@ -1,0 +1,42 @@
+[Unit]
+Description=ccmux agent — runs Claude Code on a pool of subscriptions
+Documentation=https://github.com/vovean/ccmux
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The same user the application that calls `ccmux run` runs as: the control socket hands
+# out sessions, and its guard is that only this user can reach it.
+User=ccmux
+Group=ccmux
+ExecStart=/usr/local/bin/ccmux agent --config /etc/ccmux/agent.yaml
+Restart=on-failure
+RestartSec=5s
+
+# /run/ccmux for the control socket, /var/lib/ccmux for sessions, namespaces and the
+# usage spool. Both are created 0700 and owned by User=.
+RuntimeDirectory=ccmux
+RuntimeDirectoryMode=0700
+StateDirectory=ccmux
+StateDirectoryMode=0700
+
+# The password may come this way instead of living in the settings file: systemd copies
+# it into a private directory only this service can read.
+# LoadCredential=ccmux-password:/etc/ccmux/password
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+# A request is held in memory so a refusal can be replayed on another account, capped at
+# 8 MB each. This leaves room for a good many concurrent runs plus the daemon itself.
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

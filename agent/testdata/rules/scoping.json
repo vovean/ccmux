@@ -1,0 +1,34 @@
+{
+  "cases": [
+    {
+      "name": "a display name matches its model id",
+      "modelName": "Fable",
+      "modelID": "claude-fable-5-1",
+      "expected": true
+    },
+    {
+      "name": "separators and case are ignored",
+      "modelName": "Sonnet 4.5",
+      "modelID": "claude-sonnet-4-5",
+      "expected": true
+    },
+    {
+      "name": "a new generation of the same name still matches",
+      "modelName": "Fable",
+      "modelID": "claude-fable-6",
+      "expected": true
+    },
+    {
+      "name": "a different model does not match",
+      "modelName": "Fable",
+      "modelID": "claude-opus-5",
+      "expected": false
+    },
+    {
+      "name": "a name under three characters matches nothing",
+      "modelName": "X1",
+      "modelID": "claude-x1-5",
+      "expected": false
+    }
+  ]
+}

@@ -55,10 +55,10 @@ func TestWireFixturesMatchWhatWeEmit(t *testing.T) {
 		"usage.json": RemoteUsage{
 			AccountID: "11111111-2222-3333-4444-555555555555",
 			Windows: []UsageWindow{
-				{Kind: WindowSession, Label: "5-hour", Percent: 33.5, ResetsAt: &Time{reset}},
+				{Kind: WindowSession, Label: "5-hour", Percent: 33.5, ResetsAt: &Time{Time: reset}},
 				{Kind: WindowWeeklyAll, Label: "Weekly", Percent: 12},
 				{Kind: WindowWeeklyScoped, Label: "Weekly Fable", Percent: 61.25,
-					ResetsAt: &Time{reset}, ModelName: ptr("Fable")},
+					ResetsAt: &Time{Time: reset}, ModelName: ptr("Fable")},
 			},
 			AgeSeconds: 42.5,
 		},
@@ -75,8 +75,8 @@ func TestWireFixturesMatchWhatWeEmit(t *testing.T) {
 			APIVersion:    apiVersion,
 			Range:         "24h",
 			BucketSeconds: 300,
-			From:          Time{reset.Add(-24 * time.Hour)},
-			To:            Time{reset},
+			From:          Time{Time: reset.Add(-24 * time.Hour)},
+			To:            Time{Time: reset},
 			Totals: UsageTotals{
 				Requests: 12, Input: 4200, Output: 900, CacheRead: 51000,
 				CacheWrite5m: 3000, CacheWrite1h: 0, CostUSD: 1.875,
@@ -110,10 +110,10 @@ func TestWireFixturesMatchWhatWeEmit(t *testing.T) {
 						CacheRead: 50000, CacheWrite5m: 3000, CostUSD: 1.5,
 						UnpricedModels: []string{}},
 					Points: []UsagePoint{
-						{At: Time{reset.Add(-10 * time.Minute)}, Requests: 4, Input: 1000,
+						{At: Time{Time: reset.Add(-10 * time.Minute)}, Requests: 4, Input: 1000,
 							Output: 200, CacheRead: 20000, CacheWrite5m: 3000,
 							CostUSD: 0.6},
-						{At: Time{reset.Add(-5 * time.Minute)}, Requests: 5, Input: 2000,
+						{At: Time{Time: reset.Add(-5 * time.Minute)}, Requests: 5, Input: 2000,
 							Output: 500, CacheRead: 30000, CostUSD: 0.9},
 					},
 				},
@@ -128,7 +128,7 @@ func TestWireFixturesMatchWhatWeEmit(t *testing.T) {
 						CacheRead: 1000, CostUSD: 0.375,
 						UnpricedModels: []string{"claude-unknown-9"}},
 					Points: []UsagePoint{
-						{At: Time{reset.Add(-5 * time.Minute)}, Requests: 3, Input: 1200,
+						{At: Time{Time: reset.Add(-5 * time.Minute)}, Requests: 3, Input: 1200,
 							Output: 200, CacheRead: 1000, CostUSD: 0.375, Unpriced: true},
 					},
 				},

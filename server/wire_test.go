@@ -73,7 +73,7 @@ func TestDatesAreEmittedWithoutFractionalSeconds(t *testing.T) {
 		AccountID: "acct-1",
 		Windows: []UsageWindow{{
 			Kind: WindowSession, Label: "5-hour", Percent: 42,
-			ResetsAt: &Time{instant},
+			ResetsAt: &Time{Time: instant},
 		}},
 		AgeSeconds: 12,
 	}
@@ -93,7 +93,7 @@ func TestDatesAreEmittedWithoutFractionalSeconds(t *testing.T) {
 func TestUsageWindowKeysMatchTheSwiftClient(t *testing.T) {
 	model := "Fable"
 	window := UsageWindow{Kind: WindowWeeklyScoped, Label: "Weekly Fable", Percent: 10,
-		ResetsAt: &Time{time.Now()}, ModelName: &model}
+		ResetsAt: &Time{Time: time.Now()}, ModelName: &model}
 	encoded, _ := json.Marshal(window)
 	var decoded map[string]any
 	_ = json.Unmarshal(encoded, &decoded)
@@ -226,7 +226,7 @@ func TestCredentialWithoutAnAccessTokenIsRejected(t *testing.T) {
 // what it writes — and tolerate the fractional form Anthropic sends, since the same type
 // is what a future decode path would use.
 func TestTimeRoundTripsAndAcceptsBothSpellings(t *testing.T) {
-	original := Time{time.Date(2026, 8, 28, 15, 4, 5, 0, time.UTC)}
+	original := Time{Time: time.Date(2026, 8, 28, 15, 4, 5, 0, time.UTC)}
 	encoded, err := json.Marshal(original)
 	if err != nil {
 		t.Fatal(err)

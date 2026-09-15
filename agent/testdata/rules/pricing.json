@@ -1,0 +1,229 @@
+{
+  "cases": [
+    {
+      "name": "opus 5, every token kind at once",
+      "model": "claude-opus-5",
+      "at": "2026-09-15T12:00:00Z",
+      "usage": {
+        "input": 1000,
+        "output": 500,
+        "cacheRead": 20000,
+        "cacheWrite5m": 3000,
+        "cacheWrite1h": 250
+      },
+      "priced": true,
+      "costUSD": 0.04875000000000001,
+      "normalized": "claude-opus-5"
+    },
+    {
+      "name": "haiku 4.5",
+      "model": "claude-haiku-4-5",
+      "at": "2026-09-15T12:00:00Z",
+      "usage": {
+        "input": 1000,
+        "output": 500,
+        "cacheRead": 20000,
+        "cacheWrite5m": 3000,
+        "cacheWrite1h": 250
+      },
+      "priced": true,
+      "costUSD": 0.00975,
+      "normalized": "claude-haiku-4-5"
+    },
+    {
+      "name": "sonnet 4.6",
+      "model": "claude-sonnet-4-6",
+      "at": "2026-09-15T12:00:00Z",
+      "usage": {
+        "input": 1000,
+        "output": 500,
+        "cacheRead": 20000,
+        "cacheWrite5m": 3000,
+        "cacheWrite1h": 250
+      },
+      "priced": true,
+      "costUSD": 0.02925,
+      "normalized": "claude-sonnet-4-6"
+    },
+    {
+      "name": "fable 5.1, with its own cache-read rate",
+      "model": "claude-fable-5-1",
+      "at": "2026-09-15T12:00:00Z",
+      "usage": {
+        "input": 1000,
+        "output": 500,
+        "cacheRead": 20000,
+        "cacheWrite5m": 3000,
+        "cacheWrite1h": 250
+      },
+      "priced": true,
+      "costUSD": 0.0825,
+      "normalized": "claude-fable-5-1"
+    },
+    {
+      "name": "mythos 5.1 does not inherit fable's cache read",
+      "model": "claude-mythos-5-1",
+      "at": "2026-09-15T12:00:00Z",
+      "usage": {
+        "input": 1000,
+        "output": 500,
+        "cacheRead": 20000,
+        "cacheWrite5m": 3000,
+        "cacheWrite1h": 250
+      },
+      "priced": true,
+      "costUSD": 0.09750000000000002,
+      "normalized": "claude-mythos-5-1"
+    },
+    {
+      "name": "a dated snapshot inherits its model's price",
+      "model": "claude-haiku-4-5-20251001",
+      "at": "2026-09-15T12:00:00Z",
+      "usage": {
+        "input": 1000,
+        "output": 500,
+        "cacheRead": 20000,
+        "cacheWrite5m": 3000,
+        "cacheWrite1h": 250
+      },
+      "priced": true,
+      "costUSD": 0.00975,
+      "normalized": "claude-haiku-4-5"
+    },
+    {
+      "name": "a similar name is not a snapshot",
+      "model": "claude-sonnet-5-2",
+      "at": "2026-09-15T12:00:00Z",
+      "usage": {
+        "input": 1000,
+        "output": 500,
+        "cacheRead": 20000,
+        "cacheWrite5m": 3000,
+        "cacheWrite1h": 250
+      },
+      "priced": false,
+      "costUSD": 0,
+      "normalized": "claude-sonnet-5-2"
+    },
+    {
+      "name": "a point release is not a snapshot",
+      "model": "claude-fable-5-2",
+      "at": "2026-09-15T12:00:00Z",
+      "usage": {
+        "input": 1000,
+        "output": 500,
+        "cacheRead": 20000,
+        "cacheWrite5m": 3000,
+        "cacheWrite1h": 250
+      },
+      "priced": false,
+      "costUSD": 0,
+      "normalized": "claude-fable-5-2"
+    },
+    {
+      "name": "the context marker is stripped",
+      "model": "claude-opus-5[1m]",
+      "at": "2026-09-15T12:00:00Z",
+      "usage": {
+        "input": 1000,
+        "output": 500,
+        "cacheRead": 20000,
+        "cacheWrite5m": 3000,
+        "cacheWrite1h": 250
+      },
+      "priced": true,
+      "costUSD": 0.04875000000000001,
+      "normalized": "claude-opus-5"
+    },
+    {
+      "name": "an unknown model is not guessed at",
+      "model": "claude-unheard-of-9",
+      "at": "2026-09-15T12:00:00Z",
+      "usage": {
+        "input": 1000,
+        "output": 500,
+        "cacheRead": 20000,
+        "cacheWrite5m": 3000,
+        "cacheWrite1h": 250
+      },
+      "priced": false,
+      "costUSD": 0,
+      "normalized": "claude-unheard-of-9"
+    },
+    {
+      "name": "sonnet 5 inside its promotional window",
+      "model": "claude-sonnet-5",
+      "at": "2026-08-15T00:00:00Z",
+      "usage": {
+        "input": 1000,
+        "output": 500,
+        "cacheRead": 20000,
+        "cacheWrite5m": 3000,
+        "cacheWrite1h": 250
+      },
+      "priced": true,
+      "costUSD": 0.0195,
+      "normalized": "claude-sonnet-5"
+    },
+    {
+      "name": "sonnet 5 on the last day of the promotion",
+      "model": "claude-sonnet-5",
+      "at": "2026-08-31T23:59:59Z",
+      "usage": {
+        "input": 1000,
+        "output": 500,
+        "cacheRead": 20000,
+        "cacheWrite5m": 3000,
+        "cacheWrite1h": 250
+      },
+      "priced": true,
+      "costUSD": 0.0195,
+      "normalized": "claude-sonnet-5"
+    },
+    {
+      "name": "sonnet 5 after the promotion",
+      "model": "claude-sonnet-5",
+      "at": "2026-09-02T00:00:00Z",
+      "usage": {
+        "input": 1000,
+        "output": 500,
+        "cacheRead": 20000,
+        "cacheWrite5m": 3000,
+        "cacheWrite1h": 250
+      },
+      "priced": true,
+      "costUSD": 0.02925,
+      "normalized": "claude-sonnet-5"
+    },
+    {
+      "name": "no tokens at all costs nothing",
+      "model": "claude-opus-5",
+      "at": "2026-09-15T12:00:00Z",
+      "usage": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite5m": 0,
+        "cacheWrite1h": 0
+      },
+      "priced": true,
+      "costUSD": 0,
+      "normalized": "claude-opus-5"
+    },
+    {
+      "name": "output only",
+      "model": "claude-opus-5",
+      "at": "2026-09-15T12:00:00Z",
+      "usage": {
+        "input": 0,
+        "output": 1000000,
+        "cacheRead": 0,
+        "cacheWrite5m": 0,
+        "cacheWrite1h": 0
+      },
+      "priced": true,
+      "costUSD": 25,
+      "normalized": "claude-opus-5"
+    }
+  ]
+}

@@ -91,7 +91,7 @@ func (s *HookStore) Replace(files []HookFile, now time.Time) (HookBundle, error)
 	s.bundle = HookBundle{
 		APIVersion: apiVersion,
 		Version:    hookVersion(cleaned),
-		UpdatedAt:  Time{now.UTC()},
+		UpdatedAt:  Time{Time: now.UTC()},
 		Files:      cleaned,
 	}
 	// A successful publish supersedes whatever could not be read before.
@@ -127,7 +127,7 @@ func (s *HookStore) SetActive(path string, active bool, now time.Time) (HookBund
 		}
 		flag := active
 		s.bundle.Files[i].Active = &flag
-		s.bundle.UpdatedAt = Time{now.UTC()}
+		s.bundle.UpdatedAt = Time{Time: now.UTC()}
 		s.persistLocked()
 		break
 	}

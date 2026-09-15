@@ -1,4 +1,4 @@
-package main
+package wire
 
 import (
 	"encoding/json"
@@ -6,7 +6,9 @@ import (
 	"time"
 )
 
-// The ccmuxd wire types. These must match Sources/CCMuxCore/Server/ServerProtocol.swift
+// Package wire is the ccmuxd HTTP contract, shared by the server and the Linux agent.
+//
+// The types must match Sources/CCMuxCore/Server/ServerProtocol.swift
 // field for field: the Mac client decodes them with Swift's synthesised Codable, so a
 // renamed key is a broken client, not a compile error.
 //
@@ -16,23 +18,23 @@ import (
 // the single exception and goes the other way, client to server.
 
 const (
-	apiPrefix = "/v1"
+	APIPrefix = "/v1"
 	// Bumped when a change would make an older client misread a response. Adding a route
 	// or an optional field does not qualify: the client refuses to talk to a server whose
 	// version differs from its own, so a bump strands every Mac that has not upgraded yet.
-	apiVersion = 1
+	APIVersion = 1
 )
 
 // What this build can do beyond the original surface. A client that finds its feature
 // missing — an older ccmuxd, which omits the field entirely — turns the feature off and
 // says why, instead of showing errors from routes that answer 404.
-const featureSessions = "sessions"
-const featureHooks = "hooks"
-const featureHookActivation = "hook-activation"
-const featureUsageSeries = "usage-series"
+const FeatureSessions = "sessions"
+const FeatureHooks = "hooks"
+const FeatureHookActivation = "hook-activation"
+const FeatureUsageSeries = "usage-series"
 
-var serverFeatures = []string{featureSessions, featureHooks, featureHookActivation,
-	featureUsageSeries}
+var ServerFeatures = []string{FeatureSessions, FeatureHooks, FeatureHookActivation,
+	FeatureUsageSeries}
 
 // Time marshals as RFC 3339 with second precision.
 //
@@ -256,7 +258,8 @@ type ServerErrorDetail struct {
 	Message string `json:"message"`
 }
 
-func ptr[T any](v T) *T { return &v }
+// Ptr is the one-liner every optional wire field needs at a construction site.
+func Ptr[T any](v T) *T { return &v }
 
 // One file ccmux writes under ~/.claude/hooks/managed on every Mac. Content is carried
 // inline rather than by reference: a hook set is small, and a URL would be a second thing
@@ -427,4 +430,38 @@ type UsageStatsResponse struct {
 	// Set when the store is at its ceiling and dropped the oldest buckets to stay inside
 	// it, so the page can say the far end of the range is incomplete.
 	Truncated bool `json:"truncated"`
+}
+
+// UsageWindow is one rate-limit window. Field names must match the Swift client's
+// synthesised Codable exactly — it decodes these straight off the wire, so a renamed key
+// is a broken client rather than a compile error.
+type UsageWindow struct {
+	Kind      WindowKind `json:"kind"`
+	Label     string     `json:"label"`
+	Percent   float64    `json:"percent"`
+	ResetsAt  *Time      `json:"resetsAt,omitempty"`
+	ModelName *string    `json:"modelName,omitempty"`
+}
+
+type WindowKind string
+
+const (
+	WindowSession      WindowKind = "session"
+	WindowWeeklyAll    WindowKind = "weeklyAll"
+	WindowWeeklyScoped WindowKind = "weeklyScoped"
+	WindowOther        WindowKind = "other"
+)
+
+func (w UsageWindow) Headroom() float64 {
+	if 100-w.Percent < 0 {
+		return 0
+	}
+	return 100 - w.Percent
+}
+
+func (w UsageWindow) ID() string {
+	if w.ModelName != nil && *w.ModelName != "" {
+		return string(w.Kind) + "/" + *w.ModelName
+	}
+	return string(w.Kind) + "/" + w.Label
 }

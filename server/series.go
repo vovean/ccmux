@@ -287,7 +287,7 @@ func (s *SeriesStore) Stats(rangeKey string, now time.Time) (UsageStatsResponse,
 		points := make([]UsagePoint, 0, len(slots))
 		for at, bucket := range slots {
 			points = append(points, UsagePoint{
-				At:           Time{time.Unix(at, 0).UTC()},
+				At:           Time{Time: time.Unix(at, 0).UTC()},
 				Requests:     bucket.requests,
 				Input:        bucket.input,
 				Output:       bucket.output,
@@ -344,8 +344,8 @@ func (s *SeriesStore) Stats(rangeKey string, now time.Time) (UsageStatsResponse,
 		APIVersion:    apiVersion,
 		Range:         rangeKey,
 		BucketSeconds: int(width),
-		From:          Time{time.Unix(from, 0).UTC()},
-		To:            Time{time.Unix(to, 0).UTC()},
+		From:          Time{Time: time.Unix(from, 0).UTC()},
+		To:            Time{Time: time.Unix(to, 0).UTC()},
 		Totals:        overall.build(),
 		Accounts:      accounts,
 		Series:        out,
@@ -466,7 +466,7 @@ func sanitiseUsageBucket(bucket UsageBucket, now time.Time,
 		minute.Before(now.Add(-retention)) {
 		return UsageBucket{}, false
 	}
-	bucket.Minute = Time{minute}
+	bucket.Minute = Time{Time: minute}
 	bucket.SessionID = clean(bucket.SessionID, maxFieldRunes)
 	bucket.SessionName = clean(bucket.SessionName, maxFieldRunes)
 	bucket.AccountID = clean(bucket.AccountID, maxFieldRunes)

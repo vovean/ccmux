@@ -1,0 +1,197 @@
+{
+  "cases": [
+    {
+      "name": "an account with headroom is available now",
+      "model": "claude-opus-5",
+      "now": "2026-09-15T12:00:00Z",
+      "accounts": [
+        {
+          "id": "a",
+          "label": "A",
+          "kind": "subscription",
+          "health": "ok"
+        }
+      ],
+      "usage": {
+        "a": {
+          "windows": [
+            {
+              "kind": "weeklyAll",
+              "label": "Weekly",
+              "percent": 10
+            }
+          ],
+          "fetchedAt": "2026-09-15T12:00:00Z",
+          "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+        }
+      },
+      "expectedAvailableAt": {
+        "a": "2026-09-15T12:00:00Z"
+      },
+      "expectedUnknowable": null,
+      "expectedSoonestAccountID": "a",
+      "expectedSoonestAt": "2026-09-15T12:00:00Z"
+    },
+    {
+      "name": "every blocking window has to clear, so the last reset wins",
+      "model": "claude-fable-5-1",
+      "now": "2026-09-15T12:00:00Z",
+      "accounts": [
+        {
+          "id": "a",
+          "label": "A",
+          "kind": "subscription",
+          "health": "ok"
+        }
+      ],
+      "usage": {
+        "a": {
+          "windows": [
+            {
+              "kind": "session",
+              "label": "5-hour",
+              "percent": 100,
+              "resetsAt": "2026-09-15T13:00:00Z"
+            },
+            {
+              "kind": "weeklyScoped",
+              "label": "Weekly Fable",
+              "percent": 100,
+              "resetsAt": "2026-09-15T18:00:00Z",
+              "modelName": "Fable"
+            }
+          ],
+          "fetchedAt": "2026-09-15T12:00:00Z",
+          "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+        }
+      },
+      "expectedAvailableAt": {
+        "a": "2026-09-15T18:00:00Z"
+      },
+      "expectedUnknowable": null,
+      "expectedSoonestAccountID": "a",
+      "expectedSoonestAt": "2026-09-15T18:00:00Z"
+    },
+    {
+      "name": "a blocked window with no reset makes the answer unknowable",
+      "model": "claude-opus-5",
+      "now": "2026-09-15T12:00:00Z",
+      "accounts": [
+        {
+          "id": "a",
+          "label": "A",
+          "kind": "subscription",
+          "health": "ok"
+        }
+      ],
+      "usage": {
+        "a": {
+          "windows": [
+            {
+              "kind": "weeklyAll",
+              "label": "Weekly",
+              "percent": 100
+            }
+          ],
+          "fetchedAt": "2026-09-15T12:00:00Z",
+          "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+        }
+      },
+      "expectedAvailableAt": {},
+      "expectedUnknowable": [
+        "a"
+      ],
+      "expectedSoonestAccountID": null,
+      "expectedSoonestAt": null
+    },
+    {
+      "name": "the soonest is the earliest of several, and an unknowable one is passed over",
+      "model": "claude-opus-5",
+      "now": "2026-09-15T12:00:00Z",
+      "accounts": [
+        {
+          "id": "late",
+          "label": "Late",
+          "kind": "subscription",
+          "health": "ok"
+        },
+        {
+          "id": "soon",
+          "label": "Soon",
+          "kind": "subscription",
+          "health": "ok"
+        },
+        {
+          "id": "never",
+          "label": "Never",
+          "kind": "subscription",
+          "health": "ok"
+        },
+        {
+          "id": "dead",
+          "label": "Dead",
+          "kind": "subscription",
+          "health": "needsRelogin"
+        }
+      ],
+      "usage": {
+        "dead": {
+          "windows": [
+            {
+              "kind": "weeklyAll",
+              "label": "Weekly",
+              "percent": 1
+            }
+          ],
+          "fetchedAt": "2026-09-15T12:00:00Z",
+          "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+        },
+        "late": {
+          "windows": [
+            {
+              "kind": "weeklyAll",
+              "label": "Weekly",
+              "percent": 100,
+              "resetsAt": "2026-09-15T17:00:00Z"
+            }
+          ],
+          "fetchedAt": "2026-09-15T12:00:00Z",
+          "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+        },
+        "never": {
+          "windows": [
+            {
+              "kind": "weeklyAll",
+              "label": "Weekly",
+              "percent": 100
+            }
+          ],
+          "fetchedAt": "2026-09-15T12:00:00Z",
+          "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+        },
+        "soon": {
+          "windows": [
+            {
+              "kind": "weeklyAll",
+              "label": "Weekly",
+              "percent": 100,
+              "resetsAt": "2026-09-15T13:00:00Z"
+            }
+          ],
+          "fetchedAt": "2026-09-15T12:00:00Z",
+          "lastEndpointFetchAt": "2026-09-15T12:00:00Z"
+        }
+      },
+      "expectedAvailableAt": {
+        "dead": "2026-09-15T12:00:00Z",
+        "late": "2026-09-15T17:00:00Z",
+        "soon": "2026-09-15T13:00:00Z"
+      },
+      "expectedUnknowable": [
+        "never"
+      ],
+      "expectedSoonestAccountID": "soon",
+      "expectedSoonestAt": "2026-09-15T13:00:00Z"
+    }
+  ]
+}

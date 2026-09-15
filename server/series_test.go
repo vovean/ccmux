@@ -13,7 +13,7 @@ import (
 )
 
 func minuteAt(base time.Time, offset int) Time {
-	return Time{base.Add(time.Duration(offset) * time.Minute).UTC().Truncate(time.Minute)}
+	return Time{Time: base.Add(time.Duration(offset) * time.Minute).UTC().Truncate(time.Minute)}
 }
 
 func mustIngest(t *testing.T, store *SeriesStore, machineID string, report UsageReport,
@@ -104,8 +104,8 @@ func TestAMinuteOutsideTheAcceptableWindowIsDropped(t *testing.T) {
 	store := NewSeriesStore("", 48*time.Hour)
 	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
 	report := UsageReport{Label: "studio", Buckets: []UsageBucket{
-		sampleBucket(Time{now.Add(time.Hour)}, "future", "claude-opus-5", 1, 1),
-		sampleBucket(Time{now.Add(-72 * time.Hour)}, "ancient", "claude-opus-5", 1, 1),
+		sampleBucket(Time{Time: now.Add(time.Hour)}, "future", "claude-opus-5", 1, 1),
+		sampleBucket(Time{Time: now.Add(-72 * time.Hour)}, "ancient", "claude-opus-5", 1, 1),
 		sampleBucket(Time{}, "zero", "claude-opus-5", 1, 1),
 		sampleBucket(minuteAt(now, -1), "good", "claude-opus-5", 1, 1),
 	}}
@@ -332,7 +332,7 @@ func TestUsageIngestAndStatsOverHTTP(t *testing.T) {
 	server, _, client := startTestServerWithSeries(t, registry, store)
 
 	now := time.Now().UTC()
-	bucket := sampleBucket(Time{now.Add(-3 * time.Minute).Truncate(time.Minute)},
+	bucket := sampleBucket(Time{Time: now.Add(-3 * time.Minute).Truncate(time.Minute)},
 		"sess-1", "claude-opus-5", 120, 12)
 	body, err := json.Marshal(UsageReport{Label: "studio",
 		Buckets: []UsageBucket{bucket}})

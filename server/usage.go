@@ -5,39 +5,6 @@ import (
 	"time"
 )
 
-// UsageWindow is one rate-limit window. Field names must match the Swift client's
-// synthesised Codable exactly — it decodes these straight off the wire.
-type UsageWindow struct {
-	Kind      WindowKind `json:"kind"`
-	Label     string     `json:"label"`
-	Percent   float64    `json:"percent"`
-	ResetsAt  *Time      `json:"resetsAt,omitempty"`
-	ModelName *string    `json:"modelName,omitempty"`
-}
-
-type WindowKind string
-
-const (
-	WindowSession      WindowKind = "session"
-	WindowWeeklyAll    WindowKind = "weeklyAll"
-	WindowWeeklyScoped WindowKind = "weeklyScoped"
-	WindowOther        WindowKind = "other"
-)
-
-func (w UsageWindow) Headroom() float64 {
-	if 100-w.Percent < 0 {
-		return 0
-	}
-	return 100 - w.Percent
-}
-
-func (w UsageWindow) ID() string {
-	if w.ModelName != nil && *w.ModelName != "" {
-		return string(w.Kind) + "/" + *w.ModelName
-	}
-	return string(w.Kind) + "/" + w.Label
-}
-
 // UsageSnapshot is the server's cached view of one account's windows.
 type UsageSnapshot struct {
 	Windows           []UsageWindow `json:"windows"`
@@ -156,7 +123,7 @@ func parseUsageTime(raw any) *Time {
 	}
 	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
 		if parsed, err := time.Parse(layout, text); err == nil {
-			return &Time{parsed}
+			return &Time{Time: parsed}
 		}
 	}
 	return nil

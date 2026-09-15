@@ -1,0 +1,78 @@
+{
+  "cases": [
+    {
+      "name": "a far upstream reset is shortened to when an account frees up",
+      "headers": [
+        {
+          "name": "content-type",
+          "value": "application/json"
+        },
+        {
+          "name": "Anthropic-RateLimit-Unified-Reset",
+          "value": "1789632000"
+        }
+      ],
+      "to": "2026-09-15T14:00:00Z",
+      "now": "2026-09-15T12:00:00Z",
+      "changed": true,
+      "expected": [
+        {
+          "name": "content-type",
+          "value": "application/json"
+        },
+        {
+          "name": "anthropic-ratelimit-unified-reset",
+          "value": "1789480800"
+        }
+      ]
+    },
+    {
+      "name": "a reset sooner than our answer is left alone",
+      "headers": [
+        {
+          "name": "anthropic-ratelimit-unified-reset",
+          "value": "1789477200"
+        }
+      ],
+      "to": "2026-09-16T08:00:00Z",
+      "now": "2026-09-15T12:00:00Z",
+      "changed": false,
+      "expected": null
+    },
+    {
+      "name": "an answer of now is never written over a real reset",
+      "headers": [
+        {
+          "name": "anthropic-ratelimit-unified-reset",
+          "value": "1789632000"
+        }
+      ],
+      "to": "2026-09-15T12:00:00Z",
+      "now": "2026-09-15T12:00:00Z",
+      "changed": false,
+      "expected": null
+    },
+    {
+      "name": "with no upstream reset the header is added",
+      "headers": [
+        {
+          "name": "content-type",
+          "value": "application/json"
+        }
+      ],
+      "to": "2026-09-15T14:00:00Z",
+      "now": "2026-09-15T12:00:00Z",
+      "changed": true,
+      "expected": [
+        {
+          "name": "content-type",
+          "value": "application/json"
+        },
+        {
+          "name": "anthropic-ratelimit-unified-reset",
+          "value": "1789480800"
+        }
+      ]
+    }
+  ]
+}

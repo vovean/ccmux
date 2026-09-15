@@ -1,0 +1,191 @@
+{
+  "cases": [
+    {
+      "name": "a response naming only the five-hour window leaves the weekly one alone",
+      "previous": {
+        "windows": [
+          {
+            "kind": "session",
+            "label": "5-hour",
+            "percent": 10
+          },
+          {
+            "kind": "weeklyAll",
+            "label": "Weekly",
+            "percent": 96
+          },
+          {
+            "kind": "weeklyScoped",
+            "label": "Weekly Fable",
+            "percent": 40,
+            "modelName": "Fable"
+          }
+        ],
+        "fetchedAt": "2026-09-15T11:55:00Z",
+        "lastEndpointFetchAt": "2026-09-15T11:55:00Z"
+      },
+      "windows": [
+        {
+          "kind": "session",
+          "label": "5-hour",
+          "percent": 55
+        }
+      ],
+      "observedAt": "2026-09-15T12:00:00Z",
+      "expected": {
+        "windows": [
+          {
+            "kind": "session",
+            "label": "5-hour",
+            "percent": 55
+          },
+          {
+            "kind": "weeklyAll",
+            "label": "Weekly",
+            "percent": 96
+          },
+          {
+            "kind": "weeklyScoped",
+            "label": "Weekly Fable",
+            "percent": 40,
+            "modelName": "Fable"
+          }
+        ],
+        "fetchedAt": "2026-09-15T12:00:00Z",
+        "lastEndpointFetchAt": "2026-09-15T11:55:00Z"
+      }
+    },
+    {
+      "name": "both windows are replaced when both are reported",
+      "previous": {
+        "windows": [
+          {
+            "kind": "session",
+            "label": "5-hour",
+            "percent": 10
+          },
+          {
+            "kind": "weeklyAll",
+            "label": "Weekly",
+            "percent": 96
+          },
+          {
+            "kind": "weeklyScoped",
+            "label": "Weekly Fable",
+            "percent": 40,
+            "modelName": "Fable"
+          }
+        ],
+        "fetchedAt": "2026-09-15T11:55:00Z",
+        "lastEndpointFetchAt": "2026-09-15T11:55:00Z"
+      },
+      "windows": [
+        {
+          "kind": "session",
+          "label": "5-hour",
+          "percent": 55
+        },
+        {
+          "kind": "weeklyAll",
+          "label": "Weekly",
+          "percent": 97
+        }
+      ],
+      "observedAt": "2026-09-15T12:00:00Z",
+      "expected": {
+        "windows": [
+          {
+            "kind": "session",
+            "label": "5-hour",
+            "percent": 55
+          },
+          {
+            "kind": "weeklyAll",
+            "label": "Weekly",
+            "percent": 97
+          },
+          {
+            "kind": "weeklyScoped",
+            "label": "Weekly Fable",
+            "percent": 40,
+            "modelName": "Fable"
+          }
+        ],
+        "fetchedAt": "2026-09-15T12:00:00Z",
+        "lastEndpointFetchAt": "2026-09-15T11:55:00Z"
+      }
+    },
+    {
+      "name": "a response with no rate-limit headers changes nothing at all",
+      "previous": {
+        "windows": [
+          {
+            "kind": "session",
+            "label": "5-hour",
+            "percent": 10
+          },
+          {
+            "kind": "weeklyAll",
+            "label": "Weekly",
+            "percent": 96
+          },
+          {
+            "kind": "weeklyScoped",
+            "label": "Weekly Fable",
+            "percent": 40,
+            "modelName": "Fable"
+          }
+        ],
+        "fetchedAt": "2026-09-15T11:55:00Z",
+        "lastEndpointFetchAt": "2026-09-15T11:55:00Z"
+      },
+      "windows": [],
+      "observedAt": "2026-09-15T12:00:00Z",
+      "expected": {
+        "windows": [
+          {
+            "kind": "session",
+            "label": "5-hour",
+            "percent": 10
+          },
+          {
+            "kind": "weeklyAll",
+            "label": "Weekly",
+            "percent": 96
+          },
+          {
+            "kind": "weeklyScoped",
+            "label": "Weekly Fable",
+            "percent": 40,
+            "modelName": "Fable"
+          }
+        ],
+        "fetchedAt": "2026-09-15T11:55:00Z",
+        "lastEndpointFetchAt": "2026-09-15T11:55:00Z"
+      }
+    },
+    {
+      "name": "with nothing held the headers are taken as they are",
+      "previous": null,
+      "windows": [
+        {
+          "kind": "session",
+          "label": "5-hour",
+          "percent": 12
+        }
+      ],
+      "observedAt": "2026-09-15T12:00:00Z",
+      "expected": {
+        "windows": [
+          {
+            "kind": "session",
+            "label": "5-hour",
+            "percent": 12
+          }
+        ],
+        "fetchedAt": "2026-09-15T12:00:00Z",
+        "lastEndpointFetchAt": null
+      }
+    }
+  ]
+}

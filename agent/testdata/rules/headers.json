@@ -1,0 +1,78 @@
+{
+  "cases": [
+    {
+      "name": "both unified windows, as fractions of the limit",
+      "headers": {
+        "anthropic-ratelimit-unified-5h-reset": "1789459200",
+        "anthropic-ratelimit-unified-5h-utilization": "0.74",
+        "anthropic-ratelimit-unified-7d-reset": "1789545600",
+        "anthropic-ratelimit-unified-7d-utilization": "0.11"
+      },
+      "statusCode": 200,
+      "expectedWindows": [
+        {
+          "kind": "session",
+          "label": "5-hour",
+          "percent": 74,
+          "resetsAt": "2026-09-15T08:00:00Z"
+        },
+        {
+          "kind": "weeklyAll",
+          "label": "Weekly",
+          "percent": 11,
+          "resetsAt": "2026-09-16T08:00:00Z"
+        }
+      ],
+      "expectedRateLimited": false
+    },
+    {
+      "name": "no rate-limit headers at all",
+      "headers": {
+        "content-type": "application/json"
+      },
+      "statusCode": 200,
+      "expectedWindows": [],
+      "expectedRateLimited": false
+    },
+    {
+      "name": "a utilization with no reset beside it is still a window",
+      "headers": {
+        "anthropic-ratelimit-unified-5h-utilization": "0.5"
+      },
+      "statusCode": 200,
+      "expectedWindows": [
+        {
+          "kind": "session",
+          "label": "5-hour",
+          "percent": 50
+        }
+      ],
+      "expectedRateLimited": false
+    },
+    {
+      "name": "a 429 is a refusal whatever the headers say",
+      "headers": {},
+      "statusCode": 429,
+      "expectedWindows": [],
+      "expectedRateLimited": true
+    },
+    {
+      "name": "so is a 200 the server marked rejected",
+      "headers": {
+        "anthropic-ratelimit-unified-status": "rejected"
+      },
+      "statusCode": 200,
+      "expectedWindows": [],
+      "expectedRateLimited": true
+    },
+    {
+      "name": "an allowed status is not a refusal",
+      "headers": {
+        "anthropic-ratelimit-unified-status": "allowed"
+      },
+      "statusCode": 200,
+      "expectedWindows": [],
+      "expectedRateLimited": false
+    }
+  ]
+}
