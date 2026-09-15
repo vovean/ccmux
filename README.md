@@ -333,6 +333,35 @@ restarts the app mid-minute resumes it rather than splitting it in two.
 See [docs/server.md](docs/server.md), including what it costs: the server becomes a
 dependency, and token refreshes start coming from its IP rather than your laptop's.
 
+## On a Linux box, with no window
+
+Once the accounts live on a server, a Mac is no longer the only thing that can use them.
+`ccmux agent` is a daemon for a Linux box that does what this app does, minus the screens:
+an application runs `ccmux run -- -p "…"` instead of `claude`, and the daemon picks a
+subscription, seeds the credential that run authenticates as, proxies its traffic, moves
+it to another account when one refuses, and reports what it spent — so the box shows up on
+the Sessions and Stats pages beside the laptops.
+
+    make ccmux-linux
+    tar cz dist/ccmux-linux-amd64 scripts/install-ccmux-agent.sh agent/deploy \
+      | ssh root@box 'mkdir -p /tmp/ccmux && tar xz -C /tmp/ccmux'
+    ssh root@box '/tmp/ccmux/scripts/install-ccmux-agent.sh /tmp/ccmux/dist/ccmux-linux-amd64'
+
+The two mechanisms are the same ones at the top of this file, with the Keychain swapped
+for a file: `CLAUDE_SECURESTORAGE_CONFIG_DIR` points Claude Code at a per-session
+`.credentials.json`, and the proxy replaces the credential per request. A run that finds
+every subscription spent exits 75 with the moment to retry, so the application queues
+rather than failing.
+
+It is a second Go module at [agent/](agent/), importing ccmuxd's wire types through a
+`replace`; ccmuxd itself is unchanged. The ranking and pricing rules now exist in Go as
+well as Swift, so they are pinned against each other by generated vectors in
+`agent/testdata/rules` that both test suites read.
+
+[agent/README.md](agent/README.md) is the CLI reference — every command, the exit codes,
+and worked examples in shell, Python and Node. [docs/headless.md](docs/headless.md) is how
+it works and why.
+
 ## Where things live
 
     ~/Library/Application Support/ccmux/    accounts.json, usage.json, sessions.json,
@@ -351,7 +380,9 @@ hands out session tokens, so it is not a TCP port.
     swift build
     make test          # plain `swift test` fails on a CLT-only machine
     make test-server   # ccmuxd (Go), race detector on
+    make test-agent    # the Linux agent (Go), race detector on
     make ccmuxd-linux  # the static Linux binary that ships
+    make ccmux-linux   # and the agent's
     make app           # dist/ccmux.app
     make restart   # restart without losing live sessions
     make upgrade   # install, then that restart

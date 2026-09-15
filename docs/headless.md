@@ -119,9 +119,10 @@ costs nothing and keeps the identity honest on the Mac's pages.
 ## Installing
 
 ```bash
-make ccmux-linux                      # dist/ccmux-linux-amd64, static, ~7 MB
-scp dist/ccmux-linux-amd64 root@box:/tmp/
-ssh root@box '/path/to/install-ccmux-agent.sh /tmp/ccmux-linux-amd64'
+make ccmux-linux                          # dist/ccmux-linux-amd64, static, ~7 MB
+tar cz dist/ccmux-linux-amd64 scripts/install-ccmux-agent.sh agent/deploy \
+  | ssh root@box 'mkdir -p /tmp/ccmux && tar xz -C /tmp/ccmux'
+ssh root@box '/tmp/ccmux/scripts/install-ccmux-agent.sh /tmp/ccmux/dist/ccmux-linux-amd64'
 ```
 
 Then edit `/etc/ccmux/agent.yaml` (see `agent/deploy/agent.yaml.example`), and:
