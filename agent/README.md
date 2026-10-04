@@ -80,7 +80,7 @@ Starts a session and becomes Claude Code.
 | Flag | Meaning |
 |---|---|
 | `--model <id>` | The model this run will use. Passed to Claude Code **and** used to choose the account, so the subscription is picked against the weekly window the request will actually consume. A `--model` you pass after `--` wins. |
-| `--account <id>` | Pin to one subscription instead of ranking. Still refused if that account cannot serve the model. |
+| `--account <name>` | Start on this subscription instead of ranking — its id, label or email. Still refused if that account cannot serve the model or is not used on this box. A refusal later in the run can still move it to another account. |
 | `--name <text>` | How the run is labelled on the fleet pages. Defaults to the basename of the working directory. |
 
 Anything ccmux does not recognise goes to Claude Code, so `ccmux run -p "hi"` works
@@ -161,6 +161,7 @@ flags.**
 | The claude binary | `agent.claude_bin` | `CCMUX_CLAUDE_BIN` | `--claude-bin` |
 | Report to the fleet | `agent.report_fleet` | `CCMUX_REPORT_FLEET` | `--no-report` |
 | Proxy port band | `agent.port_first`, `agent.port_last` | — | — |
+| Accounts never used (daemon only) | `agent.exclude_accounts` | `CCMUX_EXCLUDE_ACCOUNTS` (comma-separated) | — |
 
 A complete file is in [deploy/agent.yaml.example](deploy/agent.yaml.example). The default
 path is `/etc/ccmux/agent.yaml`.
@@ -281,6 +282,34 @@ export function ask(prompt, { model = "claude-opus-5" } = {}) {
 ```
 
 ---
+
+## Keeping work off an account
+
+`agent.exclude_accounts` lists accounts this box never sends work to: not at launch, not on
+failover, and `--account` or `ccmux assign` naming one is refused. Each entry is an
+account's id, label or email, or an organisation's name or uuid, matched without regard to
+case, so one entry covers every seat in an organisation:
+
+```yaml
+agent:
+  exclude_accounts: [Emcd]
+```
+
+Only the daemon reads it. Set it in agent.yaml or in the unit's environment; setting
+`CCMUX_EXCLUDE_ACCOUNTS` for `ccmux run` does nothing. It applies to sessions started after
+the agent reads it, so restart the agent after changing it. An entry that matches nothing
+on the server is logged at startup. `ccmux status` marks excluded accounts with the
+reason. If every account ends up excluded, `ccmux run` fails with exit 1 rather than 75,
+since waiting will not help.
+
+Separately, when the API answers `403 oauth_not_allowed_for_organization`, which is what
+Claude Code shows as "Your organization has disabled Claude subscription access", the
+request is replayed on another account. That account's whole organisation is then left
+out of every pick until the agent restarts. Restarting is also how the organisation gets
+tried again. If no other account can serve the request at that moment, the 403 reaches
+Claude Code and the run fails with its own exit code, not 75. This is not remembered across
+restarts, so use `exclude_accounts` for an organisation that has turned Claude Code off for
+good.
 
 ## Running several at once
 

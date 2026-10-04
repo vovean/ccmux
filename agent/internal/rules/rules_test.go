@@ -87,3 +87,15 @@ func TestAnUnreadableResetHeaderIsIgnoredRatherThanTrusted(t *testing.T) {
 		}
 	}
 }
+
+func TestOrganizationRefusesOAuth(t *testing.T) {
+	refusal := []byte(`{"type":"error","error":{"type":"permission_error","message":` +
+		`"OAuth authentication is currently not allowed for this organization.",` +
+		`"details":{"error_code":"oauth_not_allowed_for_organization"}}}`)
+	if !OrganizationRefusesOAuth(refusal) {
+		t.Error("the refusal was not recognised")
+	}
+	if OrganizationRefusesOAuth([]byte(`{"error":{"type":"permission_error"}}`)) {
+		t.Error("another permission error was taken for the refusal")
+	}
+}

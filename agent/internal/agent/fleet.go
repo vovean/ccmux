@@ -136,6 +136,8 @@ type AccountStatus struct {
 	Windows  []wire.UsageWindow `json:"windows"`
 	AgeSecs  float64            `json:"usageAgeSeconds"`
 	Sessions int                `json:"sessions"`
+	// Why this box will not send work to the account; absent when it will.
+	Unusable string `json:"unusable,omitempty"`
 }
 
 type SessionStatus struct {
@@ -166,7 +168,8 @@ func (a *Agent) Status() Status {
 	}
 	for _, account := range a.accounts {
 		entry := AccountStatus{ID: account.ID, Label: account.DisplayName(),
-			Kind: account.Kind, Health: account.Health, Sessions: perAccount[account.ID]}
+			Kind: account.Kind, Health: account.Health, Sessions: perAccount[account.ID],
+			Unusable: a.unusableLocked(account)}
 		if snapshot, known := a.usage[account.ID]; known {
 			entry.Windows = snapshot.Windows
 			entry.AgeSecs = now.Sub(snapshot.FetchedAt).Seconds()

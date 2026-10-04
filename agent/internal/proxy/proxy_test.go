@@ -23,6 +23,13 @@ type stubRouter struct {
 	soonest   *time.Time
 	failovers []string
 	triedSeen []map[string]bool
+	refused   []string
+}
+
+func (s *stubRouter) OrganizationRefused(accountID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refused = append(s.refused, accountID)
 }
 
 func (s *stubRouter) Assignment(string) (Assignment, bool) {
@@ -441,5 +448,79 @@ func TestModelFromBody(t *testing.T) {
 	big := `{"model":"claude-opus-5","messages":["` + strings.Repeat("x", 5<<20) + `"]}`
 	if got := ModelFromBody([]byte(big)); got != "claude-opus-5" {
 		t.Errorf("oversized body: got %q", got)
+	}
+}
+
+// What the API answers, verbatim, when an organisation has turned subscription access for
+// Claude Code off.
+const organisationRefusal = `{"type":"error","error":{"type":"permission_error",` +
+	`"message":"OAuth authentication is currently not allowed for this organization.",` +
+	`"details":{"error_code":"oauth_not_allowed_for_organization"}},"request_id":"req_1"}`
+
+// A refusal with no reset must not stall a run: the account's organisation is reported so
+// nothing is sent there again, and the request is served elsewhere unseen.
+func TestAnOrganisationRefusalIsServedElsewhereAndReported(t *testing.T) {
+	router := &stubRouter{
+		assign: Assignment{AccountID: "emcd2", Credential: OAuth("token-emcd2")},
+		next:   &Assignment{AccountID: "win", Credential: OAuth("token-win")},
+	}
+	h := start(t, router, func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer token-emcd2" {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(organisationRefusal))
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":"served by win"}`))
+	})
+
+	response := h.post(t, "/v1/messages", messageBody, nil)
+	body, _ := io.ReadAll(response.Body)
+	if response.StatusCode != http.StatusOK || string(body) != `{"ok":"served by win"}` {
+		t.Fatalf("Claude Code saw %d %q", response.StatusCode, body)
+	}
+	router.mu.Lock()
+	defer router.mu.Unlock()
+	if len(router.refused) != 1 || router.refused[0] != "emcd2" {
+		t.Errorf("reported %v", router.refused)
+	}
+	if len(router.failovers) != 1 || !router.triedSeen[0]["emcd2"] {
+		t.Errorf("failover %v tried %v", router.failovers, router.triedSeen)
+	}
+}
+
+// Reading a 403 to classify it must not cost the body when it is relayed after all.
+func TestAForbiddenThatIsNotTheRefusalIsRelayedWhole(t *testing.T) {
+	long := `{"type":"error","error":{"type":"permission_error","message":"` +
+		strings.Repeat("x", 3*refusalPeek) + `"}}`
+	for _, tc := range []struct {
+		name       string
+		credential Credential
+		body       string
+		reported   bool
+	}{
+		{"another permission error", OAuth("token-a"), long, false},
+		// An API key is not subject to the policy, so the code cannot mean its account.
+		{"the refusal, to an API key", Key("key-a"), organisationRefusal, false},
+		// Reported, but with nowhere else to go the refusal still arrives intact.
+		{"the refusal, nowhere to go", OAuth("token-a"), organisationRefusal, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			router := &stubRouter{assign: Assignment{AccountID: "a", Credential: tc.credential}}
+			h := start(t, router, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(tc.body))
+			})
+			response := h.post(t, "/v1/messages", messageBody, nil)
+			body, _ := io.ReadAll(response.Body)
+			if response.StatusCode != http.StatusForbidden || string(body) != tc.body {
+				t.Fatalf("status %d, body of %d bytes (want %d)", response.StatusCode,
+					len(body), len(tc.body))
+			}
+			router.mu.Lock()
+			defer router.mu.Unlock()
+			if got := len(router.refused) == 1; got != tc.reported {
+				t.Errorf("reported %v", router.refused)
+			}
+		})
 	}
 }

@@ -292,3 +292,38 @@ func TestATrailingConfigWithNoValueIsRefused(t *testing.T) {
 		t.Fatal("a --config with nothing after it should say so, not reach the child")
 	}
 }
+
+func TestExcludedAccountsComeFromTheFileOrTheEnvironment(t *testing.T) {
+	path := writeFile(t, t.TempDir(), "agent.yaml",
+		"agent:\n  exclude_accounts: [Emcd, 5570f35c-4975-4707-a1ef-735b70b49871]\n", 0o600)
+
+	config, _, err := Load([]string{"--config", path}, envFrom(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(config.Agent.ExcludeAccounts, "|"); got !=
+		"Emcd|5570f35c-4975-4707-a1ef-735b70b49871" {
+		t.Errorf("from the file: %q", got)
+	}
+
+	// The environment replaces the list rather than adding to it, like every other setting.
+	config, _, err = Load([]string{"--config", path},
+		envFrom(map[string]string{"CCMUX_EXCLUDE_ACCOUNTS": " emcd2 , ,vv@amnezia.org "}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(config.Agent.ExcludeAccounts, "|"); got != "emcd2|vv@amnezia.org" {
+		t.Errorf("from the environment: %q", got)
+	}
+
+	// Blanks and commas name nothing, and must not wipe the file's list.
+	config, _, err = Load([]string{"--config", path},
+		envFrom(map[string]string{"CCMUX_EXCLUDE_ACCOUNTS": " , "}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(config.Agent.ExcludeAccounts, "|"); got !=
+		"Emcd|5570f35c-4975-4707-a1ef-735b70b49871" {
+		t.Errorf("a blank environment value replaced the list: %q", got)
+	}
+}

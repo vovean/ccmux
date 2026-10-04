@@ -85,6 +85,13 @@ Before a run even starts, the agent checks the pool. If nothing can serve the mo
 That is the contract an application should queue on. Anything else non-zero is a real
 failure.
 
+A `403` carrying `oauth_not_allowed_for_organization` is treated as a refusal too, but one
+with no reset: the account's organisation has turned subscription access for Claude Code
+off. The request is replayed on another account, and every seat in that organisation is
+left out of picks until the agent restarts. With nowhere else to go, the 403 reaches
+Claude Code and the run fails, not with 75. `agent.exclude_accounts` is the permanent
+version (see [../agent/README.md](../agent/README.md)).
+
 ## What decides which account
 
 Ported from the Mac, and kept honest by cross-language vectors (below):

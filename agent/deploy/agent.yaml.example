@@ -42,3 +42,7 @@ agent:
   # baked into a running session's ANTHROPIC_BASE_URL and has to survive an agent restart.
   port_first: 18000
   port_last: 18999
+
+  # Accounts this box never sends work to: an id, label or email, or an organisation's name
+  # or uuid to cover every seat in it. Restart the agent after changing it.
+  # exclude_accounts: [Emcd]

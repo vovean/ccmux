@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"bytes"
 	"math"
 	"strconv"
 	"strings"
@@ -67,6 +68,12 @@ func epoch(raw string) (time.Time, bool) {
 // Header names must already be lower-cased.
 func IsRateLimited(headers map[string]string, statusCode int) bool {
 	return statusCode == 429 || headers["anthropic-ratelimit-unified-status"] == "rejected"
+}
+
+// OrganizationRefusesOAuth reports, from a 403's body, that the account's organisation has
+// turned off subscription access for Claude Code — a refusal with no reset.
+func OrganizationRefusesOAuth(body []byte) bool {
+	return bytes.Contains(body, []byte("oauth_not_allowed_for_organization"))
 }
 
 // Header is one response header, kept as a slice rather than a map because order and

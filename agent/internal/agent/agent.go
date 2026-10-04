@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/url"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -51,11 +52,14 @@ type Agent struct {
 	// goroutine for the same account.
 	drawMu sync.Mutex
 
-	mu         sync.Mutex
-	sessions   map[string]*live
-	accounts   []wire.RemoteAccount
-	usage      map[string]*rules.Snapshot
-	grants     map[string]Grant
+	mu       sync.Mutex
+	sessions map[string]*live
+	accounts []wire.RemoteAccount
+	usage    map[string]*rules.Snapshot
+	grants   map[string]Grant
+	// Organisations — or, for an account with none, accounts — that refused OAuth this
+	// run. Held until the agent restarts, which is also how one is tried again.
+	refusing   map[string]bool
 	reportsOK  bool
 	seriesOK   bool
 	lastReport string
@@ -77,6 +81,7 @@ func New(cfg config.Config, api *client.Client, log func(string, ...any)) (*Agen
 		sessions: map[string]*live{},
 		usage:    map[string]*rules.Snapshot{},
 		grants:   map[string]Grant{},
+		refusing: map[string]bool{},
 	}, nil
 }
 
@@ -126,8 +131,27 @@ func (a *Agent) Start(ctx context.Context) error {
 	if err := a.refresh(ctx); err != nil {
 		return err
 	}
+	a.warnUnmatchedExclusions()
 	a.recover()
 	return nil
+}
+
+// A typo in exclude_accounts excludes nothing, which is the failure it exists to prevent.
+func (a *Agent) warnUnmatchedExclusions() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, name := range a.config.Agent.ExcludeAccounts {
+		matched := false
+		for _, account := range a.accounts {
+			if names(account, name, true) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			a.log("exclude_accounts: %q matches no account on the server", name)
+		}
+	}
 }
 
 // Run is the housekeeping loop. It returns when the context is cancelled, having written
@@ -234,6 +258,123 @@ func (a *Agent) account(id string) (wire.RemoteAccount, bool) {
 		}
 	}
 	return wire.RemoteAccount{}, false
+}
+
+// names reports whether a person could mean this account by `name`: its id, label or
+// email, and — when `organisation` — its organisation's name or uuid.
+func names(account wire.RemoteAccount, name string, organisation bool) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	candidates := []string{account.ID, account.Label, deref(account.Email)}
+	if organisation {
+		candidates = append(candidates, deref(account.OrganizationName),
+			deref(account.OrganizationUUID))
+	}
+	for _, candidate := range candidates {
+		if candidate != "" && strings.EqualFold(candidate, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// The key a refusal is held under: the whole organisation when it is known, because the
+// policy that refused one seat refuses every seat in it.
+func refusalKey(account wire.RemoteAccount) string {
+	if org := deref(account.OrganizationUUID); org != "" {
+		return "org:" + org
+	}
+	return "account:" + account.ID
+}
+
+// unusableLocked says why this box will not send work to the account, or "" if it will.
+func (a *Agent) unusableLocked(account wire.RemoteAccount) string {
+	for _, name := range a.config.Agent.ExcludeAccounts {
+		if names(account, name, true) {
+			return fmt.Sprintf("excluded by exclude_accounts (%q)", name)
+		}
+	}
+	if a.refusing[refusalKey(account)] || a.refusing["account:"+account.ID] {
+		return "its organisation refuses OAuth for Claude Code"
+	}
+	return ""
+}
+
+// resolveLocked finds the account a person named: an exact id first, then a label or
+// email. More than one match is an error rather than a guess, since it decides who pays.
+func (a *Agent) resolveLocked(name string) (wire.RemoteAccount, error) {
+	for _, account := range a.accounts {
+		if account.ID == name {
+			return account, nil
+		}
+	}
+	var found []wire.RemoteAccount
+	for _, account := range a.accounts {
+		if names(account, name, false) {
+			found = append(found, account)
+		}
+	}
+	switch len(found) {
+	case 0:
+		return wire.RemoteAccount{}, fmt.Errorf("no account %q on the server", name)
+	case 1:
+		return found[0], nil
+	}
+	return wire.RemoteAccount{}, fmt.Errorf("%q names %d accounts; use an id from "+
+		"`ccmux status --json`", name, len(found))
+}
+
+// usableNamedLocked is the account a person named, refused if this box does not use it.
+func (a *Agent) usableNamedLocked(name string) (wire.RemoteAccount, error) {
+	account, err := a.resolveLocked(name)
+	if err != nil {
+		return wire.RemoteAccount{}, err
+	}
+	return account, a.refuseUnusableLocked(account)
+}
+
+func (a *Agent) refuseUnusableLocked(account wire.RemoteAccount) error {
+	if why := a.unusableLocked(account); why != "" {
+		return fmt.Errorf("%s is not used on this box: %s", account.DisplayName(), why)
+	}
+	return nil
+}
+
+// OrganizationRefused holds the account's organisation out of every pick on this box.
+func (a *Agent) OrganizationRefused(accountID string) {
+	a.mu.Lock()
+	account, known := a.account(accountID)
+	if !known {
+		account = wire.RemoteAccount{ID: accountID}
+	}
+	key := refusalKey(account)
+	already := a.refusing[key]
+	a.refusing[key] = true
+	a.mu.Unlock()
+	if !already {
+		a.log("%s: its organisation refuses OAuth for Claude Code; nothing on this box "+
+			"goes to that organisation again until the agent restarts", account.DisplayName())
+	}
+}
+
+// poolCopy is usageCopy narrowed to the accounts this box may send work to. Lock held.
+func (a *Agent) poolCopy() (accounts []wire.RemoteAccount, usage map[string]*rules.Snapshot) {
+	all, usage := a.usageCopy()
+	for _, account := range all {
+		if a.unusableLocked(account) == "" {
+			accounts = append(accounts, account)
+		}
+	}
+	return accounts, usage
 }
 
 // usageCopy is a snapshot of the ranking inputs, taken under the lock so ranking itself

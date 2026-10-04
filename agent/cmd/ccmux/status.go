@@ -54,6 +54,7 @@ func printStatus(raw any) error {
 			Label    string  `json:"label"`
 			Health   string  `json:"health"`
 			Sessions int     `json:"sessions"`
+			Unusable string  `json:"unusable"`
 			AgeSecs  float64 `json:"usageAgeSeconds"`
 			Windows  []struct {
 				Label   string  `json:"label"`
@@ -85,6 +86,9 @@ func printStatus(raw any) error {
 			fmt.Printf("  %s %.0f%%", window.Label, window.Percent)
 		}
 		fmt.Printf("  (%.0fs old)\n", account.AgeSecs)
+		if account.Unusable != "" {
+			fmt.Printf("  %-28s not used: %s\n", "", account.Unusable)
+		}
 	}
 	if len(status.Sessions) == 0 {
 		return nil

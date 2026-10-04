@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -112,7 +113,15 @@ func window(kind wire.WindowKind, percent float64, model string) wire.UsageWindo
 
 func newAgent(t *testing.T, fake *fakeServer) *Agent {
 	t.Helper()
+	return newAgentWith(t, fake, nil)
+}
+
+func newAgentWith(t *testing.T, fake *fakeServer, adjust func(*config.Config)) *Agent {
+	t.Helper()
 	api, cfg := fake.client(t)
+	if adjust != nil {
+		adjust(&cfg)
+	}
 	daemon, err := New(cfg, api, func(string, ...any) {})
 	if err != nil {
 		t.Fatal(err)
@@ -452,5 +461,161 @@ func TestAnApiKeyAccountIsSeededWithThePlaceholder(t *testing.T) {
 	// The real key must never reach the disk Claude Code reads.
 	if bytes.Contains(data, []byte("sk-real-key")) {
 		t.Fatalf("the api key was written into the namespace: %s", data)
+	}
+}
+
+// The pool the league box saw: both Emcd seats in an organisation that has turned Claude
+// Code off, and the most drained of everything still in it.
+func emcdPool(fake *fakeServer) {
+	emcdOrg, emcdName, winOrg := "org-emcd", "Emcd", "org-1win"
+	fake.accounts = []wire.RemoteAccount{
+		{ID: "emcd2", Label: "emcd2", Kind: wire.KindSubscription, Health: wire.HealthOK,
+			OrganizationUUID: &emcdOrg, OrganizationName: &emcdName},
+		{ID: "emcd", Label: "v.vislovich@emcd.io", Kind: wire.KindSubscription,
+			Health: wire.HealthOK, OrganizationUUID: &emcdOrg, OrganizationName: &emcdName},
+		{ID: "win", Label: "Win", Email: wire.Ptr("v@1win.example"),
+			Kind: wire.KindSubscription, Health: wire.HealthOK, OrganizationUUID: &winOrg},
+	}
+	fake.usage["emcd2"] = []wire.UsageWindow{window(wire.WindowWeeklyAll, 69, "")}
+	fake.usage["emcd"] = []wire.UsageWindow{window(wire.WindowWeeklyAll, 60, "")}
+	fake.usage["win"] = []wire.UsageWindow{window(wire.WindowWeeklyAll, 7, "")}
+	fake.tokens["emcd2"], fake.tokens["emcd"], fake.tokens["win"] = "t-e2", "t-e", "t-w"
+}
+
+func TestAnExcludedAccountIsNeverChosen(t *testing.T) {
+	fake := newFakeServer(t)
+	emcdPool(fake)
+	// An organisation name covers every seat in it, whatever the case.
+	daemon := newAgentWith(t, fake, func(c *config.Config) {
+		c.Agent.ExcludeAccounts = []string{"EMCD"}
+	})
+
+	started, err := daemon.NewSession(context.Background(),
+		Launch{Model: "claude-opus-5", PID: os.Getpid()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started.AccountID != "win" {
+		t.Fatalf("started on %q, the most drained account not excluded is win",
+			started.AccountID)
+	}
+	// Nor is one reached by failing over: with win refused there is nowhere left.
+	if next, ok := daemon.Failover(started.SessionID, "claude-opus-5", "win",
+		map[string]bool{"win": true}); ok {
+		t.Fatalf("failed over to %q", next.AccountID)
+	}
+	// Naming one is refused, not quietly honoured.
+	if _, err := daemon.NewSession(context.Background(), Launch{
+		Model: "claude-opus-5", AccountID: "emcd2", PID: os.Getpid()}); err == nil ||
+		!strings.Contains(err.Error(), "exclude_accounts") {
+		t.Errorf("a launch pinned to an excluded account: %v", err)
+	}
+	if err := daemon.Assign(context.Background(), started.SessionID, "emcd",
+		Explicit); err == nil {
+		t.Error("an explicit move onto an excluded account was allowed")
+	}
+	for _, account := range daemon.Status().Accounts {
+		if excluded := account.Unusable != ""; excluded != (account.ID != "win") {
+			t.Errorf("%s: unusable %q", account.ID, account.Unusable)
+		}
+	}
+}
+
+// One seat refused for its organisation means every seat in it is refused, so the next
+// pick goes outside the organisation rather than to its sibling.
+func TestAnOrganisationRefusalHoldsEverySeatInIt(t *testing.T) {
+	fake := newFakeServer(t)
+	emcdPool(fake)
+	daemon := newAgent(t, fake)
+
+	started, err := daemon.NewSession(context.Background(),
+		Launch{Model: "claude-opus-5", PID: os.Getpid()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started.AccountID != "emcd2" {
+		t.Fatalf("started on %q", started.AccountID)
+	}
+
+	daemon.OrganizationRefused("emcd2")
+	next, ok := daemon.Failover(started.SessionID, "claude-opus-5", "emcd2",
+		map[string]bool{"emcd2": true})
+	if !ok || next.AccountID != "win" {
+		t.Fatalf("failed over to %q (%v), want win, outside the organisation",
+			next.AccountID, ok)
+	}
+	again, err := daemon.NewSession(context.Background(),
+		Launch{Model: "claude-opus-5", PID: os.Getpid()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.AccountID != "win" {
+		t.Errorf("a later launch started on %q", again.AccountID)
+	}
+}
+
+func TestAnAccountCanBeNamedByLabelOrEmail(t *testing.T) {
+	fake := newFakeServer(t)
+	emcdPool(fake)
+	daemon := newAgent(t, fake)
+
+	for _, name := range []string{"win", "Win", "v@1win.example"} {
+		started, err := daemon.NewSession(context.Background(), Launch{
+			Model: "claude-opus-5", AccountID: name, PID: os.Getpid()})
+		if err != nil {
+			t.Fatalf("%q: %v", name, err)
+		}
+		if started.AccountID != "win" {
+			t.Errorf("%q started on %q", name, started.AccountID)
+		}
+	}
+	if _, err := daemon.NewSession(context.Background(), Launch{
+		Model: "claude-opus-5", AccountID: "nobody", PID: os.Getpid()}); err == nil {
+		t.Error("an unknown account name was accepted")
+	}
+}
+
+// A rotation names the exact id it picked: it must neither resolve a label to some other
+// account nor land on an organisation refused since the pick.
+func TestARotationMovesOnlyToTheExactUsableAccountItNamed(t *testing.T) {
+	fake := newFakeServer(t)
+	emcdPool(fake)
+	daemon := newAgent(t, fake)
+
+	started, err := daemon.NewSession(context.Background(),
+		Launch{Model: "claude-opus-5", PID: os.Getpid()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := daemon.Assign(context.Background(), started.SessionID, "Win",
+		Rotation); err == nil {
+		t.Error("a rotation resolved a label")
+	}
+	daemon.OrganizationRefused("emcd2")
+	if err := daemon.Assign(context.Background(), started.SessionID, "emcd",
+		Rotation); err == nil {
+		t.Error("a rotation moved onto a refused organisation")
+	}
+	daemon.mu.Lock()
+	serving := daemon.sessions[started.SessionID].record.AccountID
+	daemon.mu.Unlock()
+	if serving != "emcd2" {
+		t.Errorf("the refused moves still moved the session to %q", serving)
+	}
+}
+
+// Waiting cannot fix a pool emptied by configuration, so it is not the exit 75 an
+// application would queue on forever.
+func TestAPoolEmptiedByExclusionIsAFailureNotAWait(t *testing.T) {
+	fake := newFakeServer(t)
+	emcdPool(fake)
+	daemon := newAgentWith(t, fake, func(c *config.Config) {
+		c.Agent.ExcludeAccounts = []string{"Emcd", "Win"}
+	})
+	_, err := daemon.NewSession(context.Background(),
+		Launch{Model: "claude-opus-5", PID: os.Getpid()})
+	var refusal *ErrNoAccount
+	if err == nil || asNoAccount(err, &refusal) {
+		t.Fatalf("got %v, want a plain failure", err)
 	}
 }

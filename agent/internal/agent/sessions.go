@@ -46,21 +46,21 @@ func (a *Agent) NewSession(ctx context.Context, launch Launch) (Started, error) 
 	}
 
 	a.mu.Lock()
-	accounts, usage := a.usageCopy()
+	accounts, usage := a.poolCopy()
+	held := len(a.accounts)
+	var pinned wire.RemoteAccount
+	var pinErr error
+	if launch.AccountID != "" {
+		pinned, pinErr = a.usableNamedLocked(launch.AccountID)
+	}
 	a.mu.Unlock()
 
 	var candidates []wire.RemoteAccount
 	if launch.AccountID != "" {
-		found := false
-		for _, account := range accounts {
-			if account.ID == launch.AccountID {
-				candidates, found = []wire.RemoteAccount{account}, true
-				break
-			}
+		if pinErr != nil {
+			return Started{}, pinErr
 		}
-		if !found {
-			return Started{}, fmt.Errorf("no account %q on the server", launch.AccountID)
-		}
+		candidates = []wire.RemoteAccount{pinned}
 		if !rules.CanServe(launch.Model, usage[candidates[0].ID]) {
 			at, known := rules.AvailableAt(launch.Model, usage[candidates[0].ID], a.now())
 			refusal := &ErrNoAccount{Model: launch.Model}
@@ -70,6 +70,11 @@ func (a *Agent) NewSession(ctx context.Context, launch Launch) (Started, error) 
 			return Started{}, refusal
 		}
 	} else {
+		if len(accounts) == 0 && held > 0 {
+			// Not exit 75: nothing frees up by waiting, only by a config change or restart.
+			return Started{}, fmt.Errorf("every account on the server is excluded or " +
+				"refused on this box — see `ccmux status`")
+		}
 		candidates = rules.RankLeastRemaining(launch.Model, accounts, usage, nil)
 		if len(candidates) == 0 {
 			refusal := &ErrNoAccount{Model: launch.Model}
@@ -212,12 +217,25 @@ func (a *Agent) Assign(ctx context.Context, sessionID, accountID string, reason 
 		a.mu.Unlock()
 		return fmt.Errorf("no session %s", sessionID)
 	}
-	target, known := a.account(accountID)
+	// Only a person's request is resolved by name; a rotation names the exact id it picked.
+	var target wire.RemoteAccount
+	var err error
+	if reason == Explicit {
+		target, err = a.usableNamedLocked(accountID)
+	} else {
+		var known bool
+		if target, known = a.account(accountID); !known {
+			err = fmt.Errorf("no account %q on the server", accountID)
+		} else {
+			err = a.refuseUnusableLocked(target)
+		}
+	}
 	seeded, seededKnown := a.account(session.record.SeededAccountID)
 	a.mu.Unlock()
-	if !known {
-		return fmt.Errorf("no account %q on the server", accountID)
+	if err != nil {
+		return err
 	}
+	accountID = target.ID
 
 	grant, err := a.grantFor(ctx, accountID, minGrantLife)
 	if err != nil {
@@ -304,7 +322,7 @@ func (a *Agent) Failover(sessionID, model, servedBy string,
 		a.mu.Unlock()
 		return proxy.Assignment{}, false
 	}
-	accounts, usage := a.usageCopy()
+	accounts, usage := a.poolCopy()
 	a.mu.Unlock()
 
 	next, ok := rules.Pick(model, accounts, usage, tried)
@@ -326,7 +344,7 @@ func (a *Agent) Failover(sessionID, model, servedBy string,
 
 func (a *Agent) SoonestAvailability(sessionID, model string) (time.Time, bool) {
 	a.mu.Lock()
-	accounts, usage := a.usageCopy()
+	accounts, usage := a.poolCopy()
 	a.mu.Unlock()
 	_, at, ok := rules.SoonestAvailable(model, accounts, usage, a.now())
 	return at, ok

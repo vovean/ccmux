@@ -69,6 +69,10 @@ type Router interface {
 	// an earlier moment belonging to another just sends Claude Code back into the same
 	// refusal.
 	SoonestAvailability(sessionID, model string) (time.Time, bool)
+
+	// OrganizationRefused records that this account's organisation refuses OAuth outright,
+	// so nothing is sent to it or its organisation again. Failover is asked separately.
+	OrganizationRefused(accountID string)
 }
 
 // Observation is one attempt's news about the account that served it, reported as soon
@@ -216,7 +220,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		headers := relayableHeaders(response.Header)
-		if rules.IsRateLimited(rateLimit, response.StatusCode) {
+		limited := rules.IsRateLimited(rateLimit, response.StatusCode)
+		blocked := !limited && organizationRefuses(response, assignment)
+		if blocked {
+			p.options.Router.OrganizationRefused(assignment.AccountID)
+		}
+		if limited || blocked {
 			tried[assignment.AccountID] = true
 			// Each account is tried at most once — cycling would also risk Claude Code's
 			// own "stopped after repeated usage-limit hits" guard.
@@ -226,13 +235,21 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if ok {
 					// The replaced attempt is still streaming a refusal nobody will read.
 					response.Body.Close()
-					p.options.Log("session %s: %s refused %s, retrying on %s",
-						p.options.SessionID, assignment.AccountID, modelOrRequest(model),
-						next.AccountID)
+					if blocked {
+						p.options.Log("session %s: %s's organisation refuses OAuth, "+
+							"retrying on %s", p.options.SessionID, assignment.AccountID,
+							next.AccountID)
+					} else {
+						p.options.Log("session %s: %s refused %s, retrying on %s",
+							p.options.SessionID, assignment.AccountID,
+							modelOrRequest(model), next.AccountID)
+					}
 					assignment = next
 					continue
 				}
 			}
+		}
+		if limited {
 			// Nothing can serve it. Claude Code decides whether to wait from
 			// anthropic-ratelimit-unified-reset, and refuses to wait at all when that is
 			// more than 24 hours out — so it has to describe the soonest moment *any*
@@ -249,6 +266,27 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.relay(w, response, headers, assignment, model)
 		return
 	}
+}
+
+// An error body is a few hundred bytes; anything past this is not one worth classifying.
+const refusalPeek = 64 << 10
+
+// organizationRefuses reads a 403's body to classify it, and puts what it read back in
+// front of the rest so the response still relays whole when it is not the refusal sought.
+// Only an OAuth credential can be refused this way; an API key bypasses the policy.
+func organizationRefuses(response *http.Response, assignment Assignment) bool {
+	if response.StatusCode != http.StatusForbidden || assignment.Credential.OAuthToken == "" {
+		return false
+	}
+	head, _ := io.ReadAll(io.LimitReader(response.Body, refusalPeek))
+	response.Body = rejoined{io.MultiReader(bytes.NewReader(head), response.Body),
+		response.Body}
+	return rules.OrganizationRefusesOAuth(head)
+}
+
+type rejoined struct {
+	io.Reader
+	io.Closer
 }
 
 func modelOrRequest(model string) string {

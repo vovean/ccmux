@@ -47,6 +47,10 @@ type Agent struct {
 	// running session's ANTHROPIC_BASE_URL and has to be rebindable after a restart.
 	PortFirst int `yaml:"port_first"`
 	PortLast  int `yaml:"port_last"`
+	// Accounts this box never sends work to, each named by id, label, email, or
+	// organisation name or uuid — seats kept for people, or an organisation that has
+	// turned Claude Code off. Matching ignores case.
+	ExcludeAccounts []string `yaml:"exclude_accounts"`
 }
 
 type Config struct {
@@ -231,6 +235,17 @@ func applyEnv(config *Config, env func(string) string) {
 	str("CCMUX_CLAUDE_BIN", &config.Agent.ClaudeBin)
 	if v := env("CCMUX_INSECURE"); v == "1" || strings.EqualFold(v, "true") {
 		config.Server.Insecure = true
+	}
+	// A value of only blanks and commas names nothing, so it leaves the file's list alone
+	// rather than silently emptying it.
+	var excluded []string
+	for _, name := range strings.Split(env("CCMUX_EXCLUDE_ACCOUNTS"), ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			excluded = append(excluded, name)
+		}
+	}
+	if len(excluded) > 0 {
+		config.Agent.ExcludeAccounts = excluded
 	}
 	if v := env("CCMUX_REPORT_FLEET"); v != "" {
 		report := v == "1" || strings.EqualFold(v, "true")
