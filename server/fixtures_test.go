@@ -34,13 +34,19 @@ func TestWireFixturesMatchWhatWeEmit(t *testing.T) {
 					Email: ptr("someone@example.com"), OrganizationUUID: ptr("org-1"),
 					OrganizationName: ptr("Example Org"), SubscriptionType: ptr("team"),
 					RateLimitTier: ptr("tier_x"), Kind: KindSubscription, Health: HealthOK,
+					InRotation: ptr(false), GroupID: ptr("group-1"),
 				},
 				{
 					ID: "local-uuid", Label: "Billing", Kind: KindAPIKey,
 					Health: HealthNeedsRelogin, HealthDetail: ptr("no credential on the server"),
 					APIKeyFingerprint: ptr(APIKeyFingerprint("sk-ant-fixture")),
+					MonthlyBudgetUSD:  ptr(25.5),
 				},
 			},
+		},
+		"groups.json": GroupListResponse{
+			APIVersion: apiVersion,
+			Groups:     []SubscriptionGroup{{ID: "group-1", Name: "Project"}},
 		},
 		"token-subscription.json": TokenGrant{
 			AccountID: "11111111-2222-3333-4444-555555555555", Kind: KindSubscription,

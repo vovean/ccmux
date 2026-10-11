@@ -48,14 +48,15 @@ func TestRemoteAccountKeysMatchTheSwiftClient(t *testing.T) {
 		OrganizationUUID: ptr("org"), OrganizationName: ptr("Org"),
 		SubscriptionType: ptr("team"), RateLimitTier: ptr("tier"),
 		Kind: KindSubscription, Health: HealthOK, HealthDetail: ptr("fine"),
-		APIKeyFingerprint: ptr("abc"),
+		APIKeyFingerprint: ptr("abc"), InRotation: ptr(true), MonthlyBudgetUSD: ptr(1.0),
+		GroupID: ptr("g"),
 	}
 	encoded, _ := json.Marshal(account)
 	var decoded map[string]any
 	_ = json.Unmarshal(encoded, &decoded)
 	for _, key := range []string{"id", "label", "email", "organizationUUID",
 		"organizationName", "subscriptionType", "rateLimitTier", "kind", "health",
-		"healthDetail", "apiKeyFingerprint"} {
+		"healthDetail", "apiKeyFingerprint", "inRotation", "monthlyBudgetUSD", "groupID"} {
 		if _, ok := decoded[key]; !ok {
 			t.Errorf("missing key %q", key)
 		}
@@ -270,6 +271,7 @@ func TestEmptySlicesAreEmptyArraysNotNull(t *testing.T) {
 			Accounts: []RemoteAccount{}},
 		"api key grant":    TokenGrant{AccountID: "a", Kind: KindAPIKey, APIKey: ptr("k"), Scopes: []string{}},
 		"usage no windows": RemoteUsage{AccountID: "a", Windows: []UsageWindow{}},
+		"no groups":        GroupListResponse{APIVersion: apiVersion, Groups: []SubscriptionGroup{}},
 	}
 	for name, value := range cases {
 		encoded, err := json.Marshal(value)

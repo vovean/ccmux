@@ -18,6 +18,10 @@ type (
 	LoginStartResponse    = wire.LoginStartResponse
 	LoginFinishRequest    = wire.LoginFinishRequest
 	AdoptRequest          = wire.AdoptRequest
+	AccountUpdate         = wire.AccountUpdate
+	SubscriptionGroup     = wire.SubscriptionGroup
+	GroupListResponse     = wire.GroupListResponse
+	GroupRequest          = wire.GroupRequest
 	AccountListResponse   = wire.AccountListResponse
 	HealthResponse        = wire.HealthResponse
 	MachineSession        = wire.MachineSession

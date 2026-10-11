@@ -3,6 +3,12 @@ import Foundation
 
 public enum SessionError: Error, LocalizedError {
     case noEligibleAccount(policy: String)
+    /// Nothing in the pool at all, as opposed to a pool that is spent. `group` is a name;
+    /// nil is the ungrouped pool.
+    case emptyPool(group: String?)
+    case unknownGroup(String)
+    /// This Mac is limited to a group that has since been deleted.
+    case restrictedToMissingGroup
     case unknownPolicy(String)
     case unknownAccount(String)
     case unknownSession(String)
@@ -13,6 +19,16 @@ public enum SessionError: Error, LocalizedError {
         switch self {
         case .noEligibleAccount(let policy):
             return "No account has headroom left for the “\(policy)” policy"
+        case .emptyPool(let group?):
+            return "No account in the group “\(group)” is in rotation"
+        case .emptyPool(nil):
+            return "No account outside a group is in rotation, and this Mac uses only "
+                + "those. Pick a group in Settings, or launch with --group <name>."
+        case .unknownGroup(let name):
+            return "No group named “\(name)”"
+        case .restrictedToMissingGroup:
+            return "This Mac is limited to a group that no longer exists. Pick another in "
+                + "Settings, or launch with --group <name>."
         case .unknownPolicy(let name):
             return "No policy named “\(name)”"
         case .unknownAccount(let id):
@@ -112,39 +128,71 @@ public final class SessionManager: SessionRouting {
     /// `cwd` is what a directory binding is matched against, and it only ever narrows
     /// the launch: once a session is running its account may rotate freely, because the
     /// organization's connectors were already fetched and stay for the session's life.
+    ///
+    /// `group` is the one named at launch; nil uses this Mac's setting.
     public func chooseAccount(policyName: String, excluding excluded: Set<String> = [],
-                              applyingLaunchFloors: Bool = false, cwd: String? = nil)
+                              applyingLaunchFloors: Bool = false, cwd: String? = nil,
+                              group explicitGroup: String? = nil)
         throws -> (choice: AccountRanking, warning: String?) {
         let settings = store.currentSettings()
         guard let policy = settings.policy(named: policyName) else {
             throw SessionError.unknownPolicy(policyName)
         }
-        let accounts = store.accounts.all().filter(\.isAutoAssignable)
-        let usage = store.allUsage()
+        return try Self.choose(
+            policy: policy, settings: settings, accounts: store.accounts.all(),
+            usage: store.allUsage(),
+            group: explicitGroup ?? AccountPool.scope(of: nil, settings: settings),
+            excluding: excluded, applyingLaunchFloors: applyingLaunchFloors, cwd: cwd,
+            groupName: { [store] in store.groupName($0) })
+    }
+
+    static func choose(policy: Policy, settings: Settings, accounts all: [Account],
+                       usage: [String: UsageSnapshot], group: String?,
+                       excluding excluded: Set<String>, applyingLaunchFloors: Bool,
+                       cwd: String?, groupName: (String) -> String?)
+        throws -> (choice: AccountRanking, warning: String?) {
+        let accounts = AccountPool.automatic(all, group: group)
+        let bindable = DirectoryBindings.bindable(all)
+        func unbound() throws -> (choice: AccountRanking, warning: String?) {
+            guard !accounts.isEmpty else {
+                guard let group else { throw SessionError.emptyPool(group: nil) }
+                guard let name = groupName(group) else {
+                    throw SessionError.restrictedToMissingGroup
+                }
+                throw SessionError.emptyPool(group: name)
+            }
+            return try unboundChoice(policy: policy, accounts: accounts, usage: usage,
+                                     excluded: excluded,
+                                     applyingLaunchFloors: applyingLaunchFloors)
+        }
 
         switch DirectoryBindings.launch(
             cwd: cwd, settings: settings,
-            accounts: DirectoryBindings.bindable(store.accounts.all()), usage: usage,
+            // A binding narrows within the group and never reaches out of it.
+            accounts: bindable.filter { $0.groupID == group }, usage: usage,
             policy: policy, excluding: excluded,
             applyingLaunchFloors: applyingLaunchFloors) {
         case .use(let bound):
             return (bound, nil)
         case .organizationSpent(let org):
-            let elsewhere = try unboundChoice(policy: policy, accounts: accounts,
-                                              usage: usage, excluded: excluded,
-                                              applyingLaunchFloors: applyingLaunchFloors)
+            let elsewhere = try unbound()
+            let bound = cwd.flatMap { DirectoryBindings.match($0, in: settings.directoryBindings) }
+                .flatMap { binding in bindable.first { $0.id == binding.accountID } }
+            if let bound, bound.groupID != group {
+                return (elsewhere.choice, "this directory is bound to \(bound.displayName), "
+                        + "outside this session's group — connectors approved there will "
+                        + "not be available")
+            }
             return (elsewhere.choice, "\(org) has nothing left, so this session started "
                     + "outside it — connectors approved there will not be available")
         case .unbound:
-            return try unboundChoice(policy: policy, accounts: accounts, usage: usage,
-                                     excluded: excluded,
-                                     applyingLaunchFloors: applyingLaunchFloors)
+            return try unbound()
         }
     }
 
-    private func unboundChoice(policy: Policy, accounts: [Account],
-                               usage: [String: UsageSnapshot], excluded: Set<String>,
-                               applyingLaunchFloors: Bool)
+    private static func unboundChoice(policy: Policy, accounts: [Account],
+                                      usage: [String: UsageSnapshot], excluded: Set<String>,
+                                      applyingLaunchFloors: Bool)
         throws -> (choice: AccountRanking, warning: String?) {
         if applyingLaunchFloors,
            let clears = PolicyEngine.pick(accounts: accounts, usage: usage, policy: policy,
@@ -166,18 +214,29 @@ public final class SessionManager: SessionRouting {
 
     // MARK: - Creation
 
+    /// `group` is a name or id from `--group`, resolved here so a typo fails the launch
+    /// instead of silently falling back to this Mac's pool.
     public func createSession(policyName: String, cwd: String, pid: Int32,
-                             accountID requested: String? = nil) throws -> ControlSessionInfo {
+                             accountID requested: String? = nil,
+                             group groupName: String? = nil) throws -> ControlSessionInfo {
         createLock.lock()
         defer { createLock.unlock() }
 
+        var group: SubscriptionGroup?
+        if let groupName {
+            guard let found = AccountPool.resolve(groupName, in: store.groups.all()) else {
+                throw SessionError.unknownGroup(groupName)
+            }
+            group = found
+        }
         var warning: String?
         let accountID: String
         if let requested {
             accountID = requested
         } else {
             let chosen = try chooseAccount(policyName: policyName,
-                                           applyingLaunchFloors: true, cwd: cwd)
+                                           applyingLaunchFloors: true, cwd: cwd,
+                                           group: group?.id)
             accountID = chosen.choice.accountID
             warning = chosen.warning
         }
@@ -195,7 +254,7 @@ public final class SessionManager: SessionRouting {
                                                 attributes: [.posixPermissions: 0o700])
 
         var record = SessionRecord(id: sessionID, pid: pid, port: 0, accountID: accountID,
-                                   policyName: policyName, cwd: cwd)
+                                   policyName: policyName, cwd: cwd, groupID: group?.id)
 
         do {
             try seed(accountID: accountID, into: namespace)
@@ -221,7 +280,8 @@ public final class SessionManager: SessionRouting {
         return ControlSessionInfo(sessionID: sessionID, namespaceDir: namespace.path,
                                   port: record.port, accountID: accountID,
                                   accountLabel: account.displayName,
-                                  policyName: policyName, pid: pid, warning: warning)
+                                  policyName: policyName, pid: pid, warning: warning,
+                                  groupName: group?.name)
     }
 
     /// Binds a new session's proxy inside ccmux's own port band, falling back to an
@@ -328,9 +388,10 @@ public final class SessionManager: SessionRouting {
 
         let usage = store.allUsage()
         let policy = settings.policy(named: record.policyName)
-        // Only accounts ccmux may choose on its own: out of rotation, or an API key that
-        // would spend money nobody asked to spend, and it is not a candidate here.
-        let eligible = store.accounts.all().filter(\.isAutoAssignable)
+        // Only accounts ccmux may choose on its own: out of rotation, an API key that
+        // would spend money nobody asked to spend, or outside the session's group, and it
+        // is not a candidate here.
+        let eligible = store.automaticPool(for: record)
         let candidate = ModelRouting.rankLeastRemaining(model, accounts: eligible,
                                                         usage: usage, excluding: tried)
             // Never blocks: a candidate whose token needs refreshing is skipped rather
@@ -357,8 +418,9 @@ public final class SessionManager: SessionRouting {
     /// The soonest any account could serve this model — the number Claude Code needs to
     /// decide whether waiting is worth it.
     public func soonestAvailability(model: String?, for sessionID: String) -> Date? {
-        var accounts = store.accounts.all().filter { $0.isAutoAssignable }
-        if let record = store.sessions.get(sessionID) {
+        let record = store.sessions.get(sessionID)
+        var accounts = store.automaticPool(for: record)
+        if let record {
             // The session's own account counts even when it is not auto-assignable: it is
             // already there, and its reset is exactly what Claude Code is waiting on.
             if let own = store.accounts.get(record.accountID),
@@ -514,7 +576,7 @@ public final class SessionManager: SessionRouting {
         // the launch policy. The two differ when the session has switched models
         // in-flight: `cc-opus` deliberately ignores the per-model weekly window, so the
         // window that actually ran out may be one its own policy does not look at.
-        let accounts = store.accounts.all().filter(\.isAutoAssignable)
+        let accounts = store.automaticPool(for: record)
         let usage = store.allUsage()
         let excluded: Set<String> = [record.accountID]
         let replacement = PolicyEngine.pick(accounts: accounts, usage: usage,

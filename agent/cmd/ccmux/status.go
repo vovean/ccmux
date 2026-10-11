@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 
 	"ccmuxagent/internal/config"
@@ -37,10 +38,10 @@ func runStatus(args []string) error {
 		fmt.Println(string(encoded))
 		return nil
 	}
-	return printStatus(response.Status)
+	return printStatus(os.Stdout, response.Status)
 }
 
-func printStatus(raw any) error {
+func printStatus(out io.Writer, raw any) error {
 	// Re-decoded rather than typed: the control protocol carries this opaquely so the
 	// agent package does not have to be linked into every subcommand.
 	encoded, err := json.Marshal(raw)
@@ -50,13 +51,17 @@ func printStatus(raw any) error {
 	var status struct {
 		MachineLabel string `json:"machineLabel"`
 		PendingUsage int    `json:"pendingUsageBuckets"`
+		Group        string `json:"group"`
+		GroupError   string `json:"groupError"`
 		Accounts     []struct {
-			Label    string  `json:"label"`
-			Health   string  `json:"health"`
-			Sessions int     `json:"sessions"`
-			Unusable string  `json:"unusable"`
-			AgeSecs  float64 `json:"usageAgeSeconds"`
-			Windows  []struct {
+			Label        string  `json:"label"`
+			Health       string  `json:"health"`
+			Sessions     int     `json:"sessions"`
+			Group        string  `json:"group"`
+			Unusable     string  `json:"unusable"`
+			NotAutomatic string  `json:"notAutomatic"`
+			AgeSecs      float64 `json:"usageAgeSeconds"`
+			Windows      []struct {
 				Label   string  `json:"label"`
 				Percent float64 `json:"percent"`
 			} `json:"windows"`
@@ -76,26 +81,42 @@ func printStatus(raw any) error {
 		return err
 	}
 
-	fmt.Printf("%s — %d session(s), %d usage bucket(s) waiting\n\n",
+	fmt.Fprintf(out, "%s — %d session(s), %d usage bucket(s) waiting\n",
 		status.MachineLabel, len(status.Sessions), status.PendingUsage)
-	fmt.Println("ACCOUNTS")
+	switch {
+	case status.GroupError != "":
+		fmt.Fprintf(out, "group: %s — runs without --group are refused: %s\n\n",
+			status.Group, status.GroupError)
+	case status.Group != "":
+		fmt.Fprintf(out, "group: %s\n\n", status.Group)
+	default:
+		fmt.Fprint(out, "group: ungrouped accounts only\n\n")
+	}
+	fmt.Fprintln(out, "ACCOUNTS")
 	for _, account := range status.Accounts {
-		fmt.Printf("  %-28s %-13s %d session(s)", account.Label, account.Health,
+		fmt.Fprintf(out, "  %-28s %-13s %d session(s)", account.Label, account.Health,
 			account.Sessions)
 		for _, window := range account.Windows {
-			fmt.Printf("  %s %.0f%%", window.Label, window.Percent)
+			fmt.Fprintf(out, "  %s %.0f%%", window.Label, window.Percent)
 		}
-		fmt.Printf("  (%.0fs old)\n", account.AgeSecs)
-		if account.Unusable != "" {
-			fmt.Printf("  %-28s not used: %s\n", "", account.Unusable)
+		fmt.Fprintf(out, "  (%.0fs old)\n", account.AgeSecs)
+		if account.Group != "" {
+			fmt.Fprintf(out, "  %-28s group: %s\n", "", account.Group)
+		}
+		switch {
+		case account.Unusable != "":
+			fmt.Fprintf(out, "  %-28s not used: %s\n", "", account.Unusable)
+		case account.NotAutomatic != "":
+			fmt.Fprintf(out, "  %-28s not used automatically: %s\n", "",
+				account.NotAutomatic)
 		}
 	}
 	if len(status.Sessions) == 0 {
 		return nil
 	}
-	fmt.Println("\nSESSIONS")
+	fmt.Fprintln(out, "\nSESSIONS")
 	for _, session := range status.Sessions {
-		fmt.Printf("  %s  pid %-7d port %-6d %-8s %-18s %d req  $%.4f  %s\n",
+		fmt.Fprintf(out, "  %s  pid %-7d port %-6d %-8s %-18s %d req  $%.4f  %s\n",
 			session.ID[:8], session.PID, session.Port, session.Status,
 			session.Model, session.Requests, session.SpendUSD, session.Name)
 	}

@@ -15,6 +15,8 @@ type Request struct {
 	Directory string `json:"cwd,omitempty"`
 	Name      string `json:"name,omitempty"`
 	PID       int    `json:"pid,omitempty"`
+	// Overrides the box's group for this session.
+	Group string `json:"group,omitempty"`
 	// endSession, assign
 	SessionID string `json:"sessionID,omitempty"`
 }
@@ -36,6 +38,9 @@ type SessionInfo struct {
 	AccountLabel string `json:"accountLabel"`
 	Model        string `json:"model,omitempty"`
 	Warning      string `json:"warning,omitempty"`
+	// The group the session is limited to. An agent too old to know about groups drops
+	// a requested one without a word, and leaving this empty is how that shows.
+	Group string `json:"group,omitempty"`
 }
 
 type Response struct {

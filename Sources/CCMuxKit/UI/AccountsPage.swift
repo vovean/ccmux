@@ -6,13 +6,32 @@ struct AccountsPage: View {
     @ObservedObject var nav: NavigationState
     @State private var showingAdd = false
     @State private var renaming: Account?
-    @State private var renameText = ""
+    /// The text in whichever name sheet is open; only one is at a time.
+    @State private var nameText = ""
     @State private var confirmingRemoval: Account?
     @State private var budgeting: Account?
     @State private var budgetText = ""
     @State private var budgetError: String?
+    /// The account a new group is being created for, from its Group menu.
+    @State private var groupingAccount: Account?
+    @State private var renamingGroup: SubscriptionGroup?
+    @State private var deletingGroup: SubscriptionGroup?
+
+    /// An account in a group not loaded yet is listed with the ungrouped ones rather than
+    /// vanishing from the page.
+    private var sections: (ungrouped: [Account], byGroup: [String: [Account]]) {
+        let known = Set(engine.groups.map(\.id))
+        let isListed = { (account: Account) in account.groupID.map(known.contains) ?? false }
+        return (engine.accounts.filter { !isListed($0) },
+                Dictionary(grouping: engine.accounts.filter(isListed),
+                           by: { $0.groupID ?? "" }))
+    }
 
     var body: some View {
+        dialogs(sheets(content))
+    }
+
+    private var content: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 if engine.accounts.isEmpty {
@@ -21,8 +40,12 @@ struct AccountsPage: View {
                                   + "is already using on this Mac.")
                 }
                 summarySection
-                ForEach(engine.accounts) { account in
+                let sections = sections
+                ForEach(sections.ungrouped) { account in
                     accountCard(account)
+                }
+                ForEach(engine.groups) { group in
+                    groupSection(group, accounts: sections.byGroup[group.id] ?? [])
                 }
             }
             .padding(14)
@@ -50,27 +73,182 @@ struct AccountsPage: View {
                 }
             }
         }
+    }
+
+    private func sheets<V: View>(_ view: V) -> some View {
+        view
         .sheet(isPresented: $showingAdd) {
             AddAccountSheet(engine: engine)
         }
         .sheet(item: $renaming) { account in
-            renameSheet(account)
+            nameSheet("Rename account", field: "Label", confirm: "Save", requiresName: false,
+                      dismiss: { renaming = nil }) { label in
+                engine.setLabel(label, for: account.id)
+            }
         }
         .sheet(item: $budgeting) { account in
             budgetSheet(account)
         }
+        .sheet(item: $groupingAccount) { account in
+            nameSheet("New group", note: "\(account.displayName) moves into it.",
+                      confirm: "Create", dismiss: { groupingAccount = nil }) { name in
+                Task { await engine.createGroup(named: name, adding: account.id) }
+            }
+        }
+        .sheet(item: $renamingGroup) { group in
+            nameSheet("Rename group", confirm: "Save",
+                      dismiss: { renamingGroup = nil }) { name in
+                Task { await engine.renameGroup(group.id, to: name) }
+            }
+        }
+    }
+
+    private func dialogs<V: View>(_ view: V) -> some View {
+        view
         .alert("Remove \(confirmingRemoval?.displayName ?? "")?",
                isPresented: Binding(get: { confirmingRemoval != nil },
                                     set: { if !$0 { confirmingRemoval = nil } })) {
-            Button("Remove", role: .destructive) {
-                if let account = confirmingRemoval { engine.removeAccount(account.id) }
-                confirmingRemoval = nil
+            if engine.isConnectedToServer {
+                Button("Remove from this Mac") { remove(everywhere: false) }
+                Button("Remove everywhere", role: .destructive) { remove(everywhere: true) }
+            } else {
+                Button("Remove", role: .destructive) { remove(everywhere: false) }
             }
             Button("Cancel", role: .cancel) { confirmingRemoval = nil }
         } message: {
-            Text("Its stored credential is deleted and any session using it ends. "
-                 + "The subscription itself is untouched.")
+            Text(removalMessage)
         }
+        .alert("Delete the group \(deletingGroup?.name ?? "")?",
+               isPresented: Binding(get: { deletingGroup != nil },
+                                    set: { if !$0 { deletingGroup = nil } })) {
+            Button("Delete group", role: .destructive) {
+                if let group = deletingGroup { Task { await engine.deleteGroup(group.id) } }
+                deletingGroup = nil
+            }
+            Button("Cancel", role: .cancel) { deletingGroup = nil }
+        } message: {
+            Text(Self.groupDeletionMessage)
+        }
+    }
+
+    private var removalMessage: String {
+        engine.isConnectedToServer ? Self.sharedRemovalMessage : Self.localRemovalMessage
+    }
+
+    private static let sharedRemovalMessage = "From this Mac only, it stays on the account "
+        + "server and other machines keep using it; sync will not bring it back here. "
+        + "Everywhere deletes it from the server, and every machine drops it. Sessions "
+        + "using it here end either way."
+    private static let localRemovalMessage = "Its stored credential is deleted and any "
+        + "session using it ends. The subscription itself is untouched."
+    private static let groupDeletionMessage = "Its accounts stay, ungrouped, on every "
+        + "machine. A machine limited to this group has nothing to choose from until it "
+        + "is given another."
+
+    private func remove(everywhere: Bool) {
+        if let account = confirmingRemoval {
+            Task { await engine.removeAccount(account.id, everywhere: everywhere) }
+        }
+        confirmingRemoval = nil
+    }
+
+    // MARK: - Groups
+
+    @ViewBuilder
+    private func groupSection(_ group: SubscriptionGroup, accounts: [Account]) -> some View {
+        let collapsed = engine.settings.collapsedAccountGroups.contains(group.id)
+        VStack(alignment: .leading, spacing: 10) {
+            groupHeader(group, accounts: accounts, collapsed: collapsed)
+            if !collapsed {
+                ForEach(accounts) { account in
+                    accountCard(account)
+                }
+                if accounts.isEmpty {
+                    Text("No accounts yet. Add one from its ••• menu, under Group.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 18)
+                }
+            }
+        }
+        .padding(.top, 6)
+    }
+
+    private func groupHeader(_ group: SubscriptionGroup, accounts: [Account],
+                             collapsed: Bool) -> some View {
+        HStack(spacing: 7) {
+            Button {
+                withAnimation(.easeOut(duration: 0.15)) {
+                    engine.setGroupCollapsed(group.id, !collapsed)
+                }
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(collapsed ? 0 : 90))
+                    Text(group.name).font(.subheadline.weight(.semibold))
+                    StatusPill(text: "\(accounts.count)", tint: .secondary)
+                    if engine.settings.restrictedGroupID == group.id {
+                        StatusPill(text: "this Mac", tint: .accentColor)
+                            .help("This Mac chooses accounts only from this group")
+                    }
+                    Text(groupCapacity(group.id))
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(group.name), \(accounts.count) accounts")
+            .accessibilityHint(collapsed ? "Shows this group's accounts"
+                                         : "Hides this group's accounts")
+            Spacer()
+            Menu {
+                Button("Rename group…") {
+                    nameText = group.name
+                    renamingGroup = group
+                }
+                Button("Delete group…", role: .destructive) { deletingGroup = group }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+        }
+    }
+
+    private func groupCapacity(_ groupID: String) -> String {
+        let summary = UsageSummaries.build(accounts: engine.accounts, usage: engine.usage,
+                                           group: groupID)
+        guard summary.contributorCount > 0 else { return "" }
+        return "\(summary.usableCount) of \(summary.contributorCount) can take a new session"
+    }
+
+    private func nameSheet(_ title: String, note: String? = nil, field: String = "Name",
+                           confirm: String, requiresName: Bool = true,
+                           dismiss: @escaping () -> Void,
+                           onConfirm: @escaping (String) -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title).font(.headline)
+            if let note {
+                Text(note).font(.caption).foregroundStyle(.secondary)
+            }
+            TextField(field, text: $nameText)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 260)
+            HStack {
+                Spacer()
+                Button("Cancel", action: dismiss)
+                Button(confirm) {
+                    onConfirm(nameText)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(requiresName && nameText.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(16)
     }
 
     /// The pooled picture across every account ccmux could pick.
@@ -90,7 +268,7 @@ struct AccountsPage: View {
     @ViewBuilder
     private func summaryCard(now: Date) -> some View {
         let summary = UsageSummaries.build(accounts: engine.accounts, usage: engine.usage,
-                                           now: now)
+                                           group: engine.settings.restrictedGroupID, now: now)
         // Gated on accounts that actually reported, not on eligible ones. A pool of one is
         // that account's own card repeated under a heading that claims to speak for
         // several — which reads as the whole fleet being exhausted when one thing is.
@@ -213,6 +391,11 @@ struct AccountsPage: View {
                     }
                     if !account.inRotation {
                         StatusPill(text: "out of rotation", tint: .secondary)
+                    }
+                    if let group = account.groupID, !engine.groups.contains(where: { $0.id == group }) {
+                        StatusPill(text: "group not loaded", tint: .secondary)
+                            .help("In a group this Mac has not loaded yet, so it is left "
+                                  + "to the machines limited to that group")
                     }
                     if sessionCount > 0 {
                         Button {
@@ -383,7 +566,7 @@ struct AccountsPage: View {
     private func accountMenu(_ account: Account) -> some View {
         Menu {
             Button("Rename…") {
-                renameText = account.label
+                nameText = account.label
                 renaming = account
             }
             if account.kind == .subscription {
@@ -392,6 +575,7 @@ struct AccountsPage: View {
             Toggle("In rotation", isOn: Binding(
                 get: { account.inRotation },
                 set: { engine.setInRotation($0, for: account.id) }))
+            groupMenu(account)
             if account.kind == .apiKey {
                 Button("Set monthly budget…") {
                     budgetText = account.monthlyBudgetUSD.map { String(format: "%.0f", $0) } ?? ""
@@ -410,23 +594,32 @@ struct AccountsPage: View {
         .fixedSize()
     }
 
-    private func renameSheet(_ account: Account) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Rename account").font(.headline)
-            TextField("Label", text: $renameText)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 260)
-            HStack {
-                Spacer()
-                Button("Cancel") { renaming = nil }
-                Button("Save") {
-                    engine.setLabel(renameText, for: account.id)
-                    renaming = nil
+    @ViewBuilder
+    private func groupMenu(_ account: Account) -> some View {
+        if engine.serverSupportsGroups {
+            let current = account.groupID
+            let shared = engine.sharesSettings(account.id)
+            Menu("Group") {
+                ForEach(engine.groups) { group in
+                    Toggle(group.name, isOn: Binding(
+                        get: { current == group.id },
+                        set: { on in
+                            Task { await engine.setGroup(on ? group.id : nil, for: account.id) }
+                        }))
                 }
-                .keyboardShortcut(.defaultAction)
+                if !engine.groups.isEmpty {
+                    Toggle("No group", isOn: Binding(
+                        get: { current == nil },
+                        set: { if $0 { Task { await engine.setGroup(nil, for: account.id) } } }))
+                    Divider()
+                }
+                Button("New group…") {
+                    nameText = ""
+                    groupingAccount = account
+                }
             }
+            .disabled(!shared)
         }
-        .padding(16)
     }
 
 }

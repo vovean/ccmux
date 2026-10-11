@@ -26,10 +26,11 @@ public final class ControlHandler {
         case .ping:
             return .ok
 
-        case .newSession(let policy, let cwd, let pid, let accountID):
+        case .newSession(let policy, let cwd, let pid, let accountID, let group):
             do {
                 return .session(try sessions.createSession(policyName: policy, cwd: cwd,
-                                                           pid: pid, accountID: accountID))
+                                                           pid: pid, accountID: accountID,
+                                                           group: group))
             } catch {
                 return .failure(error.localizedDescription)
             }
@@ -71,7 +72,9 @@ public final class ControlHandler {
                 return ControlAccountInfo(
                     id: account.id, label: account.displayName, email: account.email,
                     health: account.health.rawValue, windows: snapshot?.windows ?? [],
-                    usageAge: snapshot.map { now.timeIntervalSince($0.fetchedAt) })
+                    usageAge: snapshot.map { now.timeIntervalSince($0.fetchedAt) },
+                    groupName: store.groupName(account.groupID),
+                    inRotation: account.inRotation)
             }
             let sessionInfos = store.sessions.all().map { record in
                 ControlSessionInfo(
@@ -79,9 +82,14 @@ public final class ControlHandler {
                     port: record.port, accountID: record.accountID,
                     accountLabel: store.accounts.get(record.accountID)?.displayName
                         ?? record.accountID,
-                    policyName: record.policyName, pid: record.pid)
+                    policyName: record.policyName, pid: record.pid,
+                    groupName: store.groupName(record.groupID))
             }
-            return .status(ControlStatus(accounts: accounts, sessions: sessionInfos))
+            let restricted = store.currentSettings().restrictedGroupID
+            return .status(ControlStatus(
+                accounts: accounts, sessions: sessionInfos,
+                restrictedGroupName: store.groupName(restricted),
+                restrictedGroupMissing: restricted != nil && store.groupName(restricted) == nil))
         }
     }
 }

@@ -28,6 +28,7 @@ type Registry struct {
 	vault        *Vault
 	apiKeys      SecretStore
 	accountsFile string
+	groupsFile   string
 	startedAt    time.Time
 
 	// Held across snapshot-and-write so persisted state cannot go backwards. Never taken
@@ -43,6 +44,13 @@ type Registry struct {
 	lastTokenRequest map[string]time.Time
 	// A second opinion on whether an account is in use, supplied by the session store.
 	activity func(accountID string) bool
+	groups   map[string]SubscriptionGroup
+	// Set when the file exists but cannot be decoded. It is then refused rather than
+	// served or saved as empty: every client mirrors what it is told, so an empty answer
+	// would ungroup, or delete, the same thing on every machine.
+	groupsUnreadable   bool
+	accountsUnreadable bool
+	lastForcedPoll     map[string]time.Time
 }
 
 type pendingLogin struct {
@@ -69,26 +77,38 @@ const (
 // ErrRejected is a request the server refused: routed to 400 or 404, never an exit code.
 var ErrRejected = errors.New("rejected")
 
+var ErrNotFound = errors.New("not found")
+
 func rejected(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrRejected, fmt.Sprintf(format, args...))
 }
 
-// RejectionMessage strips the sentinel so the client sees the human half.
-func RejectionMessage(err error) string {
-	return strings.TrimPrefix(err.Error(), "rejected: ")
+func notFound(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", ErrNotFound, fmt.Sprintf(format, args...))
 }
 
+// RejectionMessage strips the sentinel so the client sees the human half.
+func RejectionMessage(err error) string {
+	message := strings.TrimPrefix(err.Error(), "rejected: ")
+	return strings.TrimPrefix(message, "not found: ")
+}
+
+// The groups file sits beside accounts.json and is owned by the registry too, so deleting
+// a group and clearing its members is one step under one lock.
 func NewRegistry(client *OAuthClient, secrets SecretStore, accountsFile string) *Registry {
 	return &Registry{
 		client:           client,
 		vault:            NewVault(client, NewPrefixedStore(secrets, "oauth:")),
 		apiKeys:          NewPrefixedStore(secrets, "apikey:"),
 		accountsFile:     accountsFile,
+		groupsFile:       filepath.Join(filepath.Dir(accountsFile), "groups.json"),
 		startedAt:        time.Now(),
 		accounts:         map[string]RemoteAccount{},
 		usage:            map[string]*UsageSnapshot{},
 		logins:           map[string]*pendingLogin{},
 		lastTokenRequest: map[string]time.Time{},
+		groups:           map[string]SubscriptionGroup{},
+		lastForcedPoll:   map[string]time.Time{},
 	}
 }
 
@@ -106,10 +126,12 @@ func (r *Registry) Bootstrap() {
 	// mean they accumulate rather than being reused. Swept here because startup is the
 	// one moment no save of ours is in flight.
 	sweepStaleTempFiles(r.accountsFile)
+	sweepStaleTempFiles(r.groupsFile)
 
-	stored := loadAccountsFile(r.accountsFile)
+	stored, readable := loadAccountsFile(r.accountsFile)
 	subscriptionIDs := []string{}
 	r.mu.Lock()
+	r.accountsUnreadable = !readable
 	for _, account := range stored {
 		r.accounts[account.ID] = account
 		if account.Kind == KindSubscription {
@@ -142,6 +164,7 @@ func (r *Registry) Bootstrap() {
 	count := len(r.accounts)
 	r.mu.Unlock()
 	logInfo("loaded %d account(s)", count)
+	r.loadGroups()
 }
 
 // WaitForRefreshes blocks until no refresh grant is in flight, or the deadline passes.
@@ -164,6 +187,20 @@ func (r *Registry) List() []RemoteAccount {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.listLocked()
+}
+
+var ErrAccountsUnavailable = errors.New("accounts.json could not be read; fix or restore " +
+	"it and restart ccmuxd")
+
+// Accounts is List for clients: refused while the file is unreadable, because a client
+// that mirrors an empty list drops every account it has.
+func (r *Registry) Accounts() ([]RemoteAccount, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.accountsUnreadable {
+		return nil, ErrAccountsUnavailable
+	}
+	return r.listLocked(), nil
 }
 
 func (r *Registry) listLocked() []RemoteAccount {
@@ -313,7 +350,21 @@ func (r *Registry) StartLogin(req LoginStartRequest) (LoginStartResponse, error)
 	}, nil
 }
 
+// writable refuses changes while accounts.json is unreadable: one made now would live in
+// memory only, and vanish from every client after the restart that fixes the file.
+func (r *Registry) writable() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.accountsUnreadable {
+		return ErrAccountsUnavailable
+	}
+	return nil
+}
+
 func (r *Registry) FinishLogin(ctx context.Context, req LoginFinishRequest) (RemoteAccount, error) {
+	if err := r.writable(); err != nil {
+		return RemoteAccount{}, err
+	}
 	r.mu.Lock()
 	r.pruneLoginsLocked()
 	pending, ok := r.logins[req.LoginID]
@@ -332,7 +383,13 @@ func (r *Registry) FinishLogin(ctx context.Context, req LoginFinishRequest) (Rem
 	if err != nil {
 		return RemoteAccount{}, rejected("%v", err)
 	}
-	return r.adoptCredential(ctx, credential, "")
+	// Only for a new account: a re-login would otherwise put this machine's possibly
+	// stale name over the shared one.
+	initial := initialSettings{}
+	if req.Label != nil {
+		initial.label = strings.TrimSpace(*req.Label)
+	}
+	return r.adoptCredential(ctx, credential, "", initial)
 }
 
 func (r *Registry) pruneLoginsLocked() {
@@ -344,13 +401,29 @@ func (r *Registry) pruneLoginsLocked() {
 	}
 }
 
+// Shared settings an adopt carries for an account the server does not have yet.
+type initialSettings struct {
+	label            string
+	inRotation       *bool
+	monthlyBudgetUSD *float64
+}
+
+func (s initialSettings) apply(account *RemoteAccount) {
+	account.InRotation = s.inRotation
+	account.MonthlyBudgetUSD = positiveOrNil(s.monthlyBudgetUSD)
+}
+
 func (r *Registry) Adopt(ctx context.Context, req AdoptRequest) (RemoteAccount, error) {
+	if err := r.writable(); err != nil {
+		return RemoteAccount{}, err
+	}
 	label := ""
 	if req.Label != nil {
 		label = *req.Label
 	}
+	initial := initialSettings{inRotation: req.InRotation, monthlyBudgetUSD: req.MonthlyBudgetUSD}
 	if req.APIKey != nil && *req.APIKey != "" {
-		return r.adoptAPIKey(ctx, *req.APIKey, label)
+		return r.adoptAPIKey(ctx, *req.APIKey, label, initial)
 	}
 	if req.CredentialJSON == nil {
 		return RemoteAccount{}, rejected("adopt needs either credentialJSON or apiKey")
@@ -359,11 +432,11 @@ func (r *Registry) Adopt(ctx context.Context, req AdoptRequest) (RemoteAccount, 
 	if !ok {
 		return RemoteAccount{}, rejected("adopt needs either credentialJSON or apiKey")
 	}
-	return r.adoptCredential(ctx, credential, label)
+	return r.adoptCredential(ctx, credential, label, initial)
 }
 
 func (r *Registry) adoptCredential(ctx context.Context, credential Credential,
-	label string) (RemoteAccount, error) {
+	label string, initial initialSettings) (RemoteAccount, error) {
 	identity, err := r.client.Profile(ctx, credential.AccessToken)
 	if err != nil {
 		return RemoteAccount{}, rejected("%v", err)
@@ -374,12 +447,16 @@ func (r *Registry) adoptCredential(ctx context.Context, credential Credential,
 	if !exists {
 		fallback := label
 		if fallback == "" {
+			fallback = initial.label
+		}
+		if fallback == "" {
 			fallback = identity.Email
 		}
 		if fallback == "" {
 			fallback = identity.UUID
 		}
 		account = RemoteAccount{ID: identity.UUID, Label: fallback}
+		initial.apply(&account)
 	}
 	if label != "" {
 		account.Label = label
@@ -422,7 +499,8 @@ func (r *Registry) adoptCredential(ctx context.Context, credential Credential,
 	return account, nil
 }
 
-func (r *Registry) adoptAPIKey(ctx context.Context, key, label string) (RemoteAccount, error) {
+func (r *Registry) adoptAPIKey(ctx context.Context, key, label string,
+	initial initialSettings) (RemoteAccount, error) {
 	if err := r.client.ValidateAPIKey(ctx, key); err != nil {
 		return RemoteAccount{}, rejected("%v", err)
 	}
@@ -451,6 +529,7 @@ func (r *Registry) adoptAPIKey(ctx context.Context, key, label string) (RemoteAc
 			name = "API key"
 		}
 		account = RemoteAccount{ID: id, Label: name}
+		initial.apply(&account)
 	}
 	if label != "" {
 		account.Label = label
@@ -471,16 +550,20 @@ func (r *Registry) adoptAPIKey(ctx context.Context, key, label string) (RemoteAc
 }
 
 func (r *Registry) Remove(accountID string) error {
+	if err := r.writable(); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	account, ok := r.accounts[accountID]
 	if ok {
 		delete(r.accounts, accountID)
 		delete(r.usage, accountID)
 		delete(r.lastTokenRequest, accountID)
+		delete(r.lastForcedPoll, accountID)
 	}
 	r.mu.Unlock()
 	if !ok {
-		return rejected("no account %s", accountID)
+		return notFound("no account %s", accountID)
 	}
 	if account.Kind == KindAPIKey {
 		_ = r.apiKeys.Delete(accountID)
@@ -514,7 +597,7 @@ func (r *Registry) pollDue(ctx context.Context) {
 	r.mu.Lock()
 	var due []string
 	for id, account := range r.accounts {
-		if account.Kind != KindSubscription || account.Health == HealthNeedsRelogin {
+		if !pollable(account) {
 			continue
 		}
 		snapshot, ok := r.usage[id]
@@ -527,6 +610,10 @@ func (r *Registry) pollDue(ctx context.Context) {
 	for _, id := range due {
 		r.poll(ctx, id)
 	}
+}
+
+func pollable(account RemoteAccount) bool {
+	return account.Kind == KindSubscription && account.Health != HealthNeedsRelogin
 }
 
 func (r *Registry) poll(ctx context.Context, accountID string) {
@@ -639,8 +726,16 @@ func (r *Registry) persist() {
 	defer r.persistMu.Unlock()
 	r.mu.Lock()
 	accounts := r.listLocked()
+	saveAccounts := !r.accountsUnreadable
+	saveGroups := !r.groupsUnreadable
+	groups := r.groupListLocked()
 	r.mu.Unlock()
-	saveAccountsFile(r.accountsFile, accounts)
+	if saveAccounts {
+		saveJSONFile(r.accountsFile, accounts)
+	}
+	if saveGroups {
+		saveJSONFile(r.groupsFile, groups)
+	}
 }
 
 var tempCounter atomic.Uint64
@@ -664,23 +759,27 @@ func sweepStaleTempFiles(path string) {
 	}
 }
 
-func loadAccountsFile(path string) []RemoteAccount {
+// Readable is false when the file exists but cannot be used, as opposed to there being
+// none yet.
+func loadAccountsFile(path string) (accounts []RemoteAccount, readable bool) {
 	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, true
+	}
+	if err == nil {
+		err = json.Unmarshal(raw, &accounts)
+	}
 	if err != nil {
-		return nil
+		logError("could not read %s, refusing to serve or overwrite it: %v", path, err)
+		return nil, false
 	}
-	var accounts []RemoteAccount
-	if err := json.Unmarshal(raw, &accounts); err != nil {
-		logWarn("could not decode %s: %v", path, err)
-		return nil
-	}
-	return accounts
+	return accounts, true
 }
 
-func saveAccountsFile(path string, accounts []RemoteAccount) {
-	encoded, err := json.MarshalIndent(accounts, "", "  ")
+func saveJSONFile(path string, value any) {
+	encoded, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
-		logError("could not encode accounts: %v", err)
+		logError("could not encode %s: %v", filepath.Base(path), err)
 		return
 	}
 	// Unique per call: two concurrent saves on one fixed temp path open the same file

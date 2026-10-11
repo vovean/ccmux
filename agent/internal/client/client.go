@@ -130,6 +130,14 @@ func (c *Client) Accounts(ctx context.Context) ([]wire.RemoteAccount, error) {
 	return out.Accounts, nil
 }
 
+func (c *Client) Groups(ctx context.Context) ([]wire.SubscriptionGroup, error) {
+	var out wire.GroupListResponse
+	if err := c.do(ctx, http.MethodGet, nil, &out, "groups"); err != nil {
+		return nil, err
+	}
+	return out.Groups, nil
+}
+
 func (c *Client) Usage(ctx context.Context, accountID string) (wire.RemoteUsage, error) {
 	var out wire.RemoteUsage
 	err := c.do(ctx, http.MethodGet, nil, &out, "accounts", accountID, "usage")

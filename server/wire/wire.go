@@ -33,8 +33,15 @@ const FeatureHooks = "hooks"
 const FeatureHookActivation = "hook-activation"
 const FeatureUsageSeries = "usage-series"
 
+// Subscription groups and the account settings every client shares: label, rotation,
+// budget and group membership.
+const FeatureGroups = "groups"
+
+// POST /accounts/{id}/usage/refresh: a poll on demand, floored per account.
+const FeatureUsageRefresh = "usage-refresh"
+
 var ServerFeatures = []string{FeatureSessions, FeatureHooks, FeatureHookActivation,
-	FeatureUsageSeries}
+	FeatureUsageSeries, FeatureGroups, FeatureUsageRefresh}
 
 // Time marshals as RFC 3339 with second precision.
 //
@@ -83,8 +90,8 @@ const (
 )
 
 // RemoteAccount is an account as the server describes it. Deliberately not the client's
-// own Account: that carries per-machine concerns (priority, Chrome profile, rotation,
-// spend) which have no business being centralised.
+// own Account: that carries per-machine concerns (priority, Chrome profile, spend) which
+// have no business being centralised.
 type RemoteAccount struct {
 	ID               string        `json:"id"`
 	Label            string        `json:"label"`
@@ -99,6 +106,19 @@ type RemoteAccount struct {
 	// SHA-256 of the API key. An API-key account's id is a locally generated UUID and so
 	// differs on every machine; this is the only thing that can match one across two.
 	APIKeyFingerprint *string `json:"apiKeyFingerprint,omitempty"`
+	// Shared settings, the same on every client. Nil InRotation means in rotation.
+	InRotation       *bool    `json:"inRotation,omitempty"`
+	MonthlyBudgetUSD *float64 `json:"monthlyBudgetUSD,omitempty"`
+	GroupID          *string  `json:"groupID,omitempty"`
+}
+
+func (a RemoteAccount) IsInRotation() bool { return a.InRotation == nil || *a.InRotation }
+
+func (a RemoteAccount) Group() string {
+	if a.GroupID == nil {
+		return ""
+	}
+	return *a.GroupID
 }
 
 func (a RemoteAccount) DisplayName() string {
@@ -172,15 +192,46 @@ type LoginFinishRequest struct {
 	LoginID string  `json:"loginID"`
 	Code    string  `json:"code"`
 	State   *string `json:"state,omitempty"`
+	// The name given at sign-in. Ignored when it is empty or the account already exists.
+	Label *string `json:"label,omitempty"`
 }
 
 // AdoptRequest is a client handing a credential it already holds up to the server. The
-// one direction in which a refresh token crosses the wire, which is why the client never
-// does it without being told to, account by account.
+// one direction in which a refresh token crosses the wire; the client then drops its own
+// copy, so the lineage still has a single holder.
 type AdoptRequest struct {
 	CredentialJSON *string `json:"credentialJSON,omitempty"`
 	APIKey         *string `json:"apiKey,omitempty"`
 	Label          *string `json:"label,omitempty"`
+	// Applied only when the adopt creates the account: a lineage re-attached to an
+	// existing one must not undo what other clients have set since.
+	InRotation       *bool    `json:"inRotation,omitempty"`
+	MonthlyBudgetUSD *float64 `json:"monthlyBudgetUSD,omitempty"`
+}
+
+// AccountUpdate changes shared settings. Absent fields are left alone; an empty GroupID
+// takes the account out of its group, and a budget of zero or less clears it.
+type AccountUpdate struct {
+	Label            *string  `json:"label,omitempty"`
+	InRotation       *bool    `json:"inRotation,omitempty"`
+	MonthlyBudgetUSD *float64 `json:"monthlyBudgetUSD,omitempty"`
+	GroupID          *string  `json:"groupID,omitempty"`
+}
+
+// SubscriptionGroup is a named set of accounts. Membership is RemoteAccount.GroupID, so
+// an account is in at most one group.
+type SubscriptionGroup struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type GroupListResponse struct {
+	APIVersion int                 `json:"apiVersion"`
+	Groups     []SubscriptionGroup `json:"groups"`
+}
+
+type GroupRequest struct {
+	Name string `json:"name"`
 }
 
 type AccountListResponse struct {

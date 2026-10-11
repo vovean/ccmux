@@ -1,0 +1,9 @@
+{
+  "apiVersion": 1,
+  "groups": [
+    {
+      "id": "group-1",
+      "name": "Project"
+    }
+  ]
+}

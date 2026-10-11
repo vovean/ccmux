@@ -154,6 +154,29 @@ struct LiveServerTests {
         _ = try await Self.client().accounts()
     }
 
+    /// Every group route, including the PATCH the client builds by hand. Cleans up after
+    /// itself: pointed at a real ccmuxd, a stray group would show on every Mac.
+    @Test func groupsRoundTrip() async throws {
+        let client = try Self.client()
+        let name = "live-test-\(UUID().uuidString.prefix(8))"
+        let created = try await client.createGroup(named: name)
+        do {
+            #expect(try await client.createGroup(named: name.uppercased()).id == created.id)
+            let renamed = try await client.renameGroup(created.id, to: name + "-renamed")
+            #expect(renamed.name == name + "-renamed")
+            #expect(try await client.groups().contains(renamed))
+            await #expect(throws: ServerClientError.self) {
+                _ = try await client.updateAccount("no-such-account",
+                                                   AccountUpdate(groupID: created.id))
+            }
+        } catch {
+            try? await client.deleteGroup(created.id)
+            throw error
+        }
+        try await client.deleteGroup(created.id)
+        #expect(try await !client.groups().contains { $0.id == created.id })
+    }
+
     /// A certificate outside the pin must fail loudly rather than silently re-trusting.
     @Test func aWrongPinIsRefused() async throws {
         let wrong = ServerClient(baseURL: try Self.baseURL(), username: "ccmux",

@@ -18,7 +18,7 @@ import (
 // The damage is not at write time. A corrupt accounts.json parses as nothing on the next
 // restart, the registry boots with zero accounts, every token request 404s, and the
 // client maps a 404 to a *permanent* failure — so every delegated account on every Mac is
-// flagged as needing a browser sign-in, and the next persist writes `[]` over the wreck.
+// flagged as needing a browser sign-in.
 func TestConcurrentPersistNeverCorruptsTheAccountsFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "accounts.json")
@@ -36,8 +36,8 @@ func TestConcurrentPersistNeverCorruptsTheAccountsFile(t *testing.T) {
 	for round := 0; round < 300; round++ {
 		var wg sync.WaitGroup
 		wg.Add(2)
-		go func() { defer wg.Done(); saveAccountsFile(path, big) }()
-		go func() { defer wg.Done(); saveAccountsFile(path, small) }()
+		go func() { defer wg.Done(); saveJSONFile(path, big) }()
+		go func() { defer wg.Done(); saveJSONFile(path, small) }()
 		wg.Wait()
 
 		raw, err := os.ReadFile(path)

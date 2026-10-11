@@ -116,6 +116,21 @@ func TestAnAccountIDIsEscapedIntoThePath(t *testing.T) {
 	}
 }
 
+func TestTheGroupsAreRead(t *testing.T) {
+	server, seen := serve(t, json200(wire.GroupListResponse{APIVersion: wire.APIVersion,
+		Groups: []wire.SubscriptionGroup{{ID: "g1", Name: "League"}}}))
+	groups, err := clientFor(t, server, pinOf(server)).Groups(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seen.path != "/v1/groups" {
+		t.Errorf("path %q", seen.path)
+	}
+	if len(groups) != 1 || groups[0].ID != "g1" || groups[0].Name != "League" {
+		t.Errorf("got %+v", groups)
+	}
+}
+
 func TestADeadLineageIsDistinctFromAnOutage(t *testing.T) {
 	server, _ := serve(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)

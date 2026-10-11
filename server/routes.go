@@ -76,11 +76,84 @@ func NewMux(registry *Registry, machines *MachineStore, hooks *HookStore,
 	}))
 
 	mux.Handle("GET "+apiPrefix+"/accounts", guard(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, AccountListResponse{
-			APIVersion: apiVersion,
-			Accounts:   registry.List(),
-		})
+		accounts, err := registry.Accounts()
+		if err != nil {
+			writeRegistryError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, AccountListResponse{APIVersion: apiVersion,
+			Accounts: accounts})
 	}))
+
+	mux.Handle("PATCH "+apiPrefix+"/accounts/{id}",
+		guard(func(w http.ResponseWriter, r *http.Request) {
+			var body AccountUpdate
+			if !decodeBody(w, r, &body) {
+				return
+			}
+			account, err := registry.UpdateAccount(r.PathValue("id"), body)
+			if err != nil {
+				writeRegistryError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, account)
+		}))
+
+	mux.Handle("POST "+apiPrefix+"/accounts/{id}/usage/refresh",
+		guard(func(w http.ResponseWriter, r *http.Request) {
+			id := r.PathValue("id")
+			usage, ok := registry.RefreshUsage(r.Context(), id)
+			if !ok {
+				writeError(w, http.StatusNotFound, "no usage recorded for "+id)
+				return
+			}
+			writeJSON(w, http.StatusOK, usage)
+		}))
+
+	mux.Handle("GET "+apiPrefix+"/groups", guard(func(w http.ResponseWriter, r *http.Request) {
+		groups, err := registry.Groups()
+		if err != nil {
+			writeRegistryError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, GroupListResponse{APIVersion: apiVersion, Groups: groups})
+	}))
+
+	mux.Handle("POST "+apiPrefix+"/groups", guard(func(w http.ResponseWriter, r *http.Request) {
+		var body GroupRequest
+		if !decodeBody(w, r, &body) {
+			return
+		}
+		group, err := registry.CreateGroup(body.Name)
+		if err != nil {
+			writeRegistryError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, group)
+	}))
+
+	mux.Handle("PATCH "+apiPrefix+"/groups/{id}",
+		guard(func(w http.ResponseWriter, r *http.Request) {
+			var body GroupRequest
+			if !decodeBody(w, r, &body) {
+				return
+			}
+			group, err := registry.RenameGroup(r.PathValue("id"), body.Name)
+			if err != nil {
+				writeRegistryError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, group)
+		}))
+
+	mux.Handle("DELETE "+apiPrefix+"/groups/{id}",
+		guard(func(w http.ResponseWriter, r *http.Request) {
+			if err := registry.DeleteGroup(r.PathValue("id")); err != nil {
+				writeRegistryError(w, err)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}))
 
 	mux.Handle("GET "+apiPrefix+"/accounts/{id}/token",
 		guard(func(w http.ResponseWriter, r *http.Request) {
@@ -126,7 +199,7 @@ func NewMux(registry *Registry, machines *MachineStore, hooks *HookStore,
 			}
 			account, err := registry.FinishLogin(r.Context(), body)
 			if err != nil {
-				writeError(w, http.StatusBadRequest, RejectionMessage(err))
+				writeRegistryError(w, err)
 				return
 			}
 			writeJSON(w, http.StatusOK, account)
@@ -140,7 +213,7 @@ func NewMux(registry *Registry, machines *MachineStore, hooks *HookStore,
 			}
 			account, err := registry.Adopt(r.Context(), body)
 			if err != nil {
-				writeError(w, http.StatusBadRequest, RejectionMessage(err))
+				writeRegistryError(w, err)
 				return
 			}
 			writeJSON(w, http.StatusOK, account)
@@ -149,11 +222,7 @@ func NewMux(registry *Registry, machines *MachineStore, hooks *HookStore,
 	mux.Handle("DELETE "+apiPrefix+"/accounts/{id}",
 		guard(func(w http.ResponseWriter, r *http.Request) {
 			if err := registry.Remove(r.PathValue("id")); err != nil {
-				status := http.StatusInternalServerError
-				if errors.Is(err, ErrRejected) {
-					status = http.StatusNotFound
-				}
-				writeError(w, status, RejectionMessage(err))
+				writeRegistryError(w, err)
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)
@@ -345,6 +414,19 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
 		logWarn("could not write response: %v", err)
 	}
+}
+
+func writeRegistryError(w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	switch {
+	case errors.Is(err, ErrNotFound):
+		status = http.StatusNotFound
+	case errors.Is(err, ErrRejected):
+		status = http.StatusBadRequest
+	case errors.Is(err, ErrGroupsUnavailable), errors.Is(err, ErrAccountsUnavailable):
+		status = http.StatusServiceUnavailable
+	}
+	writeError(w, status, RejectionMessage(err))
 }
 
 // The nested envelope is what the client parses; a flat {"error":"..."} decodes to

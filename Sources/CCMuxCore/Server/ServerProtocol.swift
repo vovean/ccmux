@@ -24,6 +24,11 @@ public enum ServerAPI {
     /// Per-minute token counts pooled across the fleet, and the stats route that reads
     /// them back.
     public static let usageSeriesFeature = "usage-series"
+    /// Subscription groups and the account settings every client shares: label, rotation,
+    /// budget and group membership.
+    public static let groupsFeature = "groups"
+    /// A poll on demand for an account the server holds, floored per account.
+    public static let usageRefreshFeature = "usage-refresh"
 
     /// How often a client re-reads what the server can do. Re-read rather than answered
     /// once, because the answer changes when ccmuxd is upgraded — and long, because that
@@ -32,8 +37,8 @@ public enum ServerAPI {
 }
 
 /// An account as the server describes it. Deliberately not `Account`: the client's record
-/// carries local concerns (priority, Chrome profile, rotation, spend) that are per-machine
-/// and have no business being centralised.
+/// carries local concerns (priority, Chrome profile, spend) that are per-machine and have
+/// no business being centralised.
 public struct RemoteAccount: Codable, Equatable, Identifiable, Sendable {
     public var id: String
     public var label: String
@@ -48,12 +53,18 @@ public struct RemoteAccount: Codable, Equatable, Identifiable, Sendable {
     /// SHA-256 of the API key. An API-key account's `id` is a locally generated UUID and
     /// so differs on every machine; this is the only thing that can match one across two.
     public var apiKeyFingerprint: String?
+    /// Shared settings, the same on every client. Nil `inRotation` means in rotation.
+    public var inRotation: Bool?
+    public var monthlyBudgetUSD: Double?
+    public var groupID: String?
 
     public init(id: String, label: String, email: String? = nil,
                 organizationUUID: String? = nil, organizationName: String? = nil,
                 subscriptionType: String? = nil, rateLimitTier: String? = nil,
                 kind: AccountKind = .subscription, health: AccountHealth = .unknown,
-                healthDetail: String? = nil, apiKeyFingerprint: String? = nil) {
+                healthDetail: String? = nil, apiKeyFingerprint: String? = nil,
+                inRotation: Bool? = nil, monthlyBudgetUSD: Double? = nil,
+                groupID: String? = nil) {
         self.id = id
         self.label = label
         self.email = email
@@ -65,9 +76,67 @@ public struct RemoteAccount: Codable, Equatable, Identifiable, Sendable {
         self.health = health
         self.healthDetail = healthDetail
         self.apiKeyFingerprint = apiKeyFingerprint
+        self.inRotation = inRotation
+        self.monthlyBudgetUSD = monthlyBudgetUSD
+        self.groupID = groupID
     }
 
     public var displayName: String { label.isEmpty ? (email ?? id) : label }
+}
+
+/// A named set of accounts. Membership is `RemoteAccount.groupID`, so an account is in at
+/// most one group.
+public struct SubscriptionGroup: Codable, Equatable, Hashable, Identifiable, Sendable {
+    public var id: String
+    public var name: String
+
+    public init(id: String, name: String) {
+        self.id = id
+        self.name = name
+    }
+}
+
+public struct GroupListResponse: Codable, Equatable, Sendable {
+    public var apiVersion: Int
+    public var groups: [SubscriptionGroup]
+
+    public init(apiVersion: Int = ServerAPI.version, groups: [SubscriptionGroup]) {
+        self.apiVersion = apiVersion
+        self.groups = groups
+    }
+}
+
+public struct GroupRequest: Codable, Equatable, Sendable {
+    public var name: String
+
+    public init(name: String) { self.name = name }
+}
+
+/// Shared settings to change. Absent fields are left alone; an empty `groupID` takes the
+/// account out of its group, and a budget of zero clears it.
+public struct AccountUpdate: Codable, Equatable, Sendable {
+    public var label: String?
+    public var inRotation: Bool?
+    public var monthlyBudgetUSD: Double?
+    public var groupID: String?
+
+    public init(label: String? = nil, inRotation: Bool? = nil,
+                monthlyBudgetUSD: Double? = nil, groupID: String? = nil) {
+        self.label = label
+        self.inRotation = inRotation
+        self.monthlyBudgetUSD = monthlyBudgetUSD
+        self.groupID = groupID
+    }
+
+    /// The server's own rules, for an account it does not hold.
+    public func apply(to account: inout Account) {
+        if let label { account.label = label.trimmingCharacters(in: .whitespacesAndNewlines) }
+        if let inRotation { account.inRotation = inRotation }
+        if let monthlyBudgetUSD {
+            account.monthlyBudgetUSD = monthlyBudgetUSD > 0 ? monthlyBudgetUSD : nil
+        }
+        if let groupID { account.groupID = groupID.isEmpty ? nil : groupID }
+    }
 }
 
 /// One access token, plus what Claude Code needs stamped into a seeded namespace.
@@ -181,29 +250,40 @@ public struct LoginFinishRequest: Codable, Equatable, Sendable {
     public var loginID: String
     public var code: String
     public var state: String?
+    /// The name given at sign-in. An older server ignores it and names the account by
+    /// email.
+    public var label: String?
 
-    public init(loginID: String, code: String, state: String? = nil) {
+    public init(loginID: String, code: String, state: String? = nil, label: String? = nil) {
         self.loginID = loginID
         self.code = code
         self.state = state
+        self.label = label
     }
 }
 
 // MARK: - Adopt
 
 /// A client handing a credential it already holds up to the server. The one direction in
-/// which a refresh token crosses the wire, which is why it is never automatic.
+/// which a refresh token crosses the wire; the client drops its own copy straight after,
+/// so the lineage still has a single holder.
 public struct AdoptRequest: Codable, Equatable, Sendable {
     /// `OAuthCredential.jsonString()` for a subscription.
     public var credentialJSON: String?
     /// The raw key for an API-key account.
     public var apiKey: String?
     public var label: String?
+    /// Applied only when the adopt creates the account on the server.
+    public var inRotation: Bool?
+    public var monthlyBudgetUSD: Double?
 
-    public init(credentialJSON: String? = nil, apiKey: String? = nil, label: String? = nil) {
+    public init(credentialJSON: String? = nil, apiKey: String? = nil, label: String? = nil,
+                inRotation: Bool? = nil, monthlyBudgetUSD: Double? = nil) {
         self.credentialJSON = credentialJSON
         self.apiKey = apiKey
         self.label = label
+        self.inRotation = inRotation
+        self.monthlyBudgetUSD = monthlyBudgetUSD
     }
 }
 

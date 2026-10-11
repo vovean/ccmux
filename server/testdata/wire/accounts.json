@@ -10,7 +10,9 @@
       "subscriptionType": "team",
       "rateLimitTier": "tier_x",
       "kind": "subscription",
-      "health": "ok"
+      "health": "ok",
+      "inRotation": false,
+      "groupID": "group-1"
     },
     {
       "id": "local-uuid",
@@ -18,7 +20,8 @@
       "kind": "apiKey",
       "health": "needsRelogin",
       "healthDetail": "no credential on the server",
-      "apiKeyFingerprint": "6de5c6335d27378ef3ee3000e7fe75e5907c525ab60ac1ed56dca4729561f2b3"
+      "apiKeyFingerprint": "6de5c6335d27378ef3ee3000e7fe75e5907c525ab60ac1ed56dca4729561f2b3",
+      "monthlyBudgetUSD": 25.5
     }
   ]
 }

@@ -22,11 +22,14 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
     /// Dollars this session has spent on API-key accounts. Subscription requests are
     /// prepaid, so they never add to it — a number here always means real money.
     public var spendUSD: Double
+    /// The group named at launch with `--group`. Nil follows this Mac's setting, live,
+    /// so changing it in Settings changes where every other session may move.
+    public var groupID: String?
 
     public init(id: String, pid: Int32, port: UInt16, accountID: String,
                 policyName: String, cwd: String, startedAt: Date = Date(),
                 autoSwitchOverride: Bool? = nil, spendUSD: Double = 0,
-                seededAccountID: String? = nil) {
+                seededAccountID: String? = nil, groupID: String? = nil) {
         self.id = id
         self.pid = pid
         self.port = port
@@ -37,6 +40,7 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
         self.startedAt = startedAt
         self.autoSwitchOverride = autoSwitchOverride
         self.spendUSD = spendUSD
+        self.groupID = groupID
     }
 
     /// Hand-written so a sessions file written before `spendUSD` existed still decodes;
@@ -56,12 +60,18 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
         startedAt = try c.decodeIfPresent(Date.self, forKey: .startedAt) ?? Date()
         autoSwitchOverride = try c.decodeIfPresent(Bool.self, forKey: .autoSwitchOverride)
         spendUSD = try c.decodeIfPresent(Double.self, forKey: .spendUSD) ?? 0
+        groupID = try c.decodeIfPresent(String.self, forKey: .groupID)
     }
 
     public var namespaceDir: URL { Paths.namespace(id) }
 
     public func autoSwitchEnabled(default globalDefault: Bool) -> Bool {
         autoSwitchOverride ?? globalDefault
+    }
+
+    public mutating func renumberAccount(from oldID: String, to newID: String) {
+        if accountID == oldID { accountID = newID }
+        if seededAccountID == oldID { seededAccountID = newID }
     }
 }
 

@@ -30,7 +30,10 @@ public extension Engine {
                     loginHint: String? = nil, chromeProfileDirectory: String? = nil) async {
         cancelLogin()
 
-        let delegated = accountID.map { settings.delegated.contains($0) } ?? false
+        // A new account signs in through the server whenever there is one, so its refresh
+        // token is born there and the upload sync would otherwise do never happens.
+        let throughServer = accountID.map { settings.delegated.contains($0) }
+            ?? (serverClient != nil)
         let listener: LoopbackListener
         do {
             listener = try LoopbackListener()
@@ -50,10 +53,10 @@ public extension Engine {
         var context = LoginContext(port: listener.port, state: "",
                                    chromeProfileDirectory: chromeProfileDirectory,
                                    loginHint: loginHint, label: label,
-                                   accountID: accountID, throughServer: delegated)
-        let authorizeURL: String
+                                   accountID: accountID, throughServer: throughServer)
+        var authorizeURL = ""
 
-        if delegated {
+        if context.throughServer {
             guard let client = serverClient else {
                 listener.stop()
                 banner = Banner(level: .warning,
@@ -77,12 +80,18 @@ public extension Engine {
                 context.loginID = started.loginID
                 context.state = started.state
                 authorizeURL = started.authorizeURL
+            } catch where accountID == nil && loginGeneration == generation {
+                // A new account can still be signed in here; the next sync uploads it.
+                Log.warn("relayed sign-in unavailable, signing in locally: "
+                    + error.localizedDescription)
+                context.throughServer = false
             } catch {
                 if loginGeneration == generation { cancelLogin() } else { listener.stop() }
                 banner = Banner(level: .warning, text: error.localizedDescription)
                 return
             }
-        } else {
+        }
+        if !context.throughServer {
             let pkce = OAuthClient.PKCE()
             context.pkce = pkce
             context.state = pkce.state
@@ -93,7 +102,8 @@ public extension Engine {
         loginContext = context
         loginAttempt = LoginAttempt(id: generation,
                                     target: target(for: accountID, label: label),
-                                    authorizeURL: authorizeURL, throughServer: delegated)
+                                    authorizeURL: authorizeURL,
+                                    throughServer: context.throughServer)
         // 6: a browser that never opened must not look like one that did. When Chrome is
         // missing the launcher puts the URL on the clipboard, and saying so is the
         // difference between a 15-minute wait and a paste.
@@ -165,10 +175,17 @@ public extension Engine {
                     return
                 }
                 let account = try await client.finishLogin(
-                    LoginFinishRequest(loginID: loginID, code: code, state: state))
-                var delegated = settings.delegated
-                _ = await importAccount(account, client: client, delegated: &delegated)
-                commitDelegation(delegated, client: client)
+                    LoginFinishRequest(loginID: loginID, code: code, state: state,
+                                       label: context.label))
+                guard await importAccount(account, client: client) else {
+                    report(.failed("Signed in on the account server, but it has not handed "
+                                   + "out a token yet. The account appears here with the "
+                                   + "next sync."), generation)
+                    return
+                }
+                if let profile = context.chromeProfileDirectory {
+                    setChromeProfile(profile, for: account.id)
+                }
                 name = account.displayName
             } else {
                 guard let pkce = context.pkce else {
@@ -183,6 +200,7 @@ public extension Engine {
                     chromeProfileDirectory: context.chromeProfileDirectory,
                     label: context.label)
                 name = account.displayName
+                Task { await syncAccounts() }
             }
             report(.succeeded(name), generation)
             banner = Banner(level: .info, text: "Signed in as \(name).")

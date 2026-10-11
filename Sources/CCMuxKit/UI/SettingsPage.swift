@@ -16,6 +16,7 @@ struct SettingsPage: View {
                 limitWindows
                 signInBrowser
                 ServerSection(engine: engine)
+                groupRestriction
                 upstreamProxySection
                 policies
                 directoryBindings
@@ -339,6 +340,52 @@ struct SettingsPage: View {
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    // MARK: - Groups
+
+    @ViewBuilder
+    private var groupRestriction: some View {
+        if engine.isConnectedToServer && engine.serverSupportsGroups {
+            section("Subscription group") {
+                Toggle("Use only one group on this Mac", isOn: Binding(
+                    get: { engine.settings.restrictedGroupID != nil },
+                    set: { on in engine.restrictToGroup(on ? engine.groups.first?.id : nil) }))
+                    .disabled(engine.groups.isEmpty && engine.settings.restrictedGroupID == nil)
+                if let restricted = engine.settings.restrictedGroupID {
+                    Picker("Group", selection: Binding(
+                        get: { restricted },
+                        set: { engine.restrictToGroup($0) })) {
+                        ForEach(engine.groups) { group in
+                            Text(group.name).tag(group.id)
+                        }
+                        if !engine.groups.contains(where: { $0.id == restricted }) {
+                            Text("deleted group").tag(restricted)
+                        }
+                    }
+                    .frame(width: 260)
+                }
+                Text(groupRestrictionNote)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var groupRestrictionNote: String {
+        if engine.groups.isEmpty {
+            return "No groups yet. Create one from an account's ••• menu on the Accounts "
+                + "page, under Group."
+        }
+        let launch = " A launch can name another with `ccmux run --group <name>`, and an "
+            + "account picked by hand is always used."
+        guard engine.settings.restrictedGroupID != nil else {
+            return "This Mac chooses only accounts in no group; grouped ones are left to "
+                + "the machines limited to their group." + launch
+        }
+        return "ccmux chooses only this group's accounts here, and waits for their reset "
+            + "rather than using others." + launch
     }
 
     private func section<Content: View>(_ title: String,

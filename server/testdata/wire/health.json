@@ -6,7 +6,9 @@
     "sessions",
     "hooks",
     "hook-activation",
-    "usage-series"
+    "usage-series",
+    "groups",
+    "usage-refresh"
   ],
   "machines": 2
 }

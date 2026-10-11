@@ -313,14 +313,34 @@ Anthropic. Standard library only, ~7 MB static binary, idles at 25 MB of RAM.
         --binary ./ccmuxd-linux-amd64 --dns ccmux.example.com --ip 203.0.113.10'
 
 Then Settings → Account server on each Mac. ccmux shows you the certificate to confirm
-before it sends anything, and pins it from then on. Accounts the server already has are
-handed over; accounts only this Mac has are offered one checkbox at a time, because pushing
-one uploads its refresh token.
+before it sends anything, and pins it from then on. From then on accounts sync on their
+own, every minute: one added on any Mac appears on all of them, an account only this Mac
+has is uploaded, and one the server already has is handed over. Its name, whether it is in
+rotation, an API key's monthly budget and its group are shared too — change them on one
+Mac and every other follows. **Sync now** in Settings does a round at once.
 
-Signing in again still happens in the browser here — the server is headless — but the PKCE
-verifier and the code exchange are the server's, so the refresh token is born there. The
-redirect stays on this Mac's loopback, which is why none of it needs Anthropic to accept a
-public redirect URI.
+Removing an account asks which you mean: **from this Mac** (it stays on the server, and
+sync leaves it off this Mac until you bring it back from Settings) or **everywhere** (it is
+deleted on the server, and every machine drops it).
+
+Signing in happens in the browser here — the server is headless — but while a server is
+connected the PKCE verifier and the code exchange are the server's, so the refresh token is
+born there and never touches this Mac. The redirect stays on this Mac's loopback, which is
+why none of it needs Anthropic to accept a public redirect URI.
+
+### Subscription groups
+
+A group reserves accounts for the machines that ask for it — say, a few subscriptions for
+a project an agent works on around the clock, so it cannot use up the limits your other
+work needs. Put an account in a group from its ••• menu (Group → New group… creates one
+and moves it in); groups live on the server, so every machine sees the same ones.
+
+Each machine chooses from one pool. Settings → Subscription group limits this Mac to a
+group; with no group set, it chooses only accounts in **no** group. `ccmux run --group
+<name>` picks a group for one session instead, and that session stays in it when it
+switches accounts. When a group is spent, its sessions wait for the group's own reset
+rather than reaching outside it. An account you pick by hand, or with `--account`, is
+used wherever it is. On a Linux box the same thing is `group:` in agent.yaml.
 
 It also pools usage. Every Mac posts the minutes it has closed to
 `/v1/machines/<id>/usage`, and ccmuxd keeps them in an append-only log under

@@ -60,11 +60,11 @@ enum UsageSummaries {
     /// the one number this section exists to give. API keys are left out entirely — their
     /// windows are per-minute ceilings that refill continuously, so pooling them with
     /// quota that takes a week to come back would be meaningless.
+    /// `group` is the pool being summarised, with the same meaning as for a launch.
     static func build(accounts: [Account], usage: [String: UsageSnapshot],
-                      now: Date = Date()) -> UsageSummary {
-        let eligible = accounts.filter {
-            $0.isAutoAssignable && $0.health != .needsRelogin
-        }
+                      group: String? = nil, now: Date = Date()) -> UsageSummary {
+        let eligible = AccountPool.automatic(accounts, group: group)
+            .filter { $0.health != .needsRelogin }
 
         var grouped: [String: [(window: UsageWindow, account: Account)]] = [:]
         var contributors: Set<String> = []

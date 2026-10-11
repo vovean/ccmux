@@ -59,7 +59,7 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
     private var _active = 0
     private let username: String
     private let password: String
-    private let pinnedFingerprint: String
+    let pinnedFingerprint: String
     private let pin: PinnedTrust
     private let session: URLSession
     private let trace: ServerTrace?
@@ -253,6 +253,45 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
         try await post(["accounts", "adopt"], body)
     }
 
+    // MARK: - Shared account settings and groups
+    //
+    // Called only once the server advertises the feature, so a 404 here is a real answer
+    // (no such account or group) rather than a missing route.
+
+    public func deleteAccount(_ accountID: String) async throws {
+        try await delete(["accounts", accountID])
+    }
+
+    public func updateAccount(_ accountID: String,
+                              _ update: AccountUpdate) async throws -> RemoteAccount {
+        try await patch(["accounts", accountID], update)
+    }
+
+    public func refreshUsage(for accountID: String) async throws -> RemoteUsage {
+        try await post(["accounts", accountID, "usage", "refresh"], EmptyBody())
+    }
+
+    public func groups() async throws -> [SubscriptionGroup] {
+        let response: GroupListResponse = try await get(["groups"])
+        guard response.apiVersion == ServerAPI.version else {
+            throw ServerClientError.incompatible(response.apiVersion)
+        }
+        return response.groups
+    }
+
+    public func createGroup(named name: String) async throws -> SubscriptionGroup {
+        try await post(["groups"], GroupRequest(name: name))
+    }
+
+    public func renameGroup(_ groupID: String, to name: String) async throws
+        -> SubscriptionGroup {
+        try await patch(["groups", groupID], GroupRequest(name: name))
+    }
+
+    public func deleteGroup(_ groupID: String) async throws {
+        try await delete(["groups", groupID])
+    }
+
     // MARK: - Hooks
 
     /// The hook set this Mac should be running.
@@ -390,6 +429,8 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
         return response
     }
 
+    private struct EmptyBody: Encodable {}
+
     // MARK: - Transport
 
     /// Built one component at a time and left to Foundation to encode. Escaping them by
@@ -415,6 +456,12 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
                                                            _ body: Body) async throws
         -> Response {
         try await send(path, method: "PUT", body: try JSONStore.encoder.encode(body))
+    }
+
+    private func patch<Body: Encodable, Response: Decodable>(_ path: [String],
+                                                             _ body: Body) async throws
+        -> Response {
+        try await send(path, method: "PATCH", body: try JSONStore.encoder.encode(body))
     }
 
     private func delete(_ path: [String]) async throws {

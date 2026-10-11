@@ -16,7 +16,6 @@ struct ServerSection: View {
     /// it here rather than in settings is what makes confirmation mandatory.
     @State private var pendingFingerprint: String?
     @State private var failure: String?
-    @State private var pushSelection: Set<String> = []
     @State private var machineLabel = ""
 
     var body: some View {
@@ -161,27 +160,45 @@ struct ServerSection: View {
             .font(.caption2)
             .foregroundStyle(.tertiary)
 
-        let delegated = engine.settings.delegatedAccountIDs.count
-        if delegated > 0 {
-            Text("\(delegated) account(s) delegated — this Mac holds no refresh token for "
-                 + "them and asks the server for tokens.")
+        TimelineView(.periodic(from: .now, by: 30)) { _ in
+            Text(syncLine)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
 
-        if let plan = engine.delegationPlan, !plan.isEmpty {
-            planView(plan)
+        let hidden = engine.settings.hiddenAccountIDs.count
+        if hidden > 0 {
+            HStack(spacing: 8) {
+                Text("\(hidden) account(s) removed from this Mac only.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Bring back") { Task { await engine.restoreHiddenAccounts() } }
+                    .font(.caption)
+                    .buttonStyle(.link)
+            }
         }
 
         sessionSharing
 
         HStack(spacing: 8) {
-            Button("Check for changes") { Task { await engine.refreshDelegationPlan() } }
-                .disabled(engine.serverBusy)
+            Button(engine.serverBusy ? "Syncing…" : "Sync now") {
+                Task { await engine.syncAccounts(manual: true) }
+            }
+            .disabled(engine.serverBusy)
             Button("Disconnect") { engine.disconnectServer() }
             Spacer()
         }
+    }
+
+    private var syncLine: String {
+        let delegated = engine.settings.delegatedAccountIDs.count
+        var line = "Accounts sync with the server every minute: new ones here are "
+            + "uploaded, new ones there are added. \(delegated) held by the server."
+        if let last = engine.lastAccountSync {
+            line += " Last synced \(Format.clock(last))."
+        }
+        return line
     }
 
     // MARK: - Sessions across machines
@@ -303,70 +320,6 @@ struct ServerSection: View {
         guard canSaveMachineLabel else { return }
         engine.setMachineLabel(machineLabel)
         machineLabel = engine.machineIdentity.label
-    }
-
-    @ViewBuilder
-    private func planView(_ plan: Delegation.Plan) -> some View {
-        Divider()
-        let taking = plan.entries(.delegate)
-        let importing = plan.entries(.importable)
-        let pushable = plan.entries(.pushCandidate)
-        let stranded = plan.entries(.serverNeedsRelogin)
-
-        VStack(alignment: .leading, spacing: 6) {
-            if !taking.isEmpty {
-                row("Hand over to the server", taking.map(\.displayName),
-                    "The server already has these. This Mac stops refreshing them.")
-            }
-            if !importing.isEmpty {
-                row("Import from the server", importing.map(\.displayName),
-                    "Not on this Mac yet.")
-            }
-            if !stranded.isEmpty {
-                row("The server needs signing in again for these",
-                    stranded.map(\.displayName),
-                    "Left alone — handing over to a dead lineage would trade a working "
-                        + "credential for a broken one. Sign them in from any connected Mac.")
-            }
-            if !pushable.isEmpty {
-                Text("Not on the server yet").font(.caption.weight(.semibold))
-                ForEach(pushable) { entry in
-                    Toggle(isOn: Binding(
-                        get: { pushSelection.contains(entry.id) },
-                        set: { on in
-                            if on { pushSelection.insert(entry.id) }
-                            else { pushSelection.remove(entry.id) }
-                        })) {
-                            Text(entry.displayName).font(.caption)
-                        }
-                        .toggleStyle(.checkbox)
-                }
-                // Pushing is the one direction a refresh token travels, so it is opt-in
-                // per account rather than a default.
-                Text("Pushing uploads that account's refresh token to the server.")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-
-            Button(engine.serverBusy ? "Working…" : "Apply") {
-                Task {
-                    await engine.applyDelegation(pushing: pushSelection)
-                    pushSelection = []
-                }
-            }
-            .disabled(engine.serverBusy)
-        }
-    }
-
-    private func row(_ title: String, _ names: [String], _ note: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title).font(.caption.weight(.semibold))
-            Text(names.joined(separator: ", "))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Text(note).font(.caption2).foregroundStyle(.tertiary)
-        }
     }
 
     // MARK: - Actions

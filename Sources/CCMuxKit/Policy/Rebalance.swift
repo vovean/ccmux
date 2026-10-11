@@ -56,9 +56,10 @@ public enum Rebalance {
     public static func plan(sessions: [SessionRecord], accounts: [Account],
                             usage: [String: UsageSnapshot], settings: Settings,
                             live: [Int32: ClaudeSessionInfo], scope: Scope) -> Plan {
-        let assignable = accounts.filter(\.isAutoAssignable)
         var plan = Plan()
         for record in sessions {
+            let assignable = AccountPool.automatic(
+                accounts, group: AccountPool.scope(of: record, settings: settings))
             switch decide(record, assignable: assignable,
                           current: accounts.first { $0.id == record.accountID },
                           usage: usage, settings: settings,

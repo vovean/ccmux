@@ -20,10 +20,15 @@ public final class Engine: ObservableObject {
     /// The sign-in the login modal is showing, if any. Non-nil from the moment the browser
     /// opens until the user dismisses the result.
     @Published public internal(set) var loginAttempt: LoginAttempt?
-    /// What connecting to a ccmuxd would mean for the accounts already on this Mac.
-    /// Non-nil only while the connect sheet is deciding.
-    @Published public internal(set) var delegationPlan: Delegation.Plan?
     @Published public internal(set) var serverBusy = false
+    /// Whether the server shares groups and account settings, and polls usage on demand.
+    @Published public internal(set) var serverSupportsGroups = false
+    @Published public internal(set) var serverSupportsUsageRefresh = false
+    /// Not published: a background round must not redraw the window; Settings re-reads
+    /// it on its own clock.
+    public internal(set) var lastAccountSync: Date?
+    var serverFeaturesKnown = false
+    @Published public private(set) var groups: [SubscriptionGroup] = []
     /// Sessions running on other Macs. In memory only — they are another machine's truth,
     /// and a copy of it restored from disk at launch would be a list of sessions that may
     /// well have ended hours ago.
@@ -85,6 +90,15 @@ public final class Engine: ObservableObject {
     var apiKeyFingerprints = APIKeyFingerprintCache()
     /// One session report in flight at a time.
     var syncingSessions = false
+    var syncingAccounts = false
+    var accountSyncFailing = false
+    /// Accounts whose sync problem has been logged, so a minute-by-minute retry does not
+    /// write the same line sixty times an hour.
+    var loggedSyncProblems: Set<String> = []
+    /// When a failed upload may be tried again. Each attempt costs the server a call to
+    /// Anthropic, and one that failed once usually fails the same way next minute.
+    var uploadRetryAt: [String: Date] = [:]
+    var warnedHeldBackRemovals = false
     /// Everything needed to redeem a code, retry the browser, or abandon the attempt.
     var loginContext: LoginContext?
     var loginListener: LoopbackListener?
@@ -217,6 +231,9 @@ public final class Engine: ObservableObject {
         Task { await checkNotificationAuthorization() }
         startControlServer()
         scheduleTimers()
+        // Apart from the chain below: a first sync uploads and hands over account by
+        // account, and usage and sessions should not wait on it.
+        Task { await syncAccounts() }
         Task {
             await refreshExpiringTokens()
             // Not `force`: that stamps the manual-refresh floor and would make the
@@ -296,6 +313,9 @@ public final class Engine: ObservableObject {
             }
         })
         timers.append(Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            // Its own task: an upload waits on the server's profile call, which must not
+            // hold up the hooks behind it.
+            Task { @MainActor in await self?.syncAccounts() }
             Task { @MainActor in
                 self?.refreshChromeProfiles()
                 // A minute, not the 20s housekeeping tick: a hook set changes when
@@ -317,6 +337,8 @@ public final class Engine: ObservableObject {
                 == .orderedAscending
         }
         if accounts != freshAccounts { accounts = freshAccounts }
+        let freshGroups = store.groups.all()
+        if groups != freshGroups { groups = freshGroups }
 
         let freshUsage = store.allUsage()
         if usage != freshUsage { usage = freshUsage }
@@ -423,7 +445,9 @@ public final class Engine: ObservableObject {
         switch result {
         case .success(let windows):
             snapshot = UsageSnapshot.folding(windows, into: previous, observedAt: fetchedAt)
-            markHealthy(accountID)
+            // A delegated account's health is the server's, and its cached usage outlives
+            // a dead lineage there; marking it healthy here would flip it every poll.
+            if !settings.delegated.contains(accountID) { markHealthy(accountID) }
         case .failure(let error):
             snapshot = UsageSnapshot(windows: previous?.windows ?? [],
                                      fetchedAt: previous?.fetchedAt ?? .distantPast,
@@ -469,6 +493,7 @@ public final class Engine: ObservableObject {
 
     public func refreshNow() {
         Task { await pollDueAccounts(force: true) }
+        Task { await pollDelegatedUsage(force: true) }
     }
 
     private func refreshExpiringTokens() async {
@@ -599,13 +624,12 @@ public final class Engine: ObservableObject {
     /// account qualifies here: an inferred block must not fire on an account that is
     /// merely low. The model is unknown at rest, so any success clears it.
     private func restoreBlocks() {
-        let accounts = store.accounts.all()
         let usage = store.allUsage()
         for record in store.sessions.all() {
             guard !ModelRouting.canServe(nil, usage: usage[record.accountID]) else { continue }
             let movable = record.autoSwitchEnabled(default: settings.autoSwitch != .off)
             if movable {
-                let elsewhere = PolicyEngine.pick(accounts: accounts.filter(\.isAutoAssignable),
+                let elsewhere = PolicyEngine.pick(accounts: store.automaticPool(for: record),
                                                   usage: usage,
                                                   policy: PolicyEngine.everyWindow,
                                                   excluding: [record.accountID])
@@ -781,7 +805,7 @@ public final class Engine: ObservableObject {
     /// Shows a transient message without burying a blocked-session warning. A banner
     /// with no source replacing one that has a source leaves `retractBanner` unable to
     /// bring it back, so the blocked session goes unannounced until its next refusal.
-    private func raise(_ text: String, level: Banner.Level,
+    func raise(_ text: String, level: Banner.Level,
                        action: Banner.Action? = nil) {
         guard let stuck = blocks.all.first else {
             banner = Banner(level: level, text: text, action: action)
@@ -914,6 +938,7 @@ public final class Engine: ObservableObject {
             let account = try await adopt(credential: credential,
                                           chromeProfileDirectory: nil, label: nil)
             banner = Banner(level: .info, text: "Signed in as \(account.displayName).")
+            Task { await syncAccounts() }
             return nil
         } catch {
             let message = "Signed in, but could not read the account: "
@@ -1051,6 +1076,7 @@ public final class Engine: ObservableObject {
                             text: "Added \(account.displayName) · \(models.count) models "
                                 + "reachable. Assign a session to it from the Sessions "
                                 + "screen — API keys are never picked automatically.")
+            Task { await syncAccounts() }
             return true
         } catch {
             banner = Banner(level: .warning,
@@ -1131,13 +1157,12 @@ public final class Engine: ObservableObject {
     }
 
     public func setInRotation(_ inRotation: Bool, for accountID: String) {
-        store.accounts.mutate(accountID) { $0.inRotation = inRotation }
+        Task { await updateShared(accountID, AccountUpdate(inRotation: inRotation)) }
     }
 
+    /// Nil clears it, which the server is told as zero.
     public func setMonthlyBudget(_ budgetUSD: Double?, for accountID: String) {
-        store.accounts.mutate(accountID) {
-            $0.monthlyBudgetUSD = (budgetUSD ?? 0) > 0 ? budgetUSD : nil
-        }
+        Task { await updateShared(accountID, AccountUpdate(monthlyBudgetUSD: budgetUSD ?? 0)) }
     }
 
     /// What the live sessions on this account have spent, which is not the same as what
@@ -1146,31 +1171,8 @@ public final class Engine: ObservableObject {
         sessions.filter { $0.accountID == accountID }.reduce(0) { $0 + $1.spendUSD }
     }
 
-    public func removeAccount(_ accountID: String) {
-        // Seeded as well as served: a session rotated across organisations still holds
-        // this account's credential, and once the lineage is forgotten nothing refreshes
-        // it and nothing can re-seed it either.
-        let affected = Set((store.sessions(forAccount: accountID)
-                            + store.sessions(seededBy: accountID)).map(\.id))
-        for id in affected {
-            sessionManager.endSession(id)
-        }
-        vault.forget(accountID)
-        // Leaving the key behind would keep a working credential in the Keychain for an
-        // account the user believes they deleted.
-        try? APIKeyStore.delete(accountID)
-        // Leaving it delegated would route a later re-added account to the server, whose
-        // 404 is transient by design — so the fresh local lineage would never be refreshed
-        // and the account would quietly stop working when its access token expired.
-        if settings.delegated.contains(accountID) {
-            updateSettings { $0.delegatedAccountIDs.removeAll { $0 == accountID } }
-            applyRemoteToVault()
-        }
-        store.removeAccount(accountID)
-    }
-
     public func setLabel(_ label: String, for accountID: String) {
-        store.accounts.mutate(accountID) { $0.label = label }
+        Task { await updateShared(accountID, AccountUpdate(label: label)) }
     }
 
     public func setChromeProfile(_ directory: String?, for accountID: String) {

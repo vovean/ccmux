@@ -51,6 +51,8 @@ struct ServerWireCompatibilityTests {
         #expect(subscription.rateLimitTier == "tier_x")
         #expect(subscription.kind == .subscription)
         #expect(subscription.health == .ok)
+        #expect(subscription.inRotation == false)
+        #expect(subscription.groupID == "group-1")
 
         let key = response.accounts[1]
         #expect(key.kind == .apiKey)
@@ -58,6 +60,20 @@ struct ServerWireCompatibilityTests {
         #expect(key.healthDetail == "no credential on the server")
         // The only thing that can match a key account across two machines.
         #expect(key.apiKeyFingerprint == "sk-ant-fixture".apiKeyFingerprint)
+        #expect(key.monthlyBudgetUSD == 25.5)
+        #expect(key.inRotation == nil)
+    }
+
+    @Test func theGroupListDecodes() throws {
+        let response = try Self.decode(GroupListResponse.self, "groups.json")
+        #expect(response.apiVersion == ServerAPI.version)
+        #expect(response.groups == [SubscriptionGroup(id: "group-1", name: "Project")])
+    }
+
+    @Test func theServerAdvertisesGroupsAndRefresh() throws {
+        let features = try Self.decode(HealthResponse.self, "health.json").features ?? []
+        #expect(features.contains(ServerAPI.groupsFeature))
+        #expect(features.contains(ServerAPI.usageRefreshFeature))
     }
 
     @Test func aSubscriptionGrantDecodes() throws {

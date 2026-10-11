@@ -16,7 +16,8 @@ func (h *echoHandler) Handle(_ context.Context, request Request) Response {
 		return Response{Error: "no"}
 	}
 	return Response{OK: true, Session: &SessionInfo{
-		SessionID: "s1", NamespaceDir: "/ns/s1", Port: 18000, AccountLabel: "Work"}}
+		SessionID: "s1", NamespaceDir: "/ns/s1", Port: 18000, AccountLabel: "Work",
+		Group: request.Group}}
 }
 
 // A unix socket path is bounded at ~104 bytes, and the default temp directory name is
@@ -57,6 +58,22 @@ func TestARequestRoundTrips(t *testing.T) {
 	}
 	if handler.seen.Model != "claude-opus-5" || handler.seen.PID != 42 {
 		t.Fatalf("the agent saw %+v", handler.seen)
+	}
+}
+
+func TestAGroupRoundTrips(t *testing.T) {
+	handler := &echoHandler{}
+	socket := listen(t, handler)
+
+	response, err := Send(socket, Request{Op: OpNewSession, Group: "League", PID: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handler.seen.Group != "League" {
+		t.Errorf("the agent saw group %q", handler.seen.Group)
+	}
+	if response.Session == nil || response.Session.Group != "League" {
+		t.Errorf("the reply carried %+v", response.Session)
 	}
 }
 

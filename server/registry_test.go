@@ -325,7 +325,7 @@ func TestALoginIDIsConsumed(t *testing.T) {
 func TestAnAccountWithNoStoredCredentialIsMarkedNeedsRelogin(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "accounts.json")
-	saveAccountsFile(path, []RemoteAccount{{ID: "orphan", Label: "Orphan",
+	saveJSONFile(path, []RemoteAccount{{ID: "orphan", Label: "Orphan",
 		Kind: KindSubscription, Health: HealthOK}})
 
 	client := &OAuthClient{HTTP: &http.Client{Transport: newStub(nil)}}

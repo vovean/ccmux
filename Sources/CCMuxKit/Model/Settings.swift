@@ -189,6 +189,13 @@ public struct Settings: Codable, Equatable {
     /// short-lived access tokens for them and must never run a refresh grant of its own —
     /// that is precisely the two-holders-of-one-lineage case that logs an account out.
     public var delegatedAccountIDs: [String]
+    /// The group this Mac chooses accounts from. Nil means only accounts in no group:
+    /// grouped accounts are reserved for the machines that asked for their group.
+    public var restrictedGroupID: String?
+    /// Accounts removed from this Mac only, by their server id. Sync leaves them on the
+    /// server and does not bring them back here.
+    public var hiddenAccountIDs: [String]
+    public var collapsedAccountGroups: [String]
 
     public init(warnThresholdPercent: Double = 3,
                 budgetWarnPercent: Double = 80,
@@ -205,7 +212,10 @@ public struct Settings: Codable, Equatable {
                 showForeignSessions: Bool = true,
                 syncManagedHooks: Bool = true,
                 registerManagedHooks: Bool = false,
-                delegatedAccountIDs: [String] = []) {
+                delegatedAccountIDs: [String] = [],
+                restrictedGroupID: String? = nil,
+                hiddenAccountIDs: [String] = [],
+                collapsedAccountGroups: [String] = []) {
         self.warnThresholdPercent = warnThresholdPercent
         self.budgetWarnPercent = budgetWarnPercent
         self.upstreamProxy = upstreamProxy
@@ -222,6 +232,9 @@ public struct Settings: Codable, Equatable {
         self.syncManagedHooks = syncManagedHooks
         self.registerManagedHooks = registerManagedHooks
         self.delegatedAccountIDs = delegatedAccountIDs
+        self.restrictedGroupID = restrictedGroupID
+        self.hiddenAccountIDs = hiddenAccountIDs
+        self.collapsedAccountGroups = collapsedAccountGroups
     }
 
     /// See `Policy.init(from:)`: tolerant of keys an older build did not write, so an
@@ -265,9 +278,25 @@ public struct Settings: Codable, Equatable {
         delegatedAccountIDs = try c.decodeIfPresent([String].self,
                                                     forKey: .delegatedAccountIDs)
             ?? d.delegatedAccountIDs
+        restrictedGroupID = try c.decodeIfPresent(String.self, forKey: .restrictedGroupID)
+        hiddenAccountIDs = try c.decodeIfPresent([String].self, forKey: .hiddenAccountIDs)
+            ?? d.hiddenAccountIDs
+        collapsedAccountGroups = try c.decodeIfPresent([String].self,
+                                                       forKey: .collapsedAccountGroups)
+            ?? d.collapsedAccountGroups
     }
 
     public var delegated: Set<String> { Set(delegatedAccountIDs) }
+
+    /// Points every reference at an account's new id, after the server renumbered it.
+    public mutating func renumberAccount(from oldID: String, to newID: String) {
+        for index in directoryBindings.indices where directoryBindings[index].accountID == oldID {
+            directoryBindings[index].accountID = newID
+        }
+        var seen = Set<String>()
+        mutedAccountIDs = mutedAccountIDs.map { $0 == oldID ? newID : $0 }
+            .filter { seen.insert($0).inserted }
+    }
 
     /// Replaces any rule for the same directory rather than letting two rules for one
     /// path both sit in the file, where which one wins would come down to array order.

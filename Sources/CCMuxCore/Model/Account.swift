@@ -62,7 +62,7 @@ public struct Account: Codable, Equatable, Identifiable {
     public var kind: AccountKind
     /// Out of rotation means no automatic assignment — not at launch, not on failover.
     /// Assigning by hand still works: the switch governs what ccmux chooses, not what
-    /// the user may choose.
+    /// the user may choose. Shared through the account server when there is one.
     public var inRotation: Bool
     /// Everything ever spent on this account, live sessions and ended ones alike, so
     /// ending a session does not make money appear to vanish.
@@ -70,6 +70,8 @@ public struct Account: Codable, Equatable, Identifiable {
     public var spendThisMonth: MonthlySpend?
     /// Advisory only: crossing it warns, it never blocks a request.
     public var monthlyBudgetUSD: Double?
+    /// The subscription group, mirrored from the account server.
+    public var groupID: String?
 
     public init(id: String, label: String, email: String? = nil,
                 organizationUUID: String? = nil, organizationName: String? = nil,
@@ -79,7 +81,7 @@ public struct Account: Codable, Equatable, Identifiable {
                 healthDetail: String? = nil, addedAt: Date = Date(),
                 kind: AccountKind = .subscription, inRotation: Bool = true,
                 spendLifetimeUSD: Double = 0, spendThisMonth: MonthlySpend? = nil,
-                monthlyBudgetUSD: Double? = nil) {
+                monthlyBudgetUSD: Double? = nil, groupID: String? = nil) {
         self.id = id
         self.label = label
         self.email = email
@@ -97,6 +99,7 @@ public struct Account: Codable, Equatable, Identifiable {
         self.spendLifetimeUSD = spendLifetimeUSD
         self.spendThisMonth = spendThisMonth
         self.monthlyBudgetUSD = monthlyBudgetUSD
+        self.groupID = groupID
     }
 
     /// Hand-written so an accounts file written before these fields existed still
@@ -122,6 +125,7 @@ public struct Account: Codable, Equatable, Identifiable {
                                                  forKey: .spendLifetimeUSD) ?? 0
         spendThisMonth = try c.decodeIfPresent(MonthlySpend.self, forKey: .spendThisMonth)
         monthlyBudgetUSD = try c.decodeIfPresent(Double.self, forKey: .monthlyBudgetUSD)
+        groupID = try c.decodeIfPresent(String.self, forKey: .groupID)
     }
 
     public var displayName: String {
@@ -136,6 +140,18 @@ public struct Account: Codable, Equatable, Identifiable {
     /// credential that was never there. A stored key is the evidence that settles it.
     public func contradictsStoredAPIKey(hasStoredAPIKey: Bool) -> Bool {
         hasStoredAPIKey && kind != .apiKey
+    }
+
+    /// Takes over what a duplicate of the same key spent, so folding one record into the
+    /// other does not make money disappear from the totals and the budget.
+    public mutating func absorbSpend(of other: Account) {
+        spendLifetimeUSD += other.spendLifetimeUSD
+        guard let theirs = other.spendThisMonth else { return }
+        if let mine = spendThisMonth, mine.month == theirs.month {
+            spendThisMonth?.amountUSD += theirs.amountUSD
+        } else if spendThisMonth == nil || theirs.month > spendThisMonth!.month {
+            spendThisMonth = theirs
+        }
     }
 
     /// Whether ccmux may choose this account on its own. An API key is never chosen

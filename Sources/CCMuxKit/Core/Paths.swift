@@ -14,6 +14,8 @@ public enum Paths {
     public static var usageFile: URL { support.appendingPathComponent("usage.json") }
     public static var sessionsFile: URL { support.appendingPathComponent("sessions.json") }
     public static var settingsFile: URL { support.appendingPathComponent("settings.json") }
+    /// The account server's groups, cached so a restriction holds while it is unreachable.
+    public static var groupsFile: URL { support.appendingPathComponent("groups.json") }
     public static var logFile: URL { support.appendingPathComponent("ccmux.log") }
     public static var notifiedFile: URL { support.appendingPathComponent("notified.json") }
     /// This Mac's identity on the account server. Kept out of settings.json so copying

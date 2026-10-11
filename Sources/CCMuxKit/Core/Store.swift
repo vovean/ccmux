@@ -65,6 +65,16 @@ public final class Table<Element: Codable & Identifiable> where Element.ID == St
         return updated
     }
 
+    /// Writes only when the contents differ, so a sync that changes nothing does not
+    /// rewrite the file or redraw the window.
+    public func replaceAll(_ elements: [Element]) where Element: Equatable {
+        lock.lock()
+        let unchanged = items == elements
+        lock.unlock()
+        guard !unchanged else { return }
+        write { $0 = elements }
+    }
+
     private func write(_ body: (inout [Element]) -> Void) {
         lock.lock()
         body(&items)
@@ -87,11 +97,13 @@ public final class Store {
         didSet {
             accounts.onChange = { [weak self] in self?.onChange?() }
             sessions.onChange = { [weak self] in self?.onChange?() }
+            groups.onChange = { [weak self] in self?.onChange?() }
         }
     }
 
     public let accounts: Table<Account>
     public let sessions: Table<SessionRecord>
+    public let groups: Table<SubscriptionGroup>
 
     private var usageByAccount: [String: UsageSnapshot]
     private var settings: Settings
@@ -101,6 +113,7 @@ public final class Store {
         try? Paths.ensureSupportTree()
         accounts = Table(url: Paths.accountsFile)
         sessions = Table(url: Paths.sessionsFile)
+        groups = Table(url: Paths.groupsFile)
         usageByAccount = JSONStore.load([String: UsageSnapshot].self, from: Paths.usageFile) ?? [:]
         settings = JSONStore.load(Settings.self, from: Paths.settingsFile) ?? Settings()
     }
@@ -169,5 +182,17 @@ public final class Store {
     public func currentSettings() -> Settings {
         lock.lock(); defer { lock.unlock() }
         return settings
+    }
+
+    // MARK: - Groups
+
+    /// What ccmux may choose for this session by itself, or for a new launch when nil.
+    public func automaticPool(for session: SessionRecord?) -> [Account] {
+        AccountPool.automatic(accounts.all(),
+                              group: AccountPool.scope(of: session, settings: currentSettings()))
+    }
+
+    public func groupName(_ id: String?) -> String? {
+        id.flatMap { groups.get($0)?.name }
     }
 }

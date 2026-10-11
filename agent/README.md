@@ -57,8 +57,8 @@ and ask again", not "never".
 ### 2. Every other non-zero exit is ordinary
 
 - **1** — ccmux could not start the run: the daemon is not listening, the settings are
-  wrong, ccmuxd is unreachable, a flag needs a value, no account has a usable credential.
-  The reason is one line on stderr prefixed `ccmux:`.
+  wrong, ccmuxd is unreachable, a flag needs a value, no account has a usable credential,
+  the group cannot be resolved. The reason is one line on stderr prefixed `ccmux:`.
 - **2** — an unknown command, or none at all. The usage text goes to stderr.
 - **anything else** — Claude Code's own exit code. ccmux is out of the picture by then.
 
@@ -80,7 +80,8 @@ Starts a session and becomes Claude Code.
 | Flag | Meaning |
 |---|---|
 | `--model <id>` | The model this run will use. Passed to Claude Code **and** used to choose the account, so the subscription is picked against the weekly window the request will actually consume. A `--model` you pass after `--` wins. |
-| `--account <name>` | Start on this subscription instead of ranking — its id, label or email. Still refused if that account cannot serve the model or is not used on this box. A refusal later in the run can still move it to another account. |
+| `--account <name>` | Start on this subscription instead of ranking — its id, label or email. It may be outside the run's group, out of rotation, or an API key. Still refused if that account cannot serve the model or is not used on this box. A refusal later in the run can still move it to another account in the run's group. |
+| `--group <name>` | Take accounts from this ccmuxd group instead of the box's own, by name or id. See [Groups](#groups). |
 | `--name <text>` | How the run is labelled on the fleet pages. Defaults to the basename of the working directory. |
 
 Anything ccmux does not recognise goes to Claude Code, so `ccmux run -p "hi"` works
@@ -98,11 +99,17 @@ form:
   "machineID": "51d041f2-…",
   "machineLabel": "build-box-1",
   "pendingUsageBuckets": 0,
+  "group": "League",
   "accounts": [
     {
       "id": "…", "label": "Work", "kind": "subscription", "health": "ok",
-      "sessions": 1, "usageAgeSeconds": 4,
+      "sessions": 1, "usageAgeSeconds": 4, "group": "League",
       "windows": [{"kind": "weeklyAll", "label": "Weekly", "percent": 80}]
+    },
+    {
+      "id": "…", "label": "Spare", "kind": "subscription", "health": "ok",
+      "sessions": 0, "usageAgeSeconds": 4, "notAutomatic": "not in group League",
+      "windows": [{"kind": "weeklyAll", "label": "Weekly", "percent": 10}]
     }
   ],
   "sessions": [
@@ -117,7 +124,9 @@ form:
 
 `status` is `"busy"`, `"idle"` or `"waiting"`, inferred from whether the session's proxy
 has carried a request in the last ninety seconds. `health` is `"ok"`, `"needsRelogin"` or
-`"unknown"`. `percent` is how much of a window is **used**.
+`"unknown"`. `percent` is how much of a window is **used**. `group` is absent for a box,
+account or session in no group. `unusable` says why the box never uses an account;
+`notAutomatic` says why ccmux will not pick one on its own, though `--account` still can.
 
 Useful before dispatching work:
 
@@ -162,6 +171,7 @@ flags.**
 | Report to the fleet | `agent.report_fleet` | `CCMUX_REPORT_FLEET` | `--no-report` |
 | Proxy port band | `agent.port_first`, `agent.port_last` | — | — |
 | Accounts never used (daemon only) | `agent.exclude_accounts` | `CCMUX_EXCLUDE_ACCOUNTS` (comma-separated) | — |
+| The group runs take accounts from (daemon only) | `agent.group` | `CCMUX_GROUP` | — (`ccmux run --group` for one run) |
 
 A complete file is in [deploy/agent.yaml.example](deploy/agent.yaml.example). The default
 path is `/etc/ccmux/agent.yaml`.
@@ -311,6 +321,48 @@ Claude Code and the run fails with its own exit code, not 75. This is not rememb
 restarts, so use `exclude_accounts` for an organisation that has turned Claude Code off for
 good.
 
+ccmux picks an account on its own only if it is a subscription that is in rotation and in
+the right group (below). Taking an account out of rotation in the Mac app reaches this box
+too, since ccmuxd shares the setting. An API-key account bills per token, so, as on the
+Mac, it is used only when `--account` or `ccmux assign` names it. Naming one also reaches
+an account out of rotation or outside the group, but never an excluded one.
+
+## Groups
+
+ccmuxd sorts accounts into named groups, each account in at most one. A box draws from
+one group:
+
+```yaml
+agent:
+  group: League
+```
+
+- With `group` set, runs here get accounts from that group only: at launch, on failover,
+  and in the `retryAfter` of exit 75. When the whole group is spent, the run waits for the
+  group rather than spilling into other accounts.
+- Without it, runs get only accounts in **no** group. A grouped account is reserved for the
+  boxes limited to its group.
+- `ccmux run --group <name>` overrides the box's group for one run. The session keeps it
+  for its whole life, through a restart of the agent.
+- A group is named by its name, ignoring case, or by its id.
+
+A group that cannot be resolved refuses the launch with exit 1, not 75, even with
+`--account`, since the group still bounds where the run may move: a name ccmuxd does not
+have, a ccmuxd too old to have groups, or a group list the agent has not yet managed to
+read. A `group` that matches nothing is logged at startup. The agent re-reads
+the list every 20 seconds and keeps the last one when ccmuxd cannot answer, and it
+re-checks what ccmuxd supports every ten minutes, so upgrading ccmuxd needs no restart
+here.
+
+Only the daemon reads `agent.group` and `CCMUX_GROUP`; restart it after changing them.
+Sessions already running keep the group they started with.
+
+**Upgrade the agent before adding `group:` to agent.yaml.** Settings are read strictly, so
+an older `ccmux` refuses to start on a key it does not know, and that goes for every
+`ccmux run` reading the same file as well as the daemon. In the other direction, `ccmux run
+--group` refuses to start Claude Code against a daemon too old to apply the group, rather
+than let it bill the run to accounts outside the group.
+
 ## Running several at once
 
 Each run gets its own port from `agent.port_first`–`agent.port_last`, one thousand by
@@ -354,6 +406,9 @@ Two things worth knowing:
 | `pin must be 64 hex characters` | No `server.pin` and the URL is https. |
 | `ccmuxd's certificate is … which is not the pinned one` | The certificate was replaced, or the URL does not point at your ccmuxd. |
 | `no account in the pool has a usable credential` | Every subscription needs signing in again. Do it from the Mac app. |
+| `no group "…" on the server`, `this ccmuxd has no groups` | `agent.group` or `--group` names a group ccmuxd does not have, or ccmuxd predates groups. |
+| `the agent did not apply --group …` | The daemon predates groups. Upgrade the binary and restart `ccmux-agent`. |
+| `no account in group … can be chosen on this box` | Every account in the group is excluded, out of rotation or an API key. `ccmux status` says which. |
 | `this ccmuxd does not advertise sessions or usage-series` | The server is older than the agent. Runs still work; the box will not appear on the fleet pages. |
 
 The daemon logs to stdout, so `journalctl -u ccmux-agent -f` is the place to look. It

@@ -126,6 +126,10 @@ type Status struct {
 	Accounts     []AccountStatus `json:"accounts"`
 	Sessions     []SessionStatus `json:"sessions"`
 	PendingUsage int             `json:"pendingUsageBuckets"`
+	// The group runs here are given accounts from; absent means accounts in no group.
+	Group string `json:"group,omitempty"`
+	// Why a run without --group is refused while Group cannot be resolved.
+	GroupError string `json:"groupError,omitempty"`
 }
 
 type AccountStatus struct {
@@ -136,8 +140,11 @@ type AccountStatus struct {
 	Windows  []wire.UsageWindow `json:"windows"`
 	AgeSecs  float64            `json:"usageAgeSeconds"`
 	Sessions int                `json:"sessions"`
+	Group    string             `json:"group,omitempty"`
 	// Why this box will not send work to the account; absent when it will.
 	Unusable string `json:"unusable,omitempty"`
+	// Why ccmux will not pick it for a run on its own, though --account still can.
+	NotAutomatic string `json:"notAutomatic,omitempty"`
 }
 
 type SessionStatus struct {
@@ -146,6 +153,7 @@ type SessionStatus struct {
 	Port      int     `json:"port"`
 	AccountID string  `json:"accountID"`
 	SeededAs  string  `json:"seededAccountID"`
+	Group     string  `json:"group,omitempty"`
 	Model     string  `json:"model,omitempty"`
 	Name      string  `json:"name,omitempty"`
 	Status    string  `json:"status"`
@@ -162,6 +170,15 @@ func (a *Agent) Status() Status {
 		MachineLabel: a.machine.Label,
 		PendingUsage: a.ledger.Pending(),
 	}
+	var groupID string
+	if wanted := a.wantedGroup(""); wanted != "" {
+		group, err := a.resolveGroupLocked(wanted)
+		status.Group, groupID = group.Name, group.ID
+		if err != nil {
+			// Matches no account, which is also all a launch would find.
+			status.Group, groupID, status.GroupError = wanted, wanted, err.Error()
+		}
+	}
 	perAccount := map[string]int{}
 	for _, session := range a.sessions {
 		perAccount[session.record.AccountID]++
@@ -169,7 +186,11 @@ func (a *Agent) Status() Status {
 	for _, account := range a.accounts {
 		entry := AccountStatus{ID: account.ID, Label: account.DisplayName(),
 			Kind: account.Kind, Health: account.Health, Sessions: perAccount[account.ID],
-			Unusable: a.unusableLocked(account)}
+			Unusable:     a.unusableLocked(account),
+			NotAutomatic: a.unchosenLocked(account, groupID)}
+		if in := a.groupOfLocked(account); in != "" {
+			entry.Group = a.groupNameLocked(in)
+		}
 		if snapshot, known := a.usage[account.ID]; known {
 			entry.Windows = snapshot.Windows
 			entry.AgeSecs = now.Sub(snapshot.FetchedAt).Seconds()
@@ -181,7 +202,8 @@ func (a *Agent) Status() Status {
 		status.Sessions = append(status.Sessions, SessionStatus{
 			ID: record.ID, PID: record.PID, Port: record.Port,
 			AccountID: record.AccountID, SeededAs: record.SeededAccountID,
-			Model: record.Model, Name: record.Name, Status: statusOf(record, now),
+			Group: a.groupNameLocked(record.GroupID), Model: record.Model,
+			Name: record.Name, Status: statusOf(record, now),
 			Requests: record.Requests, SpendUSD: record.SpendUSD,
 		})
 	}

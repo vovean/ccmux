@@ -13,7 +13,7 @@ enum CLI {
 
     static let commands: [Command] = [
         Command(name: "run",
-                usage: "run --policy <name> [--account <id>] [-- <claude args>…]",
+                usage: "run --policy <name> [--account <id>] [--group <name>] [-- <claude args>…]",
                 run: run),
         Command(name: "status", usage: "status", run: { _ in status() }),
         Command(name: "assign", usage: "assign <session-id> <account-id>", run: assign),
@@ -84,6 +84,7 @@ enum CLI {
     static func run(_ arguments: [String]) -> Never {
         var policy = "any"
         var accountID: String?
+        var group: String?
         var claudeArgs: [String] = []
         var index = 0
         while index < arguments.count {
@@ -98,6 +99,10 @@ enum CLI {
                 index += 1
                 guard index < arguments.count else { fail("--account needs a value") }
                 accountID = arguments[index]
+            case "--group":
+                index += 1
+                guard index < arguments.count else { fail("--group needs a value") }
+                group = arguments[index]
             case "--":
                 claudeArgs += arguments[(index + 1)...]
                 index = arguments.count
@@ -120,7 +125,7 @@ enum CLI {
         do {
             response = try ControlClient.send(.newSession(
                 policy: policy, cwd: FileManager.default.currentDirectoryPath,
-                pid: getpid(), accountID: accountID))
+                pid: getpid(), accountID: accountID, group: group))
         } catch {
             fail(error.localizedDescription)
         }
@@ -128,9 +133,16 @@ enum CLI {
             if case .failure(let message) = response { fail(message) }
             fail("unexpected response from ccmux")
         }
+        if group != nil, info.groupName == nil {
+            // The session exists but was chosen outside the group, so it is ended rather
+            // than handed to claude.
+            _ = try? ControlClient.send(.endSession(sessionID: info.sessionID))
+            fail("the running ccmux app does not know --group; restart it after upgrading")
+        }
 
+        let inGroup = info.groupName.map { " · group \($0)" } ?? ""
         FileHandle.standardError.write(Data(
-            "ccmux: \(info.accountLabel) · policy \(info.policyName) · port \(info.port)\n"
+            "ccmux: \(info.accountLabel) · policy \(info.policyName)\(inGroup) · port \(info.port)\n"
                 .utf8))
         if let warning = info.warning {
             FileHandle.standardError.write(Data("ccmux: warning — \(warning)\n".utf8))
@@ -461,9 +473,19 @@ enum CLI {
         }
         if status.accounts.isEmpty {
             print("No accounts. Open ccmux and add one.")
+        } else {
+            if status.restrictedGroupMissing == true {
+                print("This Mac is limited to a group that no longer exists, so nothing can "
+                      + "be chosen — pick another in Settings.\n")
+            } else {
+                print("This Mac uses " + (status.restrictedGroupName.map { "the group \($0)" }
+                    ?? "accounts in no group") + ".\n")
+            }
         }
         for account in status.accounts {
-            let flag = account.health == "needsRelogin" ? " [needs re-login]" : ""
+            var flag = account.health == "needsRelogin" ? " [needs re-login]" : ""
+            if account.inRotation == false { flag += " [out of rotation]" }
+            if let group = account.groupName { flag += " [group \(group)]" }
             let age = account.usageAge.map { "  (\(Int($0))s ago)" } ?? ""
             print("\(account.label)\(flag)\(age)")
             for window in account.windows {
@@ -477,8 +499,9 @@ enum CLI {
             print("\nSessions:")
             for session in status.sessions {
                 // Printed in full: `ccmux assign` and `ccmux end` take the whole id.
+                let group = session.groupName.map { "  group \($0)" } ?? ""
                 print("    \(session.sessionID)  pid \(session.pid)  "
-                      + "\(session.accountLabel)  policy \(session.policyName)")
+                      + "\(session.accountLabel)  policy \(session.policyName)\(group)")
             }
         }
         exit(0)

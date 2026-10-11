@@ -31,6 +31,9 @@ type Session struct {
 	LastRequestAt time.Time `json:"lastRequestAt,omitempty"`
 	Requests      int       `json:"requests"`
 	SpendUSD      float64   `json:"spendUSD"`
+	// The group ccmux may move the session within, fixed at launch so a restart cannot
+	// widen it. Empty means accounts in no group.
+	GroupID string `json:"groupID,omitempty"`
 }
 
 // Alive reports whether the process the session was started for is still running.

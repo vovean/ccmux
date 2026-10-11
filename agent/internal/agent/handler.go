@@ -18,6 +18,7 @@ func (a *Agent) Handle(ctx context.Context, request control.Request) control.Res
 		started, err := a.NewSession(ctx, Launch{
 			Model:     request.Model,
 			AccountID: request.AccountID,
+			Group:     request.Group,
 			Directory: request.Directory,
 			Name:      request.Name,
 			PID:       request.PID,
@@ -42,6 +43,7 @@ func (a *Agent) Handle(ctx context.Context, request control.Request) control.Res
 			AccountLabel: started.AccountLabel,
 			Model:        started.Model,
 			Warning:      started.Warning,
+			Group:        started.Group,
 		}}
 
 	case control.OpEndSession:

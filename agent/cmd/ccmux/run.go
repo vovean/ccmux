@@ -82,6 +82,11 @@ func runShim(args []string) error {
 	if info == nil {
 		return fmt.Errorf("the agent started no session and gave no reason")
 	}
+	if err := confirmGroup(launch.Group, info); err != nil {
+		_, _ = control.Send(cfg.Agent.Socket,
+			control.Request{Op: control.OpEndSession, SessionID: info.SessionID})
+		return err
+	}
 
 	fmt.Fprintf(os.Stderr, "ccmux: %s · %s · port %d\n", info.AccountLabel,
 		modelOrAny(info.Model), info.Port)
@@ -101,6 +106,16 @@ func runShim(args []string) error {
 		"CCMUX_SESSION_ID="+info.SessionID,
 	)
 	return syscall.Exec(binary, append([]string{binary}, claudeArgs...), environment)
+}
+
+// confirmGroup refuses a session started by an agent that ignored --group, which is what
+// one predating groups does: it would bill the run to accounts outside the group.
+func confirmGroup(asked string, info *control.SessionInfo) error {
+	if asked == "" || info.Group != "" {
+		return nil
+	}
+	return fmt.Errorf("the agent did not apply --group %s, so it is older than this "+
+		"ccmux; upgrade it and restart ccmux-agent", asked)
 }
 
 func modelOrAny(model string) string {
@@ -141,6 +156,8 @@ func splitRunArgs(args []string) (control.Request, []string, error) {
 			into = &request.AccountID
 		case "--name":
 			into = &request.Name
+		case "--group":
+			into = &request.Group
 		default:
 			forwarded = append(forwarded, args[i])
 			continue

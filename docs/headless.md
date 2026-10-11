@@ -96,6 +96,10 @@ version (see [../agent/README.md](../agent/README.md)).
 
 Ported from the Mac, and kept honest by cross-language vectors (below):
 
+- Only accounts ccmux may pick on its own are considered: subscriptions in rotation, in
+  the box's group or, on a box with no group, in no group at all. An API key bills per
+  token and is used only when named. A run's `--group` replaces the box's for that run
+  and stays with the session. See [Groups](../agent/README.md#groups).
 - Eligible only with headroom on **every** window that gates the model: the 5-hour
   window, the weekly-all window, and that model's own weekly window when the plan
   reports one. A weekly window for a *different* model never gates — a spent Fable week
@@ -161,7 +165,7 @@ token for any account — so it is exactly as trusted as a Mac in the fleet, no 
 | Command | What it does |
 |---|---|
 | `ccmux agent` | The daemon. systemd runs this. |
-| `ccmux run [--model M] [--account A] [--name N] [-- claude-args]` | Start a session and become claude. Unrecognised arguments go to claude, so `ccmux run -p "hi"` works without a terminator. |
+| `ccmux run [--model M] [--account A] [--group G] [--name N] [-- claude-args]` | Start a session and become claude. Unrecognised arguments go to claude, so `ccmux run -p "hi"` works without a terminator. |
 | `ccmux status [--json]` | Accounts, their windows, and the live sessions. |
 | `ccmux assign <session> <account>` | Move a running session, identity included. |
 | `ccmux end <session>` | End a session the agent still believes is live. |

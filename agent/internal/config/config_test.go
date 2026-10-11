@@ -327,3 +327,29 @@ func TestExcludedAccountsComeFromTheFileOrTheEnvironment(t *testing.T) {
 		t.Errorf("a blank environment value replaced the list: %q", got)
 	}
 }
+
+// Daemon-only: `ccmux run` parses its own --group, which config.Load must hand on rather
+// than take for the box's.
+func TestTheGroupComesFromTheFileOrTheEnvironmentButNoFlag(t *testing.T) {
+	path := writeFile(t, t.TempDir(), "agent.yaml", "agent:\n  group: League\n", 0o600)
+
+	config, _, err := Load([]string{"--config", path}, envFrom(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Agent.Group != "League" {
+		t.Errorf("from the file: %q", config.Agent.Group)
+	}
+
+	config, rest, err := Load([]string{"--config", path, "--group", "Fast"},
+		envFrom(map[string]string{"CCMUX_GROUP": "Build"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Agent.Group != "Build" {
+		t.Errorf("the environment did not beat the file: %q", config.Agent.Group)
+	}
+	if strings.Join(rest, " ") != "--group Fast" {
+		t.Errorf("--group was consumed as a setting: %q", rest)
+	}
+}

@@ -51,6 +51,9 @@ type Agent struct {
 	// organisation name or uuid — seats kept for people, or an organisation that has
 	// turned Claude Code off. Matching ignores case.
 	ExcludeAccounts []string `yaml:"exclude_accounts"`
+	// The ccmuxd group, by name or id, that runs here are given accounts from. Empty
+	// means accounts in no group: a grouped account is reserved for its group's boxes.
+	Group string `yaml:"group"`
 }
 
 type Config struct {
@@ -233,6 +236,7 @@ func applyEnv(config *Config, env func(string) string) {
 	str("CCMUX_SOCKET", &config.Agent.Socket)
 	str("CCMUX_UPSTREAM", &config.Agent.Upstream)
 	str("CCMUX_CLAUDE_BIN", &config.Agent.ClaudeBin)
+	str("CCMUX_GROUP", &config.Agent.Group)
 	if v := env("CCMUX_INSECURE"); v == "1" || strings.EqualFold(v, "true") {
 		config.Server.Insecure = true
 	}

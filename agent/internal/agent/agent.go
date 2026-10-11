@@ -32,6 +32,8 @@ const (
 	// How long after its last request a session still counts as working. `claude -p`
 	// writes no status of its own, so this is the only signal there is.
 	busyFor = 90 * time.Second
+	// How often ccmuxd's features are re-read, so an upgrade is noticed without a restart.
+	probeEvery = 10 * time.Minute
 )
 
 type live struct {
@@ -62,7 +64,12 @@ type Agent struct {
 	refusing   map[string]bool
 	reportsOK  bool
 	seriesOK   bool
+	groupsOK   bool
+	probedAt   time.Time
 	lastReport string
+	// The last group list ccmuxd answered with; groupsKnown is whether it ever has.
+	groups      []wire.SubscriptionGroup
+	groupsKnown bool
 }
 
 func New(cfg config.Config, api *client.Client, log func(string, ...any)) (*Agent, error) {
@@ -91,6 +98,8 @@ func (a *Agent) Machine() Machine { return a.machine }
 // caller turns it into an exit code an application can queue on.
 type ErrNoAccount struct {
 	Model string
+	// The name of the group the launch was limited to, if any.
+	Group string
 	// When some account frees up. Zero when nothing known can ever serve it.
 	At time.Time
 }
@@ -100,24 +109,26 @@ func (e *ErrNoAccount) Error() string {
 	if what == "" {
 		what = "this request"
 	}
-	if e.At.IsZero() {
-		return fmt.Sprintf("no account can serve %s, and none has a known reset", what)
+	who := "no account"
+	if e.Group != "" {
+		who = "no account in group " + e.Group
 	}
-	return fmt.Sprintf("no account can serve %s until %s", what,
+	if e.At.IsZero() {
+		return fmt.Sprintf("%s can serve %s, and none has a known reset", who, what)
+	}
+	return fmt.Sprintf("%s can serve %s until %s", who, what,
 		e.At.UTC().Format(time.RFC3339))
 }
 
 // Start reads the pool, recovers the sessions that outlived the last run, and returns.
 func (a *Agent) Start(ctx context.Context) error {
-	health, err := a.client.Health(ctx)
-	if err != nil {
+	if err := a.probe(ctx); err != nil {
 		return fmt.Errorf("could not reach ccmuxd: %w", err)
 	}
 	a.mu.Lock()
-	a.reportsOK = client.Supports(health, "sessions")
-	a.seriesOK = client.Supports(health, "usage-series")
+	reports := a.reportsOK && a.seriesOK
 	a.mu.Unlock()
-	if a.config.Reports() && !(a.reportsOK && a.seriesOK) {
+	if a.config.Reports() && !reports {
 		a.log("this ccmuxd does not advertise sessions or usage-series; " +
 			"this box will not appear on the fleet pages")
 	}
@@ -132,7 +143,23 @@ func (a *Agent) Start(ctx context.Context) error {
 		return err
 	}
 	a.warnUnmatchedExclusions()
+	a.warnUnmatchedGroup()
 	a.recover()
+	return nil
+}
+
+// probe reads what this ccmuxd can do.
+func (a *Agent) probe(ctx context.Context) error {
+	health, err := a.client.Health(ctx)
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.reportsOK = client.Supports(health, wire.FeatureSessions)
+	a.seriesOK = client.Supports(health, wire.FeatureUsageSeries)
+	a.groupsOK = client.Supports(health, wire.FeatureGroups)
+	a.probedAt = a.now()
 	return nil
 }
 
@@ -150,6 +177,16 @@ func (a *Agent) warnUnmatchedExclusions() {
 		}
 		if !matched {
 			a.log("exclude_accounts: %q matches no account on the server", name)
+		}
+	}
+}
+
+func (a *Agent) warnUnmatchedGroup() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if name := a.wantedGroup(""); name != "" {
+		if _, err := a.resolveGroupLocked(name); err != nil {
+			a.log("%v; runs without --group are refused until that changes", err)
 		}
 	}
 }
@@ -172,6 +209,14 @@ func (a *Agent) Run(ctx context.Context) {
 
 func (a *Agent) housekeep(ctx context.Context) {
 	a.reap()
+	a.mu.Lock()
+	due := a.now().Sub(a.probedAt) >= probeEvery
+	a.mu.Unlock()
+	if due {
+		if err := a.probe(ctx); err != nil {
+			a.log("could not read ccmuxd's features: %v", err)
+		}
+	}
 	if err := a.refresh(ctx); err != nil {
 		a.log("could not refresh the pool: %v", err)
 	}
@@ -200,12 +245,24 @@ func (a *Agent) shutdown() {
 	a.saveSpool()
 }
 
-// refresh re-reads the account list and each account's usage from ccmuxd. Reading usage
-// costs nothing upstream — ccmuxd answers from its own cache and does the real polling.
+// refresh re-reads the account list, the groups and each account's usage from ccmuxd.
+// Reading usage costs nothing upstream — ccmuxd answers from its own cache and does the
+// real polling.
 func (a *Agent) refresh(ctx context.Context) error {
 	accounts, err := a.client.Accounts(ctx)
 	if err != nil {
 		return err
+	}
+	// Read after the accounts, so a group an account was just put in is already listed.
+	a.mu.Lock()
+	groupsOK := a.groupsOK
+	a.mu.Unlock()
+	var groups []wire.SubscriptionGroup
+	var groupsErr error
+	if groupsOK {
+		if groups, groupsErr = a.client.Groups(ctx); groupsErr != nil {
+			a.log("could not read the groups, keeping the last known: %v", groupsErr)
+		}
 	}
 	observed := a.now()
 	type answer struct {
@@ -231,6 +288,9 @@ func (a *Agent) refresh(ctx context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.accounts = accounts
+	if groupsOK && groupsErr == nil {
+		a.groups, a.groupsKnown = groups, true
+	}
 	// Folded here rather than beside each request: a response header observed during the
 	// loop above lands in a.usage, and folding against a copy taken before it would
 	// throw that newer reading away.
@@ -349,6 +409,84 @@ func (a *Agent) refuseUnusableLocked(account wire.RemoteAccount) error {
 	return nil
 }
 
+// unchosenLocked says why ccmux will not give the account to a run on its own, or "" if
+// it will. The run is limited to group `groupID`, or with none to accounts in no group.
+// Unlike unusableLocked, naming the account overrides it.
+func (a *Agent) unchosenLocked(account wire.RemoteAccount, groupID string) string {
+	if account.Kind == wire.KindAPIKey {
+		return "API key — pin it with --account"
+	}
+	if !account.IsInRotation() {
+		return "out of rotation"
+	}
+	in := a.groupOfLocked(account)
+	switch {
+	case groupID == "" && in != "":
+		return "in group " + a.groupNameLocked(in)
+	case groupID != "" && in != groupID:
+		return "not in group " + a.groupNameLocked(groupID)
+	}
+	return ""
+}
+
+// refuseUnchosenLocked is refuseUnusableLocked for an account ccmux picked itself.
+func (a *Agent) refuseUnchosenLocked(account wire.RemoteAccount, groupID string) error {
+	if err := a.refuseUnusableLocked(account); err != nil {
+		return err
+	}
+	if why := a.unchosenLocked(account, groupID); why != "" {
+		return fmt.Errorf("%s is not chosen automatically: %s", account.DisplayName(), why)
+	}
+	return nil
+}
+
+// groupOfLocked takes the membership as the server sent it: the server clears memberships
+// when it deletes a group, so an id it still sends keeps the account reserved.
+func (a *Agent) groupOfLocked(account wire.RemoteAccount) string {
+	return account.Group()
+}
+
+func (a *Agent) groupNameLocked(id string) string {
+	for _, group := range a.groups {
+		if group.ID == id {
+			return group.Name
+		}
+	}
+	return id
+}
+
+// wantedGroup is the group a launch asked for, else the box's.
+func (a *Agent) wantedGroup(run string) string {
+	if run = strings.TrimSpace(run); run != "" {
+		return run
+	}
+	return strings.TrimSpace(a.config.Agent.Group)
+}
+
+// resolveGroupLocked finds a group by id, or by name ignoring case. Not knowing is an
+// error rather than a reason to widen the pool: that would spend another group's accounts.
+func (a *Agent) resolveGroupLocked(name string) (wire.SubscriptionGroup, error) {
+	switch {
+	case !a.groupsOK:
+		return wire.SubscriptionGroup{}, fmt.Errorf("group %q: this ccmuxd has no groups "+
+			"— upgrade it", name)
+	case !a.groupsKnown:
+		return wire.SubscriptionGroup{}, fmt.Errorf("group %q: ccmuxd's group list has "+
+			"not been read yet", name)
+	}
+	for _, group := range a.groups {
+		if group.ID == name {
+			return group, nil
+		}
+	}
+	for _, group := range a.groups {
+		if strings.EqualFold(group.Name, name) {
+			return group, nil
+		}
+	}
+	return wire.SubscriptionGroup{}, fmt.Errorf("no group %q on the server", name)
+}
+
 // OrganizationRefused holds the account's organisation out of every pick on this box.
 func (a *Agent) OrganizationRefused(accountID string) {
 	a.mu.Lock()
@@ -366,11 +504,13 @@ func (a *Agent) OrganizationRefused(accountID string) {
 	}
 }
 
-// poolCopy is usageCopy narrowed to the accounts this box may send work to. Lock held.
-func (a *Agent) poolCopy() (accounts []wire.RemoteAccount, usage map[string]*rules.Snapshot) {
+// poolCopy is usageCopy narrowed to the accounts ccmux may pick on its own for a run
+// limited to `groupID`. Lock held.
+func (a *Agent) poolCopy(groupID string) (accounts []wire.RemoteAccount,
+	usage map[string]*rules.Snapshot) {
 	all, usage := a.usageCopy()
 	for _, account := range all {
-		if a.unusableLocked(account) == "" {
+		if a.unusableLocked(account) == "" && a.unchosenLocked(account, groupID) == "" {
 			accounts = append(accounts, account)
 		}
 	}

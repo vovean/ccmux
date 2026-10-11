@@ -22,6 +22,9 @@ const (
 	pollJitterFraction   = 0.1
 	pollRateLimitBackoff = 300 * time.Second
 	pollEscalationMargin = 15.0
+	// Refresh is a person waiting, but the hourly budget is shared with the scheduled
+	// polls and with every client that can press the button.
+	forcedPollFloor = 120 * time.Second
 )
 
 type PollPlan struct {

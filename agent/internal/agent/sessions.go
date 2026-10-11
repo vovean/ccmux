@@ -19,6 +19,9 @@ type Launch struct {
 	// Pins the session to one account instead of ranking. The pool's own ordering is
 	// skipped, but an account that cannot serve the model is still refused.
 	AccountID string
+	// Overrides the box's group. A pin still starts outside it; a move ccmux makes later
+	// does not leave it.
+	Group     string
 	Directory string
 	Name      string
 	PID       int
@@ -33,6 +36,8 @@ type Started struct {
 	AccountLabel string
 	Model        string
 	Warning      string
+	// The name of the group the session is limited to, if any.
+	Group string
 }
 
 // NewSession picks an account, seeds its credential, binds a proxy and records the run.
@@ -46,7 +51,12 @@ func (a *Agent) NewSession(ctx context.Context, launch Launch) (Started, error) 
 	}
 
 	a.mu.Lock()
-	accounts, usage := a.poolCopy()
+	var group wire.SubscriptionGroup
+	var groupErr error
+	if wanted := a.wantedGroup(launch.Group); wanted != "" {
+		group, groupErr = a.resolveGroupLocked(wanted)
+	}
+	accounts, usage := a.poolCopy(group.ID)
 	held := len(a.accounts)
 	var pinned wire.RemoteAccount
 	var pinErr error
@@ -54,6 +64,10 @@ func (a *Agent) NewSession(ctx context.Context, launch Launch) (Started, error) 
 		pinned, pinErr = a.usableNamedLocked(launch.AccountID)
 	}
 	a.mu.Unlock()
+	// Before the pin too: the group is still what a later move stays inside.
+	if groupErr != nil {
+		return Started{}, groupErr
+	}
 
 	var candidates []wire.RemoteAccount
 	if launch.AccountID != "" {
@@ -72,12 +86,17 @@ func (a *Agent) NewSession(ctx context.Context, launch Launch) (Started, error) 
 	} else {
 		if len(accounts) == 0 && held > 0 {
 			// Not exit 75: nothing frees up by waiting, only by a config change or restart.
-			return Started{}, fmt.Errorf("every account on the server is excluded or " +
-				"refused on this box — see `ccmux status`")
+			if group.ID != "" {
+				return Started{}, fmt.Errorf("no account in group %s can be chosen on "+
+					"this box — see `ccmux status`", group.Name)
+			}
+			return Started{}, fmt.Errorf("no account on the server can be chosen on this " +
+				"box: each is excluded, refused, out of rotation, an API key or in a " +
+				"group — see `ccmux status`")
 		}
 		candidates = rules.RankLeastRemaining(launch.Model, accounts, usage, nil)
 		if len(candidates) == 0 {
-			refusal := &ErrNoAccount{Model: launch.Model}
+			refusal := &ErrNoAccount{Model: launch.Model, Group: group.Name}
 			if _, at, known := rules.SoonestAvailable(launch.Model, accounts, usage,
 				a.now()); known {
 				refusal.At = at
@@ -112,6 +131,7 @@ func (a *Agent) NewSession(ctx context.Context, launch Launch) (Started, error) 
 		PID:             launch.PID,
 		AccountID:       chosen.ID,
 		SeededAccountID: chosen.ID,
+		GroupID:         group.ID,
 		Model:           launch.Model,
 		Directory:       launch.Directory,
 		Name:            launch.Name,
@@ -143,6 +163,7 @@ func (a *Agent) NewSession(ctx context.Context, launch Launch) (Started, error) 
 		AccountID:    chosen.ID,
 		AccountLabel: chosen.DisplayName(),
 		Model:        launch.Model,
+		Group:        group.Name,
 	}
 	if chosen.Health == wire.HealthNeedsRelogin {
 		started.Warning = "this account needs signing in again"
@@ -227,7 +248,7 @@ func (a *Agent) Assign(ctx context.Context, sessionID, accountID string, reason 
 		if target, known = a.account(accountID); !known {
 			err = fmt.Errorf("no account %q on the server", accountID)
 		} else {
-			err = a.refuseUnusableLocked(target)
+			err = a.refuseUnchosenLocked(target, session.record.GroupID)
 		}
 	}
 	seeded, seededKnown := a.account(session.record.SeededAccountID)
@@ -322,7 +343,7 @@ func (a *Agent) Failover(sessionID, model, servedBy string,
 		a.mu.Unlock()
 		return proxy.Assignment{}, false
 	}
-	accounts, usage := a.poolCopy()
+	accounts, usage := a.poolCopy(session.record.GroupID)
 	a.mu.Unlock()
 
 	next, ok := rules.Pick(model, accounts, usage, tried)
@@ -344,7 +365,12 @@ func (a *Agent) Failover(sessionID, model, servedBy string,
 
 func (a *Agent) SoonestAvailability(sessionID, model string) (time.Time, bool) {
 	a.mu.Lock()
-	accounts, usage := a.poolCopy()
+	session, ok := a.sessions[sessionID]
+	if !ok {
+		a.mu.Unlock()
+		return time.Time{}, false
+	}
+	accounts, usage := a.poolCopy(session.record.GroupID)
 	a.mu.Unlock()
 	_, at, ok := rules.SoonestAvailable(model, accounts, usage, a.now())
 	return at, ok
