@@ -317,21 +317,46 @@ public extension OAuthClient {
     func validateAPIKey(_ key: String) async throws -> [String] {
         let reply: HTTPReply
         do {
-            reply = try await transport.send(HTTPRequestSpec(
-                url: URL(string: "\(Self.apiBase)/v1/models")!,
-                headers: ["x-api-key": key, "anthropic-version": "2023-06-01"],
-                timeout: 20))
+            reply = try await listModels(key: key)
         } catch {
             throw OAuthError.transient("network: \(error.localizedDescription)")
         }
         guard reply.status == 200 else {
-            let json = try? JSONSerialization.jsonObject(with: reply.body) as? [String: Any]
-            let message = ((json?["error"] as? [String: Any])?["message"] as? String)
-                ?? "HTTP \(reply.status)"
-            throw OAuthError.badResponse(message)
+            throw OAuthError.badResponse(Self.apiErrorMessage(reply) ?? "HTTP \(reply.status)")
         }
         let json = try JSONSerialization.jsonObject(with: reply.body) as? [String: Any]
         let models = (json?["data"] as? [[String: Any]])?.compactMap { $0["id"] as? String }
         return models ?? []
     }
+
+    /// Anthropic's 401 to a made-up key is the success case: only the real API can answer
+    /// from inside the TLS tunnel. Judged by status, because the wording is theirs to change.
+    func probeReachability() async -> Reachability {
+        let reply: HTTPReply
+        do {
+            reply = try await listModels(key: "sk-ant-connectivity-probe")
+        } catch {
+            return .failed(error.localizedDescription)
+        }
+        if reply.status == 401 { return .reached }
+        return .failed(["HTTP \(reply.status)", Self.apiErrorMessage(reply)]
+            .compactMap { $0 }.joined(separator: ": "))
+    }
+
+    private func listModels(key: String) async throws -> HTTPReply {
+        try await transport.send(HTTPRequestSpec(
+            url: URL(string: "\(Self.apiBase)/v1/models")!,
+            headers: ["x-api-key": key, "anthropic-version": "2023-06-01"],
+            timeout: 20))
+    }
+
+    private static func apiErrorMessage(_ reply: HTTPReply) -> String? {
+        let json = try? JSONSerialization.jsonObject(with: reply.body) as? [String: Any]
+        return (json?["error"] as? [String: Any])?["message"] as? String
+    }
+}
+
+public enum Reachability: Equatable, Sendable {
+    case reached
+    case failed(String)
 }

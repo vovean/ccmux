@@ -161,3 +161,45 @@ struct ProxyConfigurationTests {
         #expect(config.connectionProxyDictionary == nil)
     }
 }
+
+private struct FixedReply: HTTPTransport {
+    let status: Int
+    let body: String
+    func send(_ spec: HTTPRequestSpec) async throws -> HTTPReply {
+        HTTPReply(status: status, body: Data(body.utf8))
+    }
+}
+
+private struct Unreachable: HTTPTransport {
+    func send(_ spec: HTTPRequestSpec) async throws -> HTTPReply {
+        throw HTTPTransportError.network("The proxy refused the connection")
+    }
+}
+
+@Suite("Proxy reachability probe")
+struct ReachabilityProbeTests {
+    /// Anthropic's actual reply. The old check wanted "api key" with a space, so a proxy
+    /// that worked was reported as failed.
+    @Test func anthropicRejectingTheDummyKeyMeansTheProxyWorks() async {
+        let reply = #"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#
+        let client = OAuthClient(transport: FixedReply(status: 401, body: reply))
+        #expect(await client.probeReachability() == .reached)
+    }
+
+    @Test func aProxyErrorIsReportedWithItsStatus() async {
+        let client = OAuthClient(transport: FixedReply(status: 502, body: "Bad Gateway"))
+        #expect(await client.probeReachability() == .failed("HTTP 502"))
+    }
+
+    @Test func anAPIRefusalOtherThanTheKeyCarriesItsMessage() async {
+        let reply = #"{"type":"error","error":{"type":"permission_error","message":"Request not allowed"}}"#
+        let client = OAuthClient(transport: FixedReply(status: 403, body: reply))
+        #expect(await client.probeReachability() == .failed("HTTP 403: Request not allowed"))
+    }
+
+    @Test func anUnreachableProxyIsAFailure() async {
+        let client = OAuthClient(transport: Unreachable())
+        #expect(await client.probeReachability()
+                == .failed("The proxy refused the connection"))
+    }
+}

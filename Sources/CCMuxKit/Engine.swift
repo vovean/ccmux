@@ -1112,20 +1112,11 @@ public final class Engine: ObservableObject {
         let proxy = settings.upstreamProxy
         guard proxy != nil else { return "No proxy configured." }
         let password = try? ProxyPasswordStore.read()
-        let probe = OAuthClient.proxied(proxy, password: password)
-        do {
-            _ = try await probe.validateAPIKey("sk-ant-connectivity-probe")
-            return "Reached Anthropic through the proxy."
-        } catch let error as OAuthError {
-            // A 401 is the proxy working perfectly: the tunnel carried our request and
-            // Anthropic rejected a deliberately invalid key.
-            if case .badResponse(let message) = error,
-               message.lowercased().contains("api key") || message.contains("401") {
-                return "Proxy works — reached Anthropic (it rejected the dummy key, as expected)."
-            }
-            return "Proxy failed: \(error.localizedDescription)"
-        } catch {
-            return "Proxy failed: \(error.localizedDescription)"
+        switch await OAuthClient.proxied(proxy, password: password).probeReachability() {
+        case .reached:
+            return "Proxy works — reached Anthropic (it rejected the dummy key, as expected)."
+        case .failed(let reason):
+            return "Proxy failed: \(reason)"
         }
     }
 
