@@ -131,9 +131,15 @@ func TestABucketWithNoSessionOrModelIsRefused(t *testing.T) {
 	}
 }
 
+// Reopening a store reads the log against the wall clock, so a fixed date ages out of
+// retention and these tests start failing a month after they were written.
+func reloadableNow() time.Time {
+	return time.Now().UTC().Truncate(24 * time.Hour).Add(-12 * time.Hour)
+}
+
 func TestUsageSurvivesARestart(t *testing.T) {
 	dir := t.TempDir()
-	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	now := reloadableNow()
 	store := NewSeriesStore(dir, 30*24*time.Hour)
 	mustIngest(t, store, "mac-1", UsageReport{Label: "studio", Buckets: []UsageBucket{
 		sampleBucket(minuteAt(now, -5), "sess-1", "claude-opus-5", 100, 10),
@@ -157,7 +163,7 @@ func TestUsageSurvivesARestart(t *testing.T) {
 // the whole day.
 func TestATornLineCostsOnlyItsOwnBucket(t *testing.T) {
 	dir := t.TempDir()
-	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	now := reloadableNow()
 	store := NewSeriesStore(dir, 30*24*time.Hour)
 	mustIngest(t, store, "mac-1", UsageReport{Label: "studio", Buckets: []UsageBucket{
 		sampleBucket(minuteAt(now, -5), "sess-1", "claude-opus-5", 100, 10),
