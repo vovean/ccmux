@@ -4,6 +4,10 @@
     {
       "id": "group-1",
       "name": "Project"
+    },
+    {
+      "id": "group-2",
+      "name": "Personal"
     }
   ]
 }

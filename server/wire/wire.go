@@ -2,6 +2,7 @@ package wire
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"time"
 )
@@ -40,8 +41,12 @@ const FeatureGroups = "groups"
 // POST /accounts/{id}/usage/refresh: a poll on demand, floored per account.
 const FeatureUsageRefresh = "usage-refresh"
 
+// An account in several groups: RemoteAccount.GroupIDs, and the per-membership routes
+// under /groups/{id}/accounts.
+const FeatureGroupSets = "group-sets"
+
 var ServerFeatures = []string{FeatureSessions, FeatureHooks, FeatureHookActivation,
-	FeatureUsageSeries, FeatureGroups, FeatureUsageRefresh}
+	FeatureUsageSeries, FeatureGroups, FeatureUsageRefresh, FeatureGroupSets}
 
 // Time marshals as RFC 3339 with second precision.
 //
@@ -109,16 +114,37 @@ type RemoteAccount struct {
 	// Shared settings, the same on every client. Nil InRotation means in rotation.
 	InRotation       *bool    `json:"inRotation,omitempty"`
 	MonthlyBudgetUSD *float64 `json:"monthlyBudgetUSD,omitempty"`
-	GroupID          *string  `json:"groupID,omitempty"`
+	GroupIDs         []string `json:"groupIDs,omitempty"`
+	// The first of GroupIDs, for clients and files from before an account could be in
+	// several: to them a grouped account must still look grouped.
+	GroupID *string `json:"groupID,omitempty"`
 }
 
 func (a RemoteAccount) IsInRotation() bool { return a.InRotation == nil || *a.InRotation }
 
-func (a RemoteAccount) Group() string {
-	if a.GroupID == nil {
-		return ""
+// Groups reads either spelling, so a record from a server that predates GroupIDs keeps
+// its membership.
+//
+// Clipped, so appending to it copies: copies of an account share its backing array.
+func (a RemoteAccount) Groups() []string {
+	if len(a.GroupIDs) > 0 {
+		return slices.Clip(a.GroupIDs)
 	}
-	return *a.GroupID
+	if a.GroupID != nil && *a.GroupID != "" {
+		return []string{*a.GroupID}
+	}
+	return nil
+}
+
+func (a RemoteAccount) InGroup(id string) bool { return slices.Contains(a.Groups(), id) }
+
+// SetGroups writes both spellings.
+func (a *RemoteAccount) SetGroups(ids []string) {
+	a.GroupIDs, a.GroupID = nil, nil
+	if len(ids) > 0 {
+		a.GroupIDs = slices.Clone(ids)
+		a.GroupID = Ptr(ids[0])
+	}
 }
 
 func (a RemoteAccount) DisplayName() string {
@@ -209,8 +235,9 @@ type AdoptRequest struct {
 	MonthlyBudgetUSD *float64 `json:"monthlyBudgetUSD,omitempty"`
 }
 
-// AccountUpdate changes shared settings. Absent fields are left alone; an empty GroupID
-// takes the account out of its group, and a budget of zero or less clears it.
+// AccountUpdate changes shared settings. Absent fields are left alone, and a budget of
+// zero or less clears it. GroupID is how a 1.19 client moved an account into one group:
+// it replaces every membership, and an empty one clears them.
 type AccountUpdate struct {
 	Label            *string  `json:"label,omitempty"`
 	InRotation       *bool    `json:"inRotation,omitempty"`
@@ -218,8 +245,8 @@ type AccountUpdate struct {
 	GroupID          *string  `json:"groupID,omitempty"`
 }
 
-// SubscriptionGroup is a named set of accounts. Membership is RemoteAccount.GroupID, so
-// an account is in at most one group.
+// SubscriptionGroup is a named set of accounts. Membership is RemoteAccount.GroupIDs, and
+// an account can be in several.
 type SubscriptionGroup struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`

@@ -332,11 +332,14 @@ why none of it needs Anthropic to accept a public redirect URI.
 
 A group reserves accounts for the machines that ask for it — say, a few subscriptions for
 a project an agent works on around the clock, so it cannot use up the limits your other
-work needs. Put an account in a group from its ••• menu (Group → New group… creates one
-and moves it in); groups live on the server, so every machine sees the same ones.
+work needs. Put an account in groups from its ••• menu: Groups has a checkmark per group,
+and New group… creates one and adds the account to it. An account can be in several
+groups, and the Accounts page lists it under each. Groups live on the server, so every
+machine sees the same ones.
 
 Each machine chooses from one pool. Settings → Subscription group limits this Mac to a
-group; with no group set, it chooses only accounts in **no** group. `ccmux run --group
+group — every account in it, including ones that are in other groups too; with no group
+set, it chooses only accounts in **no** group. `ccmux run --group
 <name>` picks a group for one session instead, and that session stays in it when it
 switches accounts. When a group is spent, its sessions wait for the group's own reset
 rather than reaching outside it. An account you pick by hand, or with `--account`, is

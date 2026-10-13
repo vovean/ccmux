@@ -49,14 +49,14 @@ func TestRemoteAccountKeysMatchTheSwiftClient(t *testing.T) {
 		SubscriptionType: ptr("team"), RateLimitTier: ptr("tier"),
 		Kind: KindSubscription, Health: HealthOK, HealthDetail: ptr("fine"),
 		APIKeyFingerprint: ptr("abc"), InRotation: ptr(true), MonthlyBudgetUSD: ptr(1.0),
-		GroupID: ptr("g"),
+		GroupID: ptr("g"), GroupIDs: []string{"g"},
 	}
 	encoded, _ := json.Marshal(account)
 	var decoded map[string]any
 	_ = json.Unmarshal(encoded, &decoded)
 	for _, key := range []string{"id", "label", "email", "organizationUUID",
 		"organizationName", "subscriptionType", "rateLimitTier", "kind", "health",
-		"healthDetail", "apiKeyFingerprint", "inRotation", "monthlyBudgetUSD", "groupID"} {
+		"healthDetail", "apiKeyFingerprint", "inRotation", "monthlyBudgetUSD", "groupID", "groupIDs"} {
 		if _, ok := decoded[key]; !ok {
 			t.Errorf("missing key %q", key)
 		}

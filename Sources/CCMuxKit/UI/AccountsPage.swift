@@ -17,14 +17,21 @@ struct AccountsPage: View {
     @State private var renamingGroup: SubscriptionGroup?
     @State private var deletingGroup: SubscriptionGroup?
 
-    /// An account in a group not loaded yet is listed with the ungrouped ones rather than
-    /// vanishing from the page.
+    /// An account in several groups is listed under each. One whose groups are not loaded
+    /// yet is listed with the ungrouped ones rather than vanishing from the page.
     private var sections: (ungrouped: [Account], byGroup: [String: [Account]]) {
-        let known = Set(engine.groups.map(\.id))
-        let isListed = { (account: Account) in account.groupID.map(known.contains) ?? false }
-        return (engine.accounts.filter { !isListed($0) },
-                Dictionary(grouping: engine.accounts.filter(isListed),
-                           by: { $0.groupID ?? "" }))
+        var ungrouped: [Account] = []
+        var byGroup: [String: [Account]] = [:]
+        for account in engine.accounts {
+            let listed = loadedGroups(of: account)
+            if listed.isEmpty { ungrouped.append(account) }
+            for group in listed { byGroup[group, default: []].append(account) }
+        }
+        return (ungrouped, byGroup)
+    }
+
+    private func loadedGroups(of account: Account) -> [String] {
+        account.groupIDs.filter { id in engine.groups.contains { $0.id == id } }
     }
 
     var body: some View {
@@ -90,7 +97,7 @@ struct AccountsPage: View {
             budgetSheet(account)
         }
         .sheet(item: $groupingAccount) { account in
-            nameSheet("New group", note: "\(account.displayName) moves into it.",
+            nameSheet("New group", note: "\(account.displayName) is added to it.",
                       confirm: "Create", dismiss: { groupingAccount = nil }) { name in
                 Task { await engine.createGroup(named: name, adding: account.id) }
             }
@@ -141,9 +148,9 @@ struct AccountsPage: View {
         + "using it here end either way."
     private static let localRemovalMessage = "Its stored credential is deleted and any "
         + "session using it ends. The subscription itself is untouched."
-    private static let groupDeletionMessage = "Its accounts stay, ungrouped, on every "
-        + "machine. A machine limited to this group has nothing to choose from until it "
-        + "is given another."
+    private static let groupDeletionMessage = "Its accounts stay, in their other groups or "
+        + "ungrouped, on every machine. A machine limited to this group has nothing to "
+        + "choose from until it is given another."
 
     private func remove(everywhere: Bool) {
         if let account = confirmingRemoval {
@@ -164,7 +171,7 @@ struct AccountsPage: View {
                     accountCard(account)
                 }
                 if accounts.isEmpty {
-                    Text("No accounts yet. Add one from its ••• menu, under Group.")
+                    Text("No accounts yet. Add one from its ••• menu, under Groups.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .padding(.leading, 18)
@@ -392,7 +399,7 @@ struct AccountsPage: View {
                     if !account.inRotation {
                         StatusPill(text: "out of rotation", tint: .secondary)
                     }
-                    if let group = account.groupID, !engine.groups.contains(where: { $0.id == group }) {
+                    if !account.groupIDs.isEmpty, loadedGroups(of: account).isEmpty {
                         StatusPill(text: "group not loaded", tint: .secondary)
                             .help("In a group this Mac has not loaded yet, so it is left "
                                   + "to the machines limited to that group")
@@ -597,28 +604,25 @@ struct AccountsPage: View {
     @ViewBuilder
     private func groupMenu(_ account: Account) -> some View {
         if engine.serverSupportsGroups {
-            let current = account.groupID
-            let shared = engine.sharesSettings(account.id)
-            Menu("Group") {
+            Menu("Groups") {
                 ForEach(engine.groups) { group in
                     Toggle(group.name, isOn: Binding(
-                        get: { current == group.id },
+                        get: { account.groupIDs.contains(group.id) },
                         set: { on in
-                            Task { await engine.setGroup(on ? group.id : nil, for: account.id) }
+                            Task {
+                                await engine.setMembership(group.id, member: on,
+                                                           for: account.id)
+                            }
                         }))
                 }
-                if !engine.groups.isEmpty {
-                    Toggle("No group", isOn: Binding(
-                        get: { current == nil },
-                        set: { if $0 { Task { await engine.setGroup(nil, for: account.id) } } }))
-                    Divider()
-                }
+                if !engine.groups.isEmpty { Divider() }
                 Button("New group…") {
                     nameText = ""
                     groupingAccount = account
                 }
             }
-            .disabled(!shared)
+            // An older ccmuxd keeps one group per account and has no route to add a second.
+            .disabled(!engine.sharesSettings(account.id) || !engine.serverSupportsGroupSets)
         }
     }
 

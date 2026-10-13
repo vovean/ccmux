@@ -55,11 +55,11 @@ public struct ControlAccountInfo: Codable, Equatable {
     public var health: String
     public var windows: [UsageWindow]
     public var usageAge: TimeInterval?
-    public var groupName: String?
+    public var groupNames: [String]?
     public var inRotation: Bool?
 
     public init(id: String, label: String, email: String?, health: String,
-                windows: [UsageWindow], usageAge: TimeInterval?, groupName: String? = nil,
+                windows: [UsageWindow], usageAge: TimeInterval?, groupNames: [String]? = nil,
                 inRotation: Bool? = nil) {
         self.id = id
         self.label = label
@@ -67,7 +67,7 @@ public struct ControlAccountInfo: Codable, Equatable {
         self.health = health
         self.windows = windows
         self.usageAge = usageAge
-        self.groupName = groupName
+        self.groupNames = groupNames
         self.inRotation = inRotation
     }
 }

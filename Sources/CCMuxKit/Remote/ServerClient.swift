@@ -292,6 +292,12 @@ public final class ServerClient: NSObject, RemoteTokenSource, @unchecked Sendabl
         try await delete(["groups", groupID])
     }
 
+    public func setMembership(_ groupID: String, of accountID: String,
+                              member: Bool) async throws -> RemoteAccount {
+        try await send(["groups", groupID, "accounts", accountID],
+                       method: member ? "PUT" : "DELETE", body: nil)
+    }
+
     // MARK: - Hooks
 
     /// The hook set this Mac should be running.

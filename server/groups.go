@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -33,11 +34,21 @@ func (r *Registry) loadGroups() {
 	for _, group := range stored {
 		r.groups[group.ID] = group
 	}
+	r.pruneMembershipsLocked()
+}
+
+// pruneMembershipsLocked drops memberships of groups that no longer exist, and writes
+// every account's in both spellings, whichever it was read in.
+func (r *Registry) pruneMembershipsLocked() {
 	for id, account := range r.accounts {
-		if group := account.Group(); group != "" && r.groups[group].ID == "" {
-			account.GroupID = nil
-			r.accounts[id] = account
+		kept := []string{}
+		for _, group := range account.Groups() {
+			if _, exists := r.groups[group]; exists {
+				kept = append(kept, group)
+			}
 		}
+		account.SetGroups(kept)
+		r.accounts[id] = account
 	}
 }
 
@@ -81,16 +92,16 @@ func validGroupName(name string) (string, error) {
 	return name, nil
 }
 
-// changeGroups runs change under the lock and saves when it succeeds, refusing while the
-// groups file cannot be read.
-func (r *Registry) changeGroups(change func() error) error {
+// changeGroups runs change under the lock and saves when it changed something, refusing
+// while the groups file cannot be read.
+func (r *Registry) changeGroups(change func() (changed bool, err error)) error {
 	r.mu.Lock()
-	err := ErrGroupsUnavailable
+	changed, err := false, ErrGroupsUnavailable
 	if !r.groupsUnreadable {
-		err = change()
+		changed, err = change()
 	}
 	r.mu.Unlock()
-	if err == nil {
+	if err == nil && changed {
 		r.persist()
 	}
 	return err
@@ -109,14 +120,14 @@ func (r *Registry) CreateGroup(name string) (SubscriptionGroup, error) {
 	}
 	var group SubscriptionGroup
 	created := false
-	err = r.changeGroups(func() error {
+	err = r.changeGroups(func() (bool, error) {
 		if existing, ok := r.groupNamedLocked(name); ok {
 			group = existing
-			return nil
+			return false, nil
 		}
 		group, created = SubscriptionGroup{ID: id, Name: name}, true
 		r.groups[id] = group
-		return nil
+		return true, nil
 	})
 	if created {
 		logInfo("created group %s", name)
@@ -130,43 +141,71 @@ func (r *Registry) RenameGroup(id, name string) (SubscriptionGroup, error) {
 		return SubscriptionGroup{}, err
 	}
 	var group SubscriptionGroup
-	err = r.changeGroups(func() error {
+	err = r.changeGroups(func() (bool, error) {
 		var ok bool
 		if group, ok = r.groups[id]; !ok {
-			return notFound("no group %s", id)
+			return false, notFound("no group %s", id)
 		}
 		if other, taken := r.groupNamedLocked(name); taken && other.ID != id {
-			return rejected("a group named %q already exists", other.Name)
+			return false, rejected("a group named %q already exists", other.Name)
 		}
 		group.Name = name
 		r.groups[id] = group
-		return nil
+		return true, nil
 	})
 	return group, err
 }
 
-// DeleteGroup leaves its accounts ungrouped.
+// DeleteGroup takes it off every account; one in no other group becomes ungrouped.
 func (r *Registry) DeleteGroup(id string) error {
 	var name string
-	err := r.changeGroups(func() error {
+	err := r.changeGroups(func() (bool, error) {
 		group, ok := r.groups[id]
 		if !ok {
-			return notFound("no group %s", id)
+			return false, notFound("no group %s", id)
 		}
 		name = group.Name
 		delete(r.groups, id)
-		for accountID, account := range r.accounts {
-			if account.Group() == id {
-				account.GroupID = nil
-				r.accounts[accountID] = account
-			}
-		}
-		return nil
+		r.pruneMembershipsLocked()
+		return true, nil
 	})
 	if err == nil {
 		logInfo("deleted group %s", name)
 	}
 	return err
+}
+
+// SetMembership adds the account to the group or takes it out, leaving its other groups
+// alone. One membership per call, under the lock, so two machines editing one account at
+// once cannot undo each other.
+func (r *Registry) SetMembership(groupID, accountID string, member bool) (RemoteAccount, error) {
+	var account RemoteAccount
+	err := r.changeGroups(func() (bool, error) {
+		if r.accountsUnreadable {
+			return false, ErrAccountsUnavailable
+		}
+		var ok bool
+		if account, ok = r.accounts[accountID]; !ok {
+			return false, notFound("no account %s", accountID)
+		}
+		if _, ok := r.groups[groupID]; !ok {
+			return false, notFound("no group %s", groupID)
+		}
+		if account.InGroup(groupID) == member {
+			return false, nil
+		}
+		groups := account.Groups()
+		if member {
+			groups = append(groups, groupID)
+		} else {
+			groups = slices.DeleteFunc(slices.Clone(groups),
+				func(g string) bool { return g == groupID })
+		}
+		account.SetGroups(groups)
+		r.accounts[accountID] = account
+		return true, nil
+	})
+	return account, err
 }
 
 // UpdateAccount applies every field or none of them.
@@ -210,10 +249,11 @@ func (r *Registry) updatedAccountLocked(id string, update AccountUpdate) (Remote
 		account.MonthlyBudgetUSD = positiveOrNil(update.MonthlyBudgetUSD)
 	}
 	if update.GroupID != nil {
-		account.GroupID = nil
+		var groups []string
 		if *update.GroupID != "" {
-			account.GroupID = ptr(*update.GroupID)
+			groups = []string{*update.GroupID}
 		}
+		account.SetGroups(groups)
 	}
 	return account, nil
 }

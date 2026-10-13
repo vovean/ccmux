@@ -115,11 +115,12 @@ struct AccountSyncTests {
 struct AccountPoolTests {
     private let accounts = [
         Account(id: "free", label: "free"),
-        Account(id: "p1", label: "p1", groupID: "project"),
-        Account(id: "p2", label: "p2", inRotation: false, groupID: "project"),
-        Account(id: "o1", label: "o1", groupID: "other"),
+        Account(id: "p1", label: "p1", groupIDs: ["project"]),
+        Account(id: "p2", label: "p2", inRotation: false, groupIDs: ["project"]),
+        Account(id: "o1", label: "o1", groupIDs: ["other"]),
+        Account(id: "both", label: "both", groupIDs: ["project", "other"]),
         Account(id: "key", label: "key", kind: .apiKey),
-        Account(id: "unloaded", label: "unloaded", groupID: "not-loaded-yet"),
+        Account(id: "unloaded", label: "unloaded", groupIDs: ["not-loaded-yet"]),
     ]
 
     /// Including an account whose group this Mac has not loaded: it stays reserved.
@@ -127,8 +128,10 @@ struct AccountPoolTests {
         #expect(AccountPool.automatic(accounts, group: nil).map(\.id) == ["free"])
     }
 
+    /// Including one in several groups, which serves each of them.
     @Test func aMacLimitedToAGroupChoosesOnlyItsAccountsInRotation() {
-        #expect(AccountPool.automatic(accounts, group: "project").map(\.id) == ["p1"])
+        #expect(AccountPool.automatic(accounts, group: "project").map(\.id) == ["p1", "both"])
+        #expect(AccountPool.automatic(accounts, group: "other").map(\.id) == ["o1", "both"])
     }
 
     @Test func aGroupWithNoAccountsHasNothingToChoose() {
@@ -170,7 +173,12 @@ struct AccountPoolTests {
         let plan = Rebalance.plan(sessions: sessions, accounts: accounts, usage: [:],
                                   settings: Settings(restrictedGroupID: "project"),
                                   live: [:], scope: .all)
-        #expect(Set(plan.moves.map { "\($0.sessionID)→\($0.to)" }) == ["s1→p1", "s2→o1"])
+        let groupOf = ["s1": "project", "s2": "other"]
+        #expect(plan.moves.count == 2)
+        for move in plan.moves {
+            let target = accounts.first { $0.id == move.to }
+            #expect(target?.groupIDs.contains(groupOf[move.sessionID] ?? "") == true)
+        }
     }
 }
 
@@ -179,14 +187,13 @@ struct AccountUpdateTests {
     /// The local path for an account the server does not hold yet follows the server's
     /// rules, so the upload carries what the server would have stored.
     @Test func anUpdateAppliesTheServersRules() {
-        var account = Account(id: "a", label: "Old", monthlyBudgetUSD: 50, groupID: "g")
+        var account = Account(id: "a", label: "Old", monthlyBudgetUSD: 50)
         AccountUpdate(label: "  New ", inRotation: false).apply(to: &account)
         #expect(account.label == "New")
         #expect(!account.inRotation)
         #expect(account.monthlyBudgetUSD == 50)
-        AccountUpdate(monthlyBudgetUSD: 0, groupID: "").apply(to: &account)
+        AccountUpdate(monthlyBudgetUSD: 0).apply(to: &account)
         #expect(account.monthlyBudgetUSD == nil)
-        #expect(account.groupID == nil)
     }
 }
 
@@ -199,11 +206,21 @@ struct GroupSettingsDecodingTests {
         #expect(settings.hiddenAccountIDs.isEmpty)
         let account = try JSONStore.decoder.decode(
             Account.self, from: Data(#"{"id":"a","label":"A"}"#.utf8))
-        #expect(account.groupID == nil)
+        #expect(account.groupIDs.isEmpty)
         let session = try JSONStore.decoder.decode(SessionRecord.self, from: Data(
             #"{"id":"s","pid":1,"port":9000,"accountID":"a","policyName":"opus","cwd":"/"}"#
                 .utf8))
         #expect(session.groupID == nil)
+    }
+
+    /// A 1.19 file or server spells one group; it reads as a list of one.
+    @Test func aSingleGroupFromBeforeGroupSetsBecomesAListOfOne() throws {
+        let account = try JSONStore.decoder.decode(
+            Account.self, from: Data(#"{"id":"a","label":"A","groupID":"g"}"#.utf8))
+        #expect(account.groupIDs == ["g"])
+        let remote = try JSONStore.decoder.decode(RemoteAccount.self, from: Data(
+            #"{"id":"a","label":"A","kind":"subscription","health":"ok","groupID":"g"}"#.utf8))
+        #expect(remote.groups == ["g"])
     }
 
     /// An older shim sends no group; the request still decodes.
@@ -285,7 +302,7 @@ struct GroupChoiceTests {
     @Test func anEmptyPoolSaysWhichGroupItIs() {
         #expect(throws: SessionError.self) { try choose([], group: "g") }
         do {
-            _ = try choose([Account(id: "x", label: "x", groupID: "other")], group: "g")
+            _ = try choose([Account(id: "x", label: "x", groupIDs: ["other"])], group: "g")
         } catch {
             #expect(error.localizedDescription.contains("Project"))
         }
@@ -301,8 +318,8 @@ struct GroupChoiceTests {
     }
 
     @Test func aBindingOutsideTheGroupIsSaidSo() throws {
-        let outside = Account(id: "out", label: "Outside", groupID: "other")
-        let inside = Account(id: "in", label: "Inside", groupID: "g")
+        let outside = Account(id: "out", label: "Outside", groupIDs: ["other"])
+        let inside = Account(id: "in", label: "Inside", groupIDs: ["g"])
         let settings = Settings(directoryBindings: [DirectoryBinding(path: "/src",
                                                                      accountID: "out")])
         let result = try choose([outside, inside], settings: settings, group: "g",

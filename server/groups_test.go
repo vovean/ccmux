@@ -44,8 +44,7 @@ func TestGroupsSurviveARestartAndOneNameIsOneGroup(t *testing.T) {
 		t.Fatalf("a second create of the same name must answer with the first group: %+v %+v",
 			first, again)
 	}
-	if _, err := registry.UpdateAccount(account.ID,
-		AccountUpdate{GroupID: ptr(first.ID)}); err != nil {
+	if _, err := registry.SetMembership(first.ID, account.ID, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -55,41 +54,89 @@ func TestGroupsSurviveARestartAndOneNameIsOneGroup(t *testing.T) {
 	if err != nil || len(groups) != 1 || groups[0] != first {
 		t.Fatalf("groups did not survive a restart: %v %v", groups, err)
 	}
-	if restarted.List()[0].Group() != first.ID {
+	if !restarted.List()[0].InGroup(first.ID) {
 		t.Fatal("membership did not survive a restart")
 	}
 }
 
-func TestDeletingAGroupLeavesItsAccountsUngrouped(t *testing.T) {
+func TestDeletingAGroupTakesItOffItsAccountsOnly(t *testing.T) {
 	registry, _ := newTestRegistry(t, subscriptionStub())
 	account := adoptSubscription(t, registry, AdoptRequest{})
-	group, _ := registry.CreateGroup("Project")
-	_, _ = registry.UpdateAccount(account.ID, AccountUpdate{GroupID: ptr(group.ID)})
+	project, _ := registry.CreateGroup("Project")
+	personal, _ := registry.CreateGroup("Personal")
+	_, _ = registry.SetMembership(project.ID, account.ID, true)
+	_, _ = registry.SetMembership(personal.ID, account.ID, true)
 
-	if err := registry.DeleteGroup(group.ID); err != nil {
+	if err := registry.DeleteGroup(project.ID); err != nil {
 		t.Fatal(err)
 	}
-	if registry.List()[0].GroupID != nil {
-		t.Fatal("an account kept pointing at a deleted group")
+	if got := registry.List()[0].Groups(); len(got) != 1 || got[0] != personal.ID {
+		t.Fatalf("deleting one group must leave the other: %v", got)
 	}
-	if err := registry.DeleteGroup(group.ID); err == nil {
+	_ = registry.DeleteGroup(personal.ID)
+	if after := registry.List()[0]; after.GroupIDs != nil || after.GroupID != nil {
+		t.Fatalf("an account kept pointing at a deleted group: %+v", after)
+	}
+	if err := registry.DeleteGroup(project.ID); err == nil {
 		t.Fatal("deleting an unknown group must fail")
 	}
 }
 
-func TestMovingAnAccountTakesItOutOfItsOldGroup(t *testing.T) {
+func TestAnAccountCanBeInSeveralGroups(t *testing.T) {
 	registry, _ := newTestRegistry(t, subscriptionStub())
 	account := adoptSubscription(t, registry, AdoptRequest{})
 	a, _ := registry.CreateGroup("A")
 	b, _ := registry.CreateGroup("B")
-	_, _ = registry.UpdateAccount(account.ID, AccountUpdate{GroupID: ptr(a.ID)})
+	_, _ = registry.SetMembership(a.ID, account.ID, true)
+	both, err := registry.SetMembership(b.ID, account.ID, true)
+	if err != nil || !both.InGroup(a.ID) || !both.InGroup(b.ID) {
+		t.Fatalf("adding a second group must keep the first: %+v %v", both, err)
+	}
+	again, _ := registry.SetMembership(b.ID, account.ID, true)
+	if len(again.GroupIDs) != 2 {
+		t.Fatalf("adding twice must not list a group twice: %v", again.GroupIDs)
+	}
+	left, _ := registry.SetMembership(a.ID, account.ID, false)
+	if left.InGroup(a.ID) || !left.InGroup(b.ID) || *left.GroupID != b.ID {
+		t.Fatalf("removing one group must leave the other, in both spellings: %+v", left)
+	}
+	if _, err := registry.SetMembership("no-such-group", account.ID, true); err == nil {
+		t.Fatal("an unknown group must be refused")
+	}
+}
+
+// What a 1.19 client sends: one group, meaning "this group and no other".
+func TestALegacyGroupUpdateReplacesEveryMembership(t *testing.T) {
+	registry, _ := newTestRegistry(t, subscriptionStub())
+	account := adoptSubscription(t, registry, AdoptRequest{})
+	a, _ := registry.CreateGroup("A")
+	b, _ := registry.CreateGroup("B")
+	_, _ = registry.SetMembership(a.ID, account.ID, true)
+	_, _ = registry.SetMembership(b.ID, account.ID, true)
 	moved, err := registry.UpdateAccount(account.ID, AccountUpdate{GroupID: ptr(b.ID)})
-	if err != nil || moved.Group() != b.ID {
+	if err != nil || len(moved.Groups()) != 1 || !moved.InGroup(b.ID) {
 		t.Fatalf("move failed: %+v %v", moved, err)
 	}
 	cleared, _ := registry.UpdateAccount(account.ID, AccountUpdate{GroupID: ptr("")})
-	if cleared.GroupID != nil {
+	if len(cleared.Groups()) != 0 {
 		t.Fatal("an empty group id must ungroup the account")
+	}
+}
+
+// accounts.json written by 1.19 has only groupID; a 1.19 client reads only groupID.
+func TestAFileFromBeforeGroupSetsKeepsItsMembership(t *testing.T) {
+	registry, secrets := newTestRegistry(t, subscriptionStub())
+	adoptSubscription(t, registry, AdoptRequest{})
+	group, _ := registry.CreateGroup("Cossacks")
+	stored := registry.List()
+	stored[0].GroupIDs, stored[0].GroupID = nil, ptr(group.ID)
+	saveJSONFile(registry.accountsFile, stored)
+
+	restarted := NewRegistry(registry.client, secrets, registry.accountsFile)
+	restarted.Bootstrap()
+	got := restarted.List()[0]
+	if len(got.GroupIDs) != 1 || got.GroupIDs[0] != group.ID || *got.GroupID != group.ID {
+		t.Fatalf("a 1.19 membership was not carried over: %+v", got)
 	}
 }
 
@@ -170,14 +217,14 @@ func TestAMembershipOfAGroupThatNoLongerExistsIsDropped(t *testing.T) {
 	registry, secrets := newTestRegistry(t, subscriptionStub())
 	account := adoptSubscription(t, registry, AdoptRequest{})
 	group, _ := registry.CreateGroup("Gone")
-	_, _ = registry.UpdateAccount(account.ID, AccountUpdate{GroupID: ptr(group.ID)})
+	_, _ = registry.SetMembership(group.ID, account.ID, true)
 	if err := os.Remove(filepath.Join(filepath.Dir(registry.accountsFile), "groups.json")); err != nil {
 		t.Fatal(err)
 	}
 
 	restarted := NewRegistry(registry.client, secrets, registry.accountsFile)
 	restarted.Bootstrap()
-	if restarted.List()[0].GroupID != nil {
+	if after := restarted.List()[0]; after.GroupIDs != nil || after.GroupID != nil {
 		t.Fatal("an account kept a group nobody can see")
 	}
 }
@@ -258,9 +305,28 @@ func TestEndToEndGroupsAndAccountSettings(t *testing.T) {
 	var updated RemoteAccount
 	decode(authed(t, client, http.MethodPatch, server.URL+"/v1/accounts/"+account.ID,
 		`{"groupID":"`+group.ID+`","inRotation":false}`), http.StatusOK, &updated)
-	if updated.Group() != group.ID || updated.IsInRotation() {
+	if !updated.InGroup(group.ID) || updated.IsInRotation() {
 		t.Fatalf("update not applied: %+v", updated)
 	}
+	var second SubscriptionGroup
+	decode(authed(t, client, http.MethodPost, server.URL+"/v1/groups",
+		`{"name":"Personal"}`), http.StatusOK, &second)
+	var joined RemoteAccount
+	decode(authed(t, client, http.MethodPut,
+		server.URL+"/v1/groups/"+second.ID+"/accounts/"+account.ID, ""), http.StatusOK, &joined)
+	if !joined.InGroup(group.ID) || !joined.InGroup(second.ID) {
+		t.Fatalf("PUT must add a membership: %+v", joined)
+	}
+	var left RemoteAccount
+	decode(authed(t, client, http.MethodDelete,
+		server.URL+"/v1/groups/"+group.ID+"/accounts/"+account.ID, ""), http.StatusOK, &left)
+	if left.InGroup(group.ID) || !left.InGroup(second.ID) {
+		t.Fatalf("DELETE must remove only that membership: %+v", left)
+	}
+	decode(authed(t, client, http.MethodPut,
+		server.URL+"/v1/groups/"+second.ID+"/accounts/nobody", ""), http.StatusNotFound, nil)
+	decode(authed(t, client, http.MethodDelete, server.URL+"/v1/groups/"+second.ID, ""),
+		http.StatusNoContent, nil)
 	var listed GroupListResponse
 	decode(authed(t, client, http.MethodGet, server.URL+"/v1/groups", ""),
 		http.StatusOK, &listed)
@@ -337,5 +403,33 @@ func TestDeletingAnUnknownAccountIsANotFound(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestAMembershipChangeThatChangesNothingIsNotSaved(t *testing.T) {
+	registry, _ := newTestRegistry(t, subscriptionStub())
+	account := adoptSubscription(t, registry, AdoptRequest{})
+	group, _ := registry.CreateGroup("A")
+	_, _ = registry.SetMembership(group.ID, account.ID, true)
+	if err := os.Remove(registry.accountsFile); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.SetMembership(group.ID, account.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(registry.accountsFile); !os.IsNotExist(err) {
+		t.Fatal("a membership the account already had was saved again")
+	}
+}
+
+// Copies of an account share its slice; appending to what Groups returns must not write
+// into memory another copy is reading.
+func TestGroupsCanBeAppendedToWithoutTouchingTheAccount(t *testing.T) {
+	stored := make([]string, 1, 4)
+	stored[0] = "a"
+	account := RemoteAccount{GroupIDs: stored}
+	_ = append(account.Groups(), "b")
+	if stored[:2][1] == "b" {
+		t.Fatal("appending to Groups() wrote into the account's backing array")
 	}
 }

@@ -8,7 +8,12 @@ public enum AccountPool {
     /// the machines and launches that name their group. Membership is taken as the server
     /// sent it — a group this Mac has not loaded yet still reserves its accounts.
     public static func automatic(_ accounts: [Account], group: String?) -> [Account] {
-        accounts.filter { $0.isAutoAssignable && $0.groupID == group }
+        accounts.filter { $0.isAutoAssignable && isMember($0, of: group) }
+    }
+
+    /// In `group`, or in none when it is nil.
+    public static func isMember(_ account: Account, of group: String?) -> Bool {
+        group.map(account.groupIDs.contains) ?? account.groupIDs.isEmpty
     }
 
     /// The group a session chooses from: the one it was launched with, or this Mac's.

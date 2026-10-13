@@ -121,6 +121,9 @@ Each account's label, rotation, budget and group are the server's. A change is s
 server first and the Mac takes whatever it answers, so two Macs never disagree for longer
 than a sync. They are kept in `accounts.json` with the accounts, so rolling ccmuxd back to a
 build without groups drops them the next time it saves — set them again after upgrading back.
+An account in several groups also carries the first of them as `groupID`, which is all a
+1.19 client reads: to it the account still looks grouped, and a 1.19 build of ccmuxd keeps
+that one membership.
 
 An `accounts.json` or `groups.json` that cannot be read is refused rather than served as
 empty: reads answer 503 and nothing is written over the file until it is fixed and ccmuxd
@@ -159,12 +162,15 @@ POST   /login/start                → loginID, authorizeURL, state
 POST   /login/finish               → the account
 POST   /accounts/adopt             credentialJSON or apiKey
 DELETE /accounts/{id}
-PATCH  /accounts/{id}              label, inRotation, monthlyBudgetUSD, groupID
+PATCH  /accounts/{id}              label, inRotation, monthlyBudgetUSD (a 1.19 client's
+                                   groupID replaces every membership)
 POST   /accounts/{id}/usage/refresh  poll now (at most once per account per 2 min)
-GET    /groups                     → [{id, name}]; membership is the account's groupID
+GET    /groups                     → [{id, name}]; membership is the account's groupIDs
+PUT    /groups/{id}/accounts/{account}   add the account to the group, keeping its others
+DELETE /groups/{id}/accounts/{account}   take it out of that group only
 POST   /groups                     {name} → the group, or the existing one of that name
 PATCH  /groups/{id}                {name}
-DELETE /groups/{id}                its accounts become ungrouped
+DELETE /groups/{id}                off every account; one in no other group is ungrouped
 GET    /hooks                      the hook set every Mac should run
 PUT    /hooks                      publish a whole set
 POST   /hooks/activation           register or withdraw one script

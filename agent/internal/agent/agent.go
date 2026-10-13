@@ -419,11 +419,17 @@ func (a *Agent) unchosenLocked(account wire.RemoteAccount, groupID string) strin
 	if !account.IsInRotation() {
 		return "out of rotation"
 	}
-	in := a.groupOfLocked(account)
-	switch {
-	case groupID == "" && in != "":
-		return "in group " + a.groupNameLocked(in)
-	case groupID != "" && in != groupID:
+	// Membership as the server sent it: it clears memberships when it deletes a group, so
+	// an id it still sends keeps the account reserved even before this box lists it.
+	switch groups := account.Groups(); {
+	case groupID == "" && len(groups) > 0:
+		names := a.groupNamesLocked(groups)
+		noun := "group "
+		if len(names) > 1 {
+			noun = "groups "
+		}
+		return "in " + noun + strings.Join(names, ", ")
+	case groupID != "" && !account.InGroup(groupID):
 		return "not in group " + a.groupNameLocked(groupID)
 	}
 	return ""
@@ -440,10 +446,12 @@ func (a *Agent) refuseUnchosenLocked(account wire.RemoteAccount, groupID string)
 	return nil
 }
 
-// groupOfLocked takes the membership as the server sent it: the server clears memberships
-// when it deletes a group, so an id it still sends keeps the account reserved.
-func (a *Agent) groupOfLocked(account wire.RemoteAccount) string {
-	return account.Group()
+func (a *Agent) groupNamesLocked(ids []string) []string {
+	names := make([]string, 0, len(ids))
+	for _, id := range ids {
+		names = append(names, a.groupNameLocked(id))
+	}
+	return names
 }
 
 func (a *Agent) groupNameLocked(id string) string {

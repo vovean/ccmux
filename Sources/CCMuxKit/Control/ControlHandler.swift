@@ -73,7 +73,7 @@ public final class ControlHandler {
                     id: account.id, label: account.displayName, email: account.email,
                     health: account.health.rawValue, windows: snapshot?.windows ?? [],
                     usageAge: snapshot.map { now.timeIntervalSince($0.fetchedAt) },
-                    groupName: store.groupName(account.groupID),
+                    groupNames: account.groupIDs.map { store.groupName($0) ?? $0 },
                     inRotation: account.inRotation)
             }
             let sessionInfos = store.sessions.all().map { record in

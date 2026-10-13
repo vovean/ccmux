@@ -485,7 +485,10 @@ enum CLI {
         for account in status.accounts {
             var flag = account.health == "needsRelogin" ? " [needs re-login]" : ""
             if account.inRotation == false { flag += " [out of rotation]" }
-            if let group = account.groupName { flag += " [group \(group)]" }
+            if let groups = account.groupNames, !groups.isEmpty {
+                flag += " [\(groups.count == 1 ? "group" : "groups") "
+                    + groups.joined(separator: ", ") + "]"
+            }
             let age = account.usageAge.map { "  (\(Int($0))s ago)" } ?? ""
             print("\(account.label)\(flag)\(age)")
             for window in account.windows {

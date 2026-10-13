@@ -166,8 +166,7 @@ struct LiveServerTests {
             #expect(renamed.name == name + "-renamed")
             #expect(try await client.groups().contains(renamed))
             await #expect(throws: ServerClientError.self) {
-                _ = try await client.updateAccount("no-such-account",
-                                                   AccountUpdate(groupID: created.id))
+                _ = try await client.setMembership(created.id, of: "no-such-account", member: true)
             }
         } catch {
             try? await client.deleteGroup(created.id)

@@ -384,7 +384,7 @@ public extension Engine {
         if serverSupportsGroups {
             account.inRotation = remote.inRotation ?? true
             account.monthlyBudgetUSD = remote.monthlyBudgetUSD
-            account.groupID = remote.groupID
+            account.groupIDs = remote.groups
         }
         if account != before { store.accounts.upsert(account) }
     }
@@ -489,22 +489,38 @@ public extension Engine {
 
     // MARK: - Groups
 
-    func setGroup(_ groupID: String?, for accountID: String) async {
-        guard sharesSettings(accountID) else {
-            raise("Groups live on the account server, and this account is not on it yet.",
+    func setMembership(_ groupID: String, member: Bool, for accountID: String) async {
+        guard let client = groupEditor(for: accountID) else { return }
+        do {
+            mirror(try await client.setMembership(groupID, of: accountID, member: member))
+        } catch {
+            raise("Could not change the account's groups: " + error.localizedDescription,
                   level: .warning)
-            return
         }
-        await updateShared(accountID, AccountUpdate(groupID: groupID ?? ""))
     }
 
-    /// Creates the group, or finds it if the name is taken, and moves the account in.
+    /// The client to edit this account's groups through, or nil after saying why not.
+    private func groupEditor(for accountID: String) -> ServerClient? {
+        guard serverSupportsGroupSets else {
+            raise("This ccmuxd keeps one group per account. Upgrade it to put an account "
+                  + "in several.", level: .warning)
+            return nil
+        }
+        guard sharesSettings(accountID), let client = serverClient else {
+            raise("Groups live on the account server, and this account is not on it yet.",
+                  level: .warning)
+            return nil
+        }
+        return client
+    }
+
+    /// Creates the group, or finds it if the name is taken, and adds the account to it.
     func createGroup(named name: String, adding accountID: String) async {
-        guard serverSupportsGroups, let client = serverClient else { return }
+        guard let client = groupEditor(for: accountID) else { return }
         do {
             let group = try await client.createGroup(named: name)
             await reloadGroups(client, including: group)
-            await setGroup(group.id, for: accountID)
+            mirror(try await client.setMembership(group.id, of: accountID, member: true))
         } catch {
             raise("Could not create the group: \(error.localizedDescription)", level: .warning)
         }
@@ -519,7 +535,7 @@ public extension Engine {
         }
     }
 
-    /// Its accounts become ungrouped on every machine.
+    /// Taken off every account on every machine; one in no other group becomes ungrouped.
     func deleteGroup(_ groupID: String) async {
         guard let client = serverClient else { return }
         do {
@@ -529,8 +545,8 @@ public extension Engine {
             raise("Could not delete the group: \(error.localizedDescription)", level: .warning)
             return
         }
-        for account in store.accounts.all() where account.groupID == groupID {
-            store.accounts.mutate(account.id) { $0.groupID = nil }
+        for account in store.accounts.all() where account.groupIDs.contains(groupID) {
+            store.accounts.mutate(account.id) { $0.groupIDs.removeAll { $0 == groupID } }
         }
         store.groups.replaceAll(store.groups.all().filter { $0.id != groupID })
         await reloadGroups(client)

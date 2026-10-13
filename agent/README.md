@@ -103,7 +103,7 @@ form:
   "accounts": [
     {
       "id": "…", "label": "Work", "kind": "subscription", "health": "ok",
-      "sessions": 1, "usageAgeSeconds": 4, "group": "League",
+      "sessions": 1, "usageAgeSeconds": 4, "groups": ["League"],
       "windows": [{"kind": "weeklyAll", "label": "Weekly", "percent": 80}]
     },
     {
@@ -124,8 +124,8 @@ form:
 
 `status` is `"busy"`, `"idle"` or `"waiting"`, inferred from whether the session's proxy
 has carried a request in the last ninety seconds. `health` is `"ok"`, `"needsRelogin"` or
-`"unknown"`. `percent` is how much of a window is **used**. `group` is absent for a box,
-account or session in no group. `unusable` says why the box never uses an account;
+`"unknown"`. `percent` is how much of a window is **used**. `group` (a box's or a
+session's) and `groups` (an account's) are absent when there are none. `unusable` says why the box never uses an account;
 `notAutomatic` says why ccmux will not pick one on its own, though `--account` still can.
 
 Useful before dispatching work:
@@ -329,8 +329,8 @@ an account out of rotation or outside the group, but never an excluded one.
 
 ## Groups
 
-ccmuxd sorts accounts into named groups, each account in at most one. A box draws from
-one group:
+ccmuxd sorts accounts into named groups; an account can be in several, and then serves
+every box limited to any of them. A box draws from one group:
 
 ```yaml
 agent:
@@ -341,7 +341,7 @@ agent:
   and in the `retryAfter` of exit 75. When the whole group is spent, the run waits for the
   group rather than spilling into other accounts.
 - Without it, runs get only accounts in **no** group. A grouped account is reserved for the
-  boxes limited to its group.
+  boxes limited to its groups.
 - `ccmux run --group <name>` overrides the box's group for one run. The session keeps it
   for its whole life, through a restart of the agent.
 - A group is named by its name, ignoring case, or by its id.

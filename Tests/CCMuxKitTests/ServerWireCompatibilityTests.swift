@@ -52,6 +52,8 @@ struct ServerWireCompatibilityTests {
         #expect(subscription.kind == .subscription)
         #expect(subscription.health == .ok)
         #expect(subscription.inRotation == false)
+        #expect(subscription.groupIDs == ["group-1", "group-2"])
+        // What a 1.19 client reads.
         #expect(subscription.groupID == "group-1")
 
         let key = response.accounts[1]
@@ -67,13 +69,15 @@ struct ServerWireCompatibilityTests {
     @Test func theGroupListDecodes() throws {
         let response = try Self.decode(GroupListResponse.self, "groups.json")
         #expect(response.apiVersion == ServerAPI.version)
-        #expect(response.groups == [SubscriptionGroup(id: "group-1", name: "Project")])
+        #expect(response.groups == [SubscriptionGroup(id: "group-1", name: "Project"),
+                                    SubscriptionGroup(id: "group-2", name: "Personal")])
     }
 
     @Test func theServerAdvertisesGroupsAndRefresh() throws {
         let features = try Self.decode(HealthResponse.self, "health.json").features ?? []
         #expect(features.contains(ServerAPI.groupsFeature))
         #expect(features.contains(ServerAPI.usageRefreshFeature))
+        #expect(features.contains(ServerAPI.groupSetsFeature))
     }
 
     @Test func aSubscriptionGrantDecodes() throws {

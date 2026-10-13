@@ -169,7 +169,7 @@ public final class SessionManager: SessionRouting {
         switch DirectoryBindings.launch(
             cwd: cwd, settings: settings,
             // A binding narrows within the group and never reaches out of it.
-            accounts: bindable.filter { $0.groupID == group }, usage: usage,
+            accounts: bindable.filter { AccountPool.isMember($0, of: group) }, usage: usage,
             policy: policy, excluding: excluded,
             applyingLaunchFloors: applyingLaunchFloors) {
         case .use(let bound):
@@ -178,7 +178,7 @@ public final class SessionManager: SessionRouting {
             let elsewhere = try unbound()
             let bound = cwd.flatMap { DirectoryBindings.match($0, in: settings.directoryBindings) }
                 .flatMap { binding in bindable.first { $0.id == binding.accountID } }
-            if let bound, bound.groupID != group {
+            if let bound, !AccountPool.isMember(bound, of: group) {
                 return (elsewhere.choice, "this directory is bound to \(bound.displayName), "
                         + "outside this session's group — connectors approved there will "
                         + "not be available")

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"ccmuxagent/internal/config"
 	"ccmuxagent/internal/control"
@@ -54,13 +55,13 @@ func printStatus(out io.Writer, raw any) error {
 		Group        string `json:"group"`
 		GroupError   string `json:"groupError"`
 		Accounts     []struct {
-			Label        string  `json:"label"`
-			Health       string  `json:"health"`
-			Sessions     int     `json:"sessions"`
-			Group        string  `json:"group"`
-			Unusable     string  `json:"unusable"`
-			NotAutomatic string  `json:"notAutomatic"`
-			AgeSecs      float64 `json:"usageAgeSeconds"`
+			Label        string   `json:"label"`
+			Health       string   `json:"health"`
+			Sessions     int      `json:"sessions"`
+			Groups       []string `json:"groups"`
+			Unusable     string   `json:"unusable"`
+			NotAutomatic string   `json:"notAutomatic"`
+			AgeSecs      float64  `json:"usageAgeSeconds"`
 			Windows      []struct {
 				Label   string  `json:"label"`
 				Percent float64 `json:"percent"`
@@ -100,8 +101,12 @@ func printStatus(out io.Writer, raw any) error {
 			fmt.Fprintf(out, "  %s %.0f%%", window.Label, window.Percent)
 		}
 		fmt.Fprintf(out, "  (%.0fs old)\n", account.AgeSecs)
-		if account.Group != "" {
-			fmt.Fprintf(out, "  %-28s group: %s\n", "", account.Group)
+		if len(account.Groups) > 0 {
+			label := "group"
+			if len(account.Groups) > 1 {
+				label = "groups"
+			}
+			fmt.Fprintf(out, "  %-28s %s: %s\n", "", label, strings.Join(account.Groups, ", "))
 		}
 		switch {
 		case account.Unusable != "":

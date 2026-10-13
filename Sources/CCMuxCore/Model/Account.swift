@@ -70,8 +70,8 @@ public struct Account: Codable, Equatable, Identifiable {
     public var spendThisMonth: MonthlySpend?
     /// Advisory only: crossing it warns, it never blocks a request.
     public var monthlyBudgetUSD: Double?
-    /// The subscription group, mirrored from the account server.
-    public var groupID: String?
+    /// The subscription groups it is in, mirrored from the account server.
+    public var groupIDs: [String]
 
     public init(id: String, label: String, email: String? = nil,
                 organizationUUID: String? = nil, organizationName: String? = nil,
@@ -81,7 +81,7 @@ public struct Account: Codable, Equatable, Identifiable {
                 healthDetail: String? = nil, addedAt: Date = Date(),
                 kind: AccountKind = .subscription, inRotation: Bool = true,
                 spendLifetimeUSD: Double = 0, spendThisMonth: MonthlySpend? = nil,
-                monthlyBudgetUSD: Double? = nil, groupID: String? = nil) {
+                monthlyBudgetUSD: Double? = nil, groupIDs: [String] = []) {
         self.id = id
         self.label = label
         self.email = email
@@ -99,7 +99,7 @@ public struct Account: Codable, Equatable, Identifiable {
         self.spendLifetimeUSD = spendLifetimeUSD
         self.spendThisMonth = spendThisMonth
         self.monthlyBudgetUSD = monthlyBudgetUSD
-        self.groupID = groupID
+        self.groupIDs = groupIDs
     }
 
     /// Hand-written so an accounts file written before these fields existed still
@@ -125,8 +125,13 @@ public struct Account: Codable, Equatable, Identifiable {
                                                  forKey: .spendLifetimeUSD) ?? 0
         spendThisMonth = try c.decodeIfPresent(MonthlySpend.self, forKey: .spendThisMonth)
         monthlyBudgetUSD = try c.decodeIfPresent(Double.self, forKey: .monthlyBudgetUSD)
-        groupID = try c.decodeIfPresent(String.self, forKey: .groupID)
+        // 1.19 wrote a single group.
+        groupIDs = try c.decodeIfPresent([String].self, forKey: .groupIDs)
+            ?? (try decoder.container(keyedBy: LegacyKeys.self)
+                .decodeIfPresent(String.self, forKey: .groupID)).map { [$0] } ?? []
     }
+
+    private enum LegacyKeys: String, CodingKey { case groupID }
 
     public var displayName: String {
         label.isEmpty ? (email ?? id) : label

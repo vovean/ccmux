@@ -8,7 +8,8 @@
     "hook-activation",
     "usage-series",
     "groups",
-    "usage-refresh"
+    "usage-refresh",
+    "group-sets"
   ],
   "machines": 2
 }

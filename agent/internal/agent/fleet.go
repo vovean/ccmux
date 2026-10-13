@@ -140,7 +140,7 @@ type AccountStatus struct {
 	Windows  []wire.UsageWindow `json:"windows"`
 	AgeSecs  float64            `json:"usageAgeSeconds"`
 	Sessions int                `json:"sessions"`
-	Group    string             `json:"group,omitempty"`
+	Groups   []string           `json:"groups,omitempty"`
 	// Why this box will not send work to the account; absent when it will.
 	Unusable string `json:"unusable,omitempty"`
 	// Why ccmux will not pick it for a run on its own, though --account still can.
@@ -188,8 +188,8 @@ func (a *Agent) Status() Status {
 			Kind: account.Kind, Health: account.Health, Sessions: perAccount[account.ID],
 			Unusable:     a.unusableLocked(account),
 			NotAutomatic: a.unchosenLocked(account, groupID)}
-		if in := a.groupOfLocked(account); in != "" {
-			entry.Group = a.groupNameLocked(in)
+		if groups := account.Groups(); len(groups) > 0 {
+			entry.Groups = a.groupNamesLocked(groups)
 		}
 		if snapshot, known := a.usage[account.ID]; known {
 			entry.Windows = snapshot.Windows

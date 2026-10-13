@@ -24,6 +24,7 @@ public final class Engine: ObservableObject {
     /// Whether the server shares groups and account settings, and polls usage on demand.
     @Published public internal(set) var serverSupportsGroups = false
     @Published public internal(set) var serverSupportsUsageRefresh = false
+    @Published public internal(set) var serverSupportsGroupSets = false
     /// Not published: a background round must not redraw the window; Settings re-reads
     /// it on its own clock.
     public internal(set) var lastAccountSync: Date?

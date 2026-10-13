@@ -497,6 +497,7 @@ public extension Engine {
         serverSupportsUsageSeries = features.contains(ServerAPI.usageSeriesFeature)
         serverSupportsGroups = features.contains(ServerAPI.groupsFeature)
         serverSupportsUsageRefresh = features.contains(ServerAPI.usageRefreshFeature)
+        serverSupportsGroupSets = features.contains(ServerAPI.groupSetsFeature)
     }
 
     func clearHookState() {
@@ -551,12 +552,13 @@ public extension Engine {
         // Groups are the server's. Kept, a restriction would go on choosing from a group
         // nothing can change any more.
         store.groups.replaceAll([])
-        for account in store.accounts.all() where account.groupID != nil {
-            store.accounts.mutate(account.id) { $0.groupID = nil }
+        for account in store.accounts.all() where !account.groupIDs.isEmpty {
+            store.accounts.mutate(account.id) { $0.groupIDs = [] }
         }
         updateSettings { $0.restrictedGroupID = nil }
         serverSupportsGroups = false
         serverSupportsUsageRefresh = false
+        serverSupportsGroupSets = false
         serverFeaturesKnown = false
         lastAccountSync = nil
         // Reset with the rest: left set, the Settings panel keeps telling the user the

@@ -12,6 +12,10 @@
       "kind": "subscription",
       "health": "ok",
       "inRotation": false,
+      "groupIDs": [
+        "group-1",
+        "group-2"
+      ],
       "groupID": "group-1"
     },
     {

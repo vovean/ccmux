@@ -146,6 +146,20 @@ func NewMux(registry *Registry, machines *MachineStore, hooks *HookStore,
 			writeJSON(w, http.StatusOK, group)
 		}))
 
+	membership := func(member bool) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			account, err := registry.SetMembership(r.PathValue("id"), r.PathValue("account"),
+				member)
+			if err != nil {
+				writeRegistryError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, account)
+		}
+	}
+	mux.Handle("PUT "+apiPrefix+"/groups/{id}/accounts/{account}", guard(membership(true)))
+	mux.Handle("DELETE "+apiPrefix+"/groups/{id}/accounts/{account}", guard(membership(false)))
+
 	mux.Handle("DELETE "+apiPrefix+"/groups/{id}",
 		guard(func(w http.ResponseWriter, r *http.Request) {
 			if err := registry.DeleteGroup(r.PathValue("id")); err != nil {

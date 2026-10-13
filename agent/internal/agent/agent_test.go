@@ -670,7 +670,7 @@ func subscription(id string, group string) wire.RemoteAccount {
 	account := wire.RemoteAccount{ID: id, Label: id, Kind: wire.KindSubscription,
 		Health: wire.HealthOK}
 	if group != "" {
-		account.GroupID = wire.Ptr(group)
+		account.SetGroups(strings.Split(group, ","))
 	}
 	return account
 }
@@ -1123,5 +1123,35 @@ func TestTheControlReplyEchoesTheGroupThatApplied(t *testing.T) {
 		Op: control.OpNewSession, PID: os.Getpid()})
 	if !response.OK || response.Session.Group != "" {
 		t.Errorf("a run with no group echoed %+v", response.Session)
+	}
+}
+
+// An account in two groups serves boxes limited to either, and stays off a box with none.
+func TestAnAccountInTwoGroupsServesBothAndNotTheUngroupedPool(t *testing.T) {
+	for _, tc := range []struct {
+		group string
+		want  string
+	}{{"League", "shared"}, {"Fast", "shared"}, {"", "free"}} {
+		fake := newFakeServer(t)
+		groupedPool(fake)
+		fake.accounts = append(fake.accounts, subscription("shared", "g-league,g-fast"))
+		fake.usage["shared"] = []wire.UsageWindow{window(wire.WindowWeeklyAll, 95, "")}
+		fake.tokens["shared"] = "tok-shared"
+		daemon := newAgentWith(t, fake, func(c *config.Config) { c.Agent.Group = tc.group })
+
+		started, err := daemon.NewSession(context.Background(), Launch{PID: os.Getpid()})
+		if err != nil {
+			t.Fatalf("group %q: %v", tc.group, err)
+		}
+		if started.AccountID != tc.want {
+			t.Errorf("group %q started on %q, want %q", tc.group, started.AccountID, tc.want)
+		}
+	}
+	fake := newFakeServer(t)
+	groupedPool(fake)
+	fake.accounts = append(fake.accounts, subscription("shared", "g-league,g-fast"))
+	daemon := newAgent(t, fake)
+	if why := notAutomatic(daemon)["shared"]; why != "in groups League, Fast" {
+		t.Errorf("an unrestricted box should say why: %q", why)
 	}
 }

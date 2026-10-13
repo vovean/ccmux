@@ -29,6 +29,8 @@ public enum ServerAPI {
     public static let groupsFeature = "groups"
     /// A poll on demand for an account the server holds, floored per account.
     public static let usageRefreshFeature = "usage-refresh"
+    /// An account in several groups, and a route per membership.
+    public static let groupSetsFeature = "group-sets"
 
     /// How often a client re-reads what the server can do. Re-read rather than answered
     /// once, because the answer changes when ccmuxd is upgraded — and long, because that
@@ -56,6 +58,8 @@ public struct RemoteAccount: Codable, Equatable, Identifiable, Sendable {
     /// Shared settings, the same on every client. Nil `inRotation` means in rotation.
     public var inRotation: Bool?
     public var monthlyBudgetUSD: Double?
+    public var groupIDs: [String]?
+    /// The first of `groupIDs`, all a server before group sets sends.
     public var groupID: String?
 
     public init(id: String, label: String, email: String? = nil,
@@ -64,7 +68,7 @@ public struct RemoteAccount: Codable, Equatable, Identifiable, Sendable {
                 kind: AccountKind = .subscription, health: AccountHealth = .unknown,
                 healthDetail: String? = nil, apiKeyFingerprint: String? = nil,
                 inRotation: Bool? = nil, monthlyBudgetUSD: Double? = nil,
-                groupID: String? = nil) {
+                groupIDs: [String]? = nil, groupID: String? = nil) {
         self.id = id
         self.label = label
         self.email = email
@@ -78,14 +82,18 @@ public struct RemoteAccount: Codable, Equatable, Identifiable, Sendable {
         self.apiKeyFingerprint = apiKeyFingerprint
         self.inRotation = inRotation
         self.monthlyBudgetUSD = monthlyBudgetUSD
+        self.groupIDs = groupIDs
         self.groupID = groupID
     }
 
     public var displayName: String { label.isEmpty ? (email ?? id) : label }
+
+    /// Either spelling, so a server before group sets keeps its one membership.
+    public var groups: [String] { groupIDs ?? groupID.map { [$0] } ?? [] }
 }
 
-/// A named set of accounts. Membership is `RemoteAccount.groupID`, so an account is in at
-/// most one group.
+/// A named set of accounts. Membership is `RemoteAccount.groupIDs`; an account can be in
+/// several.
 public struct SubscriptionGroup: Codable, Equatable, Hashable, Identifiable, Sendable {
     public var id: String
     public var name: String
@@ -112,20 +120,18 @@ public struct GroupRequest: Codable, Equatable, Sendable {
     public init(name: String) { self.name = name }
 }
 
-/// Shared settings to change. Absent fields are left alone; an empty `groupID` takes the
-/// account out of its group, and a budget of zero clears it.
+/// Shared settings to change. Absent fields are left alone, and a budget of zero clears
+/// it. Group membership has routes of its own.
 public struct AccountUpdate: Codable, Equatable, Sendable {
     public var label: String?
     public var inRotation: Bool?
     public var monthlyBudgetUSD: Double?
-    public var groupID: String?
 
     public init(label: String? = nil, inRotation: Bool? = nil,
-                monthlyBudgetUSD: Double? = nil, groupID: String? = nil) {
+                monthlyBudgetUSD: Double? = nil) {
         self.label = label
         self.inRotation = inRotation
         self.monthlyBudgetUSD = monthlyBudgetUSD
-        self.groupID = groupID
     }
 
     /// The server's own rules, for an account it does not hold.
@@ -135,7 +141,6 @@ public struct AccountUpdate: Codable, Equatable, Sendable {
         if let monthlyBudgetUSD {
             account.monthlyBudgetUSD = monthlyBudgetUSD > 0 ? monthlyBudgetUSD : nil
         }
-        if let groupID { account.groupID = groupID.isEmpty ? nil : groupID }
     }
 }
 
