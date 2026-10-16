@@ -24,6 +24,22 @@ type stubRouter struct {
 	failovers []string
 	triedSeen []map[string]bool
 	refused   []string
+	fresh     *Assignment
+	freshBy   map[string]Assignment
+	redraws   []string
+}
+
+func (s *stubRouter) Redraw(accountID string, refused Credential) (Assignment, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.redraws = append(s.redraws, accountID+":"+refused.OAuthToken)
+	if fresh, ok := s.freshBy[accountID]; ok {
+		return fresh, true
+	}
+	if s.fresh == nil {
+		return Assignment{}, false
+	}
+	return *s.fresh, true
 }
 
 func (s *stubRouter) OrganizationRefused(accountID string) {
@@ -522,5 +538,111 @@ func TestAForbiddenThatIsNotTheRefusalIsRelayedWhole(t *testing.T) {
 				t.Errorf("reported %v", router.refused)
 			}
 		})
+	}
+}
+
+// ccmuxd rotates a lineage ten minutes before its token expires, which revokes the token a
+// running session was still sending. A fresh draw serves the request instead of ending it.
+func TestARevokedTokenIsRedrawnAndTheRequestReplayedOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		fresh     *Assignment
+		wantCode  int
+		wantDraws int
+	}{
+		{"a fresher token serves it", &Assignment{AccountID: "gmail",
+			Credential: OAuth("token-new")}, http.StatusOK, 1},
+		{"no fresher token, the 401 goes through", nil, http.StatusUnauthorized, 1},
+		{"refused again after the redraw, no second redraw", &Assignment{AccountID: "gmail",
+			Credential: OAuth("token-also-revoked")}, http.StatusUnauthorized, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			router := &stubRouter{
+				assign: Assignment{AccountID: "gmail", Credential: OAuth("token-old")},
+				fresh:  tc.fresh,
+			}
+			h := start(t, router, func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer token-new" {
+					w.WriteHeader(http.StatusUnauthorized)
+					_, _ = w.Write([]byte(`{"type":"error","error":{"type":` +
+						`"authentication_error","message":"OAuth token revoked"}}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			})
+			response := h.post(t, "/v1/messages", messageBody, nil)
+			_, _ = io.ReadAll(response.Body)
+			if response.StatusCode != tc.wantCode {
+				t.Fatalf("Claude Code saw %d", response.StatusCode)
+			}
+			router.mu.Lock()
+			defer router.mu.Unlock()
+			if len(router.redraws) != tc.wantDraws || router.redraws[0] != "gmail:token-old" {
+				t.Errorf("redraws %v", router.redraws)
+			}
+		})
+	}
+}
+
+func TestAnAPIKeyRefusedAs401IsNotRedrawn(t *testing.T) {
+	router := &stubRouter{assign: Assignment{AccountID: "key", Credential: Key("sk-ant-x")},
+		fresh: &Assignment{AccountID: "key", Credential: Key("sk-ant-y")}}
+	h := start(t, router, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	response := h.post(t, "/v1/messages", messageBody, nil)
+	_, _ = io.ReadAll(response.Body)
+	router.mu.Lock()
+	defer router.mu.Unlock()
+	if response.StatusCode != http.StatusUnauthorized || len(router.redraws) != 0 {
+		t.Fatalf("status %d, redraws %v", response.StatusCode, router.redraws)
+	}
+}
+
+// One redraw per account, not per request: a request that fails over to a second account
+// holding a stale token gets that one redrawn too.
+func TestEachAccountARequestReachesGetsItsOwnRedraw(t *testing.T) {
+	router := &stubRouter{
+		assign: Assignment{AccountID: "a", Credential: OAuth("a-old")},
+		next:   &Assignment{AccountID: "c", Credential: OAuth("c-old")},
+		freshBy: map[string]Assignment{
+			"a": {AccountID: "a", Credential: OAuth("a-new")},
+			"c": {AccountID: "c", Credential: OAuth("c-new")},
+		},
+	}
+	h := start(t, router, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Header.Get("Authorization") {
+		case "Bearer a-new":
+			w.Header().Set("anthropic-ratelimit-unified-status", "rejected")
+			w.WriteHeader(http.StatusTooManyRequests)
+		case "Bearer c-new":
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		default:
+			w.WriteHeader(http.StatusUnauthorized)
+		}
+	})
+	response := h.post(t, "/v1/messages", messageBody, nil)
+	_, _ = io.ReadAll(response.Body)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("Claude Code saw %d", response.StatusCode)
+	}
+}
+
+// A body too big to replay cannot be retried, but the next request should not carry the
+// refused token too.
+func TestARefusedRequestTooBigToReplayStillRedraws(t *testing.T) {
+	router := &stubRouter{assign: Assignment{AccountID: "a", Credential: OAuth("a-old")},
+		fresh: &Assignment{AccountID: "a", Credential: OAuth("a-new")}}
+	h := start(t, router, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	huge := `{"model":"claude-opus-5","pad":"` + strings.Repeat("x", maxRetryBody+1) + `"}`
+	response := h.post(t, "/v1/messages", huge, nil)
+	_, _ = io.ReadAll(response.Body)
+	router.mu.Lock()
+	defer router.mu.Unlock()
+	if response.StatusCode != http.StatusUnauthorized || len(router.redraws) != 1 {
+		t.Fatalf("status %d, redraws %v", response.StatusCode, router.redraws)
 	}
 }

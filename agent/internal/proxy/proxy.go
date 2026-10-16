@@ -73,6 +73,10 @@ type Router interface {
 	// OrganizationRefused records that this account's organisation refuses OAuth outright,
 	// so nothing is sent to it or its organisation again. Failover is asked separately.
 	OrganizationRefused(accountID string)
+
+	// Redraw replaces an OAuth token Anthropic answered 401 to, or false when there is no
+	// newer one. ccmuxd rotating a lineage revokes the token a session is still sending.
+	Redraw(accountID string, refused Credential) (Assignment, bool)
 }
 
 // Observation is one attempt's news about the account that served it, reported as soon
@@ -200,6 +204,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tried := map[string]bool{}
+	redrawn := map[string]bool{}
 	for {
 		response, err := p.send(r, body, streamed, assignment)
 		if err != nil {
@@ -217,6 +222,21 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				SessionID: p.options.SessionID, AccountID: assignment.AccountID,
 				Model: model, StatusCode: response.StatusCode, Headers: rateLimit,
 			})
+		}
+
+		// Once per account: a token that fails again after a fresh draw is not stale. A
+		// body too big to replay still redraws, so the next request carries the new one.
+		if response.StatusCode == http.StatusUnauthorized && !redrawn[assignment.AccountID] &&
+			assignment.Credential.OAuthToken != "" {
+			redrawn[assignment.AccountID] = true
+			next, ok := p.options.Router.Redraw(assignment.AccountID, assignment.Credential)
+			if ok && retryable {
+				response.Body.Close()
+				p.options.Log("session %s: %s's token was refused, retrying with a fresh one",
+					p.options.SessionID, assignment.AccountID)
+				assignment = next
+				continue
+			}
 		}
 
 		headers := relayableHeaders(response.Header)

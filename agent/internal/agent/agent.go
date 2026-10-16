@@ -39,6 +39,12 @@ const (
 type live struct {
 	record Session
 	proxy  *proxy.Proxy
+	// Held across writing the namespace and recording it, and by a move of the seeded
+	// account, so a renewal's rewrite cannot interleave with either.
+	seedMu sync.Mutex
+	// Grant.seedKey of what the namespace holds; empty after a restart, so the first
+	// renewal rewrites it.
+	written string
 }
 
 type Agent struct {
@@ -542,11 +548,21 @@ func (a *Agent) usageCopy() (accounts []wire.RemoteAccount, usage map[string]*ru
 // finish, while the renewal tick deliberately asks for far more so the draw happens
 // before a run is anywhere near losing its credential.
 func (a *Agent) grantFor(ctx context.Context, accountID string, wanted time.Duration) (Grant, error) {
-	now := a.now()
+	return a.grantReplacing(ctx, accountID, wanted, "")
+}
+
+// grantReplacing is grantFor that will not settle for `refused`, a token Anthropic has
+// turned down. The cached grant stays until a draw replaces it.
+func (a *Agent) grantReplacing(ctx context.Context, accountID string, wanted time.Duration,
+	refused string) (Grant, error) {
+	keep := func(grant Grant, cached bool) bool {
+		return cached && grant.usable(a.now().Add(wanted)) &&
+			(refused == "" || grant.AccessToken != refused)
+	}
 	a.mu.Lock()
 	grant, cached := a.grants[accountID]
 	a.mu.Unlock()
-	if cached && grant.usable(now.Add(wanted)) {
+	if keep(grant, cached) {
 		return grant, nil
 	}
 
@@ -556,7 +572,7 @@ func (a *Agent) grantFor(ctx context.Context, accountID string, wanted time.Dura
 	a.mu.Lock()
 	grant, cached = a.grants[accountID]
 	a.mu.Unlock()
-	if cached && grant.usable(a.now().Add(wanted)) {
+	if keep(grant, cached) {
 		return grant, nil
 	}
 
@@ -582,39 +598,77 @@ func assignmentFor(grant Grant) proxy.Assignment {
 		Credential: proxy.OAuth(grant.AccessToken)}
 }
 
-// renewGrants refreshes the credential of every account a live session is seeded on, and
-// rewrites that session's namespace. Claude Code watches the file's modification time and
-// re-reads it, so a run outliving its access token keeps going.
+// renewGrants renews every account a live session is seeded on or served by — ccmuxd's
+// rotation revokes a token, failover accounts included — and rewrites each namespace that
+// does not hold the current credential. Claude Code re-reads the file when it changes.
 func (a *Agent) renewGrants(ctx context.Context) {
-	now := a.now()
 	a.mu.Lock()
-	seeded := map[string][]string{}
-	for id, session := range a.sessions {
-		// Keyed on the seeded account, not the serving one: a rotation moves who serves
-		// the session, and reseeding from that would drag its identity across an
-		// organisation boundary.
-		seeded[session.record.SeededAccountID] = append(seeded[session.record.SeededAccountID], id)
+	held := map[string]bool{}
+	for _, session := range a.sessions {
+		held[session.record.SeededAccountID] = true
+		held[session.record.AccountID] = true
 	}
 	a.mu.Unlock()
 
-	for accountID, sessionIDs := range seeded {
-		a.mu.Lock()
-		grant, cached := a.grants[accountID]
-		a.mu.Unlock()
-		if cached && grant.usable(now.Add(renewBefore)) {
-			continue
-		}
-		fresh, err := a.grantFor(ctx, accountID, renewBefore)
+	for accountID := range held {
+		grant, err := a.grantFor(ctx, accountID, renewBefore)
 		if err != nil {
 			a.log("could not renew the credential for %s: %v", accountID, err)
 			continue
 		}
-		for _, sessionID := range sessionIDs {
-			if err := Seed(a.config.Namespace(sessionID), fresh, a.now()); err != nil {
-				a.log("could not reseed session %s: %v", sessionID, err)
-			}
+		a.reseedOn(grant)
+	}
+}
+
+// reseedOn rewrites the namespaces of the sessions seeded on the grant's account. Seeded,
+// not served: a rotation moves who serves a session, and reseeding from that would drag
+// its identity across an organisation boundary.
+func (a *Agent) reseedOn(grant Grant) {
+	a.mu.Lock()
+	var ids []string
+	for id, session := range a.sessions {
+		if session.record.SeededAccountID == grant.AccountID {
+			ids = append(ids, id)
 		}
 	}
+	a.mu.Unlock()
+	for _, id := range ids {
+		if err := a.reseedIfStale(id, grant); err != nil {
+			a.log("could not reseed session %s: %v", id, err)
+		}
+	}
+}
+
+// reseedIfStale writes the grant unless the namespace already holds it, or the session has
+// ended or moved to another account since it was listed.
+func (a *Agent) reseedIfStale(sessionID string, grant Grant) error {
+	a.mu.Lock()
+	session, ok := a.sessions[sessionID]
+	a.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	session.seedMu.Lock()
+	defer session.seedMu.Unlock()
+	a.mu.Lock()
+	current := a.sessions[sessionID] == session &&
+		session.record.SeededAccountID == grant.AccountID && session.written != grant.seedKey()
+	a.mu.Unlock()
+	if !current {
+		return nil
+	}
+	return a.writeSeed(sessionID, session, grant)
+}
+
+// writeSeed writes the namespace and records what it holds. The caller holds seedMu.
+func (a *Agent) writeSeed(sessionID string, session *live, grant Grant) error {
+	if err := Seed(a.config.Namespace(sessionID), grant, a.now()); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	session.written = grant.seedKey()
+	a.mu.Unlock()
+	return nil
 }
 
 func (a *Agent) reap() {
@@ -636,9 +690,12 @@ func (a *Agent) reap() {
 		if session.proxy != nil {
 			_ = session.proxy.Close()
 		}
+		// After any reseed already writing, which then finds the session gone.
+		session.seedMu.Lock()
 		if err := Clear(a.config.Namespace(session.record.ID)); err != nil {
 			a.log("%v", err)
 		}
+		session.seedMu.Unlock()
 		a.log("session %s ended", session.record.ID)
 	}
 	if err := a.store.Save(sessions); err != nil {

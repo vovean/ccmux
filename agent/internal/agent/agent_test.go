@@ -18,6 +18,7 @@ import (
 	"ccmuxagent/internal/client"
 	"ccmuxagent/internal/config"
 	"ccmuxagent/internal/control"
+	"ccmuxagent/internal/proxy"
 	"ccmuxd/wire"
 )
 
@@ -29,6 +30,7 @@ type fakeServer struct {
 	groups   []wire.SubscriptionGroup
 	usage    map[string][]wire.UsageWindow
 	tokens   map[string]string
+	plans    map[string]string
 	features []string
 	// The groups route answers 503 while this is set, as ccmuxd does when it cannot read
 	// its groups file.
@@ -44,6 +46,7 @@ func newFakeServer(t *testing.T) *fakeServer {
 	fake := &fakeServer{
 		usage:    map[string][]wire.UsageWindow{},
 		tokens:   map[string]string{},
+		plans:    map[string]string{},
 		draws:    map[string]int{},
 		features: []string{"sessions", "hooks", "usage-series", wire.FeatureGroups},
 	}
@@ -89,9 +92,13 @@ func newFakeServer(t *testing.T) *fakeServer {
 			return
 		}
 		life := 3600.0
+		plan, known := fake.plans[id]
+		if !known {
+			plan = "team"
+		}
 		write(w, wire.TokenGrant{AccountID: id, Kind: wire.KindSubscription,
 			AccessToken: &token, ExpiresIn: &life,
-			SubscriptionType: wire.Ptr("team"), Scopes: []string{"user:inference"}})
+			SubscriptionType: wire.Ptr(plan), Scopes: []string{"user:inference"}})
 	})
 	mux.HandleFunc("POST /v1/machines/{id}/sessions", func(w http.ResponseWriter, _ *http.Request) {
 		write(w, wire.SessionsResponse{APIVersion: wire.APIVersion})
@@ -1153,5 +1160,185 @@ func TestAnAccountInTwoGroupsServesBothAndNotTheUngroupedPool(t *testing.T) {
 	daemon := newAgent(t, fake)
 	if why := notAutomatic(daemon)["shared"]; why != "in groups League, Fast" {
 		t.Errorf("an unrestricted box should say why: %q", why)
+	}
+}
+
+// rotatedPool is two accounts in different organisations, with a session launched on "a"
+// and rotated to "b": seeded on one, served by the other.
+func rotatedPool(t *testing.T) (*fakeServer, *Agent, Started) {
+	t.Helper()
+	fake := newFakeServer(t)
+	emcd, win := "org-emcd", "org-1win"
+	fake.accounts = []wire.RemoteAccount{
+		{ID: "a", Label: "A", Kind: wire.KindSubscription, Health: wire.HealthOK,
+			OrganizationUUID: &emcd},
+		{ID: "b", Label: "B", Kind: wire.KindSubscription, Health: wire.HealthOK,
+			OrganizationUUID: &win},
+	}
+	fake.usage["a"] = []wire.UsageWindow{window(wire.WindowWeeklyAll, 80, "")}
+	fake.usage["b"] = []wire.UsageWindow{window(wire.WindowWeeklyAll, 5, "")}
+	fake.tokens["a"], fake.tokens["b"] = "tok-a", "tok-b"
+	daemon := newAgent(t, fake)
+	started, err := daemon.NewSession(context.Background(),
+		Launch{Model: "claude-opus-5", PID: os.Getpid()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := daemon.Assign(context.Background(), started.SessionID, "b", Rotation); err != nil {
+		t.Fatal(err)
+	}
+	return fake, daemon, started
+}
+
+// ccmuxd rotates a lineage ten minutes before its token expires, and that revokes the
+// token. The account a session failed over to has to be renewed by then too, not only the
+// one it launched on, or it keeps sending the revoked token for nine minutes.
+func TestAnAccountASessionFailedOverToIsRenewedAhead(t *testing.T) {
+	fake, daemon, _ := rotatedPool(t)
+	before := fake.draws["b"]
+	daemon.now = func() time.Time { return noon.Add(55 * time.Minute) }
+	daemon.renewGrants(context.Background())
+	if fake.draws["b"] != before+1 {
+		t.Fatalf("the serving account was not renewed ahead: %d draws, had %d",
+			fake.draws["b"], before)
+	}
+}
+
+func TestARefusedTokenIsRedrawnOnceForEveryRequestRefusedWithIt(t *testing.T) {
+	fake, daemon, _ := rotatedPool(t)
+	fake.tokens["b"] = "tok-b2"
+	before := fake.draws["b"]
+
+	fresh, ok := daemon.Redraw("b", proxy.OAuth("tok-b"))
+	if !ok || fresh.Credential.OAuthToken != "tok-b2" {
+		t.Fatalf("redraw gave %+v %v", fresh, ok)
+	}
+	again, ok := daemon.Redraw("b", proxy.OAuth("tok-b"))
+	if !ok || again.Credential.OAuthToken != "tok-b2" || fake.draws["b"] != before+1 {
+		t.Fatalf("a second refusal of the same token drew again: %d draws", fake.draws["b"])
+	}
+	if _, ok := daemon.Redraw("b", proxy.OAuth("tok-b2")); ok {
+		t.Fatal("ccmuxd handing back the refused token must not count as a fresh one")
+	}
+}
+
+// A token redrawn between renewals must still reach the namespace, or Claude Code reads
+// the old token's expiry and decides it is logged out.
+func TestANamespaceIsReseededWhenItsAccountsTokenChanges(t *testing.T) {
+	fake, daemon, started := rotatedPool(t)
+	fake.tokens["a"] = "tok-a2"
+	if _, ok := daemon.Redraw("a", proxy.OAuth("tok-a")); !ok {
+		t.Fatal("expected a fresh token")
+	}
+	daemon.renewGrants(context.Background())
+	data, _ := os.ReadFile(filepath.Join(started.NamespaceDir, ".credentials.json"))
+	if !containsToken(data, "tok-a2") {
+		t.Fatalf("the namespace kept the refused token: %s", data)
+	}
+}
+
+// The token written is tracked per session: a newer session seeded with the new token must
+// not make an older one on the same account look current.
+func TestEverySessionOnAnAccountGetsItsNewToken(t *testing.T) {
+	fake := newFakeServer(t)
+	fake.accounts = []wire.RemoteAccount{{ID: "a", Label: "A", Kind: wire.KindSubscription,
+		Health: wire.HealthOK}}
+	fake.usage["a"] = []wire.UsageWindow{window(wire.WindowWeeklyAll, 5, "")}
+	fake.tokens["a"] = "tok-a"
+	daemon := newAgent(t, fake)
+	older, err := daemon.NewSession(context.Background(),
+		Launch{Model: "claude-opus-5", PID: os.Getpid()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.tokens["a"] = "tok-a2"
+	if _, ok := daemon.Redraw("a", proxy.OAuth("tok-a")); !ok {
+		t.Fatal("expected a fresh token")
+	}
+	if _, err := daemon.NewSession(context.Background(),
+		Launch{Model: "claude-opus-5", PID: os.Getpid()}); err != nil {
+		t.Fatal(err)
+	}
+	daemon.renewGrants(context.Background())
+	data, _ := os.ReadFile(filepath.Join(older.NamespaceDir, ".credentials.json"))
+	if !containsToken(data, "tok-a2") {
+		t.Fatalf("the older session kept the revoked token: %s", data)
+	}
+}
+
+// After a restart nothing is known about what each namespace holds, so the first renewal
+// rewrites them all.
+func TestARecoveredSessionIsReseededOnTheFirstRenewal(t *testing.T) {
+	fake, daemon, started := rotatedPool(t)
+	fake.tokens["a"] = "tok-a2"
+	daemon = restart(t, daemon)
+	daemon.mu.Lock()
+	daemon.grants["a"] = Grant{AccountID: "a", Kind: wire.KindSubscription,
+		AccessToken: "tok-a2", ExpiresAt: noon.Add(time.Hour)}
+	daemon.mu.Unlock()
+	daemon.renewGrants(context.Background())
+	data, _ := os.ReadFile(filepath.Join(started.NamespaceDir, ".credentials.json"))
+	if !containsToken(data, "tok-a2") {
+		t.Fatalf("a recovered session kept its old token: %s", data)
+	}
+}
+
+// ccmuxd unreachable at the moment of a 401: the cached token is the best there is, and
+// dropping it would fail every session on the account until ccmuxd answers.
+func TestAFailedRedrawKeepsTheCachedToken(t *testing.T) {
+	fake, daemon, _ := rotatedPool(t)
+	delete(fake.tokens, "b")
+	if _, ok := daemon.Redraw("b", proxy.OAuth("tok-b")); ok {
+		t.Fatal("a failed draw cannot be a fresh token")
+	}
+	daemon.mu.Lock()
+	cached := daemon.grants["b"].AccessToken
+	daemon.mu.Unlock()
+	if cached != "tok-b" {
+		t.Fatalf("the cached token was dropped: %q", cached)
+	}
+}
+
+func TestAnAPIKeyIsNeverRedrawn(t *testing.T) {
+	_, daemon, _ := rotatedPool(t)
+	if _, ok := daemon.Redraw("b", proxy.Key("sk-ant-x")); ok {
+		t.Fatal("an API key has no token to redraw")
+	}
+}
+
+// A session whose refusal was relayed re-reads its file at once; it has to find the new
+// token there, not wait for the next renewal tick.
+func TestARedrawRewritesTheSessionsSeededOnThatAccountAtOnce(t *testing.T) {
+	fake, daemon, started := rotatedPool(t)
+	fake.tokens["a"] = "tok-a2"
+	if _, ok := daemon.Redraw("a", proxy.OAuth("tok-a")); !ok {
+		t.Fatal("expected a fresh token")
+	}
+	data, _ := os.ReadFile(filepath.Join(started.NamespaceDir, ".credentials.json"))
+	if !containsToken(data, "tok-a2") {
+		t.Fatalf("the namespace still holds the refused token: %s", data)
+	}
+}
+
+// A plan ccmuxd learns later arrives under the same token, and Claude Code reads a missing
+// plan as no entitlement at all.
+func TestAPlanArrivingUnderTheSameTokenIsWritten(t *testing.T) {
+	fake := newFakeServer(t)
+	fake.accounts = []wire.RemoteAccount{{ID: "a", Label: "A", Kind: wire.KindSubscription,
+		Health: wire.HealthOK}}
+	fake.usage["a"] = []wire.UsageWindow{window(wire.WindowWeeklyAll, 5, "")}
+	fake.tokens["a"], fake.plans["a"] = "tok-a", ""
+	daemon := newAgent(t, fake)
+	started, err := daemon.NewSession(context.Background(),
+		Launch{Model: "claude-opus-5", PID: os.Getpid()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.plans["a"] = "max"
+	daemon.now = func() time.Time { return noon.Add(55 * time.Minute) }
+	daemon.renewGrants(context.Background())
+	data, _ := os.ReadFile(filepath.Join(started.NamespaceDir, ".credentials.json"))
+	if !strings.Contains(string(data), `"max"`) {
+		t.Fatalf("the plan never reached the namespace: %s", data)
 	}
 }

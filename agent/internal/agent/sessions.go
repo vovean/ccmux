@@ -147,6 +147,7 @@ func (a *Agent) NewSession(ctx context.Context, launch Launch) (Started, error) 
 		_ = Clear(namespace)
 		return Started{}, err
 	}
+	bound.written = grant.seedKey()
 
 	a.mu.Lock()
 	a.sessions[bound.record.ID] = bound
@@ -187,9 +188,11 @@ func (a *Agent) EndSession(id string) error {
 	if session.proxy != nil {
 		_ = session.proxy.Close()
 	}
+	session.seedMu.Lock()
 	if err := Clear(a.config.Namespace(id)); err != nil {
 		a.log("%v", err)
 	}
+	session.seedMu.Unlock()
 	if err := a.store.Save(sessions); err != nil {
 		a.log("could not write the sessions file: %v", err)
 	}
@@ -280,18 +283,21 @@ func (a *Agent) Assign(ctx context.Context, sessionID, accountID string, reason 
 	}
 	a.mu.Unlock()
 
+	// Held from the write to the record move, so a renewal cannot put the old account's
+	// token back in between.
+	session.seedMu.Lock()
+	defer session.seedMu.Unlock()
 	if reseed {
 		// Written before the record moves: a namespace holding the old credential with a
 		// record naming the new account is the state a restart cannot tell apart from a
 		// rotation, and it would re-seed across the boundary on recovery.
-		if err := Seed(a.config.Namespace(sessionID), grant, a.now()); err != nil {
+		if err := a.writeSeed(sessionID, session, grant); err != nil {
 			return fmt.Errorf("could not reseed the session: %w", err)
 		}
 	}
 
 	a.mu.Lock()
-	session, ok = a.sessions[sessionID]
-	if !ok {
+	if a.sessions[sessionID] != session {
 		a.mu.Unlock()
 		// It ended while we were seeding; take the credential back off the disk.
 		if clearErr := Clear(a.config.Namespace(sessionID)); clearErr != nil {
@@ -330,6 +336,28 @@ func (a *Agent) Assignment(sessionID string) (proxy.Assignment, bool) {
 		a.log("session %s: no credential for %s: %v", sessionID, accountID, err)
 		return proxy.Assignment{}, false
 	}
+	return assignmentFor(grant), true
+}
+
+// Redraw draws a token other than the refused one. Requests refused together draw once and
+// the rest take what that draw brought; a failed draw leaves the cached grant in place.
+func (a *Agent) Redraw(accountID string, refused proxy.Credential) (proxy.Assignment, bool) {
+	if refused.OAuthToken == "" {
+		return proxy.Assignment{}, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	grant, err := a.grantReplacing(ctx, accountID, minGrantLife, refused.OAuthToken)
+	if err != nil {
+		a.log("could not redraw the credential for %s: %v", accountID, err)
+		return proxy.Assignment{}, false
+	}
+	if grant.AccessToken == refused.OAuthToken {
+		return proxy.Assignment{}, false
+	}
+	// Now rather than at the next renewal: a session whose refusal was relayed re-reads
+	// its file, and finding the revoked token there it would decide it is logged out.
+	a.reseedOn(grant)
 	return assignmentFor(grant), true
 }
 

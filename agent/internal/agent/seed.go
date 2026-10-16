@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"ccmuxd/wire"
@@ -32,6 +33,13 @@ type Grant struct {
 	SubscriptionType string
 	RateLimitTier    string
 	Scopes           []string
+}
+
+// seedKey is what a namespace written from this grant holds that Claude Code reads: a plan
+// can arrive later under the same token, and that has to be written too.
+func (g Grant) seedKey() string {
+	return strings.Join([]string{g.AccessToken, g.SubscriptionType, g.RateLimitTier,
+		strings.Join(g.Scopes, " ")}, "\x00")
 }
 
 func grantFromWire(g wire.TokenGrant, now time.Time) Grant {
